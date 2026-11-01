@@ -32,6 +32,22 @@ def package(path, name, contents):
 
 
 class UpgradeTrustTests(unittest.TestCase):
+    def test_previous_release_urls_preserve_legacy_and_current_tag_identities(self):
+        self.assertEqual(self.upgrade.sls_release_url('0.1.8-beta','slsmassnotifyserver-0.1.8-beta.tgz'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.8-beta/slsmassnotifyserver-0.1.8-beta.tgz')
+        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/release-manifest.json')
+        for version,name in (('../0.1.9','release-manifest.json'),('0.1.9-beta','slsmassnotifyserver-0.1.8-beta.tgz'),('0.1.9-beta','../key')):
+            with self.subTest(version=version,name=name),self.assertRaises(self.upgrade.UpgradeError):
+                self.upgrade.sls_release_url(version,name)
+
+    def test_v_tag_upgrade_download_retains_bounds_and_canonical_package_name(self):
+        url='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        response=io.BytesIO(b'fixture');response.headers={'Content-Length':'7'}
+        destination=self.root/'vtag-download.tgz'
+        with patch.object(self.upgrade.urllib.request,'build_opener') as client:
+            client.return_value.open.return_value=response
+            self.upgrade.download(url,destination,16)
+        self.assertEqual(destination.read_bytes(),b'fixture')
+
     def test_signed_stock_verifies_with_long_persistent_recovery_workspace(self):
         workspace=self.root/('persistent-recovery-'+'x'*100);workspace.mkdir(mode=0o700)
         expected={'module.xml':b'<module><rawname>framework</rawname><version>17.0.5</version></module>',

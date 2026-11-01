@@ -2,6 +2,9 @@
 """Exercise the standalone pre-execution verifier with a private ephemeral key."""
 import hashlib
 import importlib.util
+import io
+import re
+import tarfile
 import shutil
 import json
 import os
@@ -178,6 +181,46 @@ class VerifiedBootstrap(unittest.TestCase):
         result=subprocess.run(['bash','-c',command,'fixture',str(fixture),str(self.path),self.version],capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertTrue(self.marker.exists())
+        self.marker.unlink()
+        module_helper=helper.with_name('sls_module_trust.py')
+        previous_module=module_helper.read_bytes() if module_helper.exists() else None
+        previous_module_mode=module_helper.stat().st_mode&0o777 if module_helper.exists() else None
+        module_source=(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_module_trust.py').read_text()
+        module_source,count=re.subn(r'^PUBLIC_KEY = .*$',lambda unused:'PUBLIC_KEY = '+repr((self.path/'publisher.pem').read_bytes()),module_source,flags=re.M)
+        self.assertEqual(count,1)
+        module_helper.write_text(module_source);module_helper.chmod(0o600)
+        def restore_module():
+            if previous_module is None:module_helper.unlink(missing_ok=True)
+            else:module_helper.write_bytes(previous_module);module_helper.chmod(previous_module_mode)
+        self.addCleanup(restore_module)
+        spec=importlib.util.spec_from_file_location('bootstrap_legacy_module_fixture',module_helper)
+        module_trust=importlib.util.module_from_spec(spec);spec.loader.exec_module(module_trust)
+        legacy_path=Path(tempfile.mkdtemp(prefix='sls-bootstrap-legacy-',dir='/run'))
+        self.addCleanup(shutil.rmtree,legacy_path)
+        def enroll(version):
+            archive=self.path/('slsmassnotifyserver-'+version+'.tgz')
+            body=('<module><rawname>slsmassnotifyserver</rawname><version>'+version+'</version></module>').encode()
+            with tarfile.open(archive,'w:gz') as tar:
+                info=tarfile.TarInfo('slsmassnotifyserver/module.xml');info.size=len(body);tar.addfile(info,io.BytesIO(body))
+            manifest=dict(self.manifest,version=version,tag='slsmassnotifyserver-'+version,package=archive.name,package_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+            path=self.path/'previous-manifest.json';signature=self.path/'previous-manifest.sig';path.write_text(json.dumps(manifest))
+            subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(self.path/'private.pem'),'-in',str(path),'-out',str(signature)],check=True,capture_output=True)
+            module_trust.enroll_sls(legacy_path,archive,path,signature)
+        enroll('0.1.8-beta')
+        legacy_fixture=self.path/'legacy-bootstrap.sh'
+        diagnostic=fixture.read_text().replace(str(policy_path),str(legacy_path))
+        diagnostic=diagnostic.replace('except (OSError,ValueError,TypeError,KeyError,RuntimeError):','except (OSError,ValueError,TypeError,KeyError,RuntimeError) as error:\n    print(type(error).__name__,str(error),file=sys.stderr)')
+        legacy_fixture.write_text(diagnostic)
+        legacy_args=['bash','-c','source "$1"; bootstrap_verify "$2" "$3" "v$3" 1 && /bin/bash "$2/install_release.sh"','fixture',str(legacy_fixture),str(self.path),self.version]
+        result=subprocess.run(legacy_args,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,'Approved legacy installation was rejected: '+result.stderr)
+        self.assertTrue(self.marker.exists());self.marker.unlink()
+        self.assertFalse((legacy_path/'publisher-trust.json').exists())
+        enroll('0.1.9-beta')
+        result=subprocess.run(legacy_args,capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0,'Modern installation silently lost its publisher policy')
+        self.assertFalse(self.marker.exists())
+        self.assertFalse((legacy_path/'publisher-trust.json').exists())
 
     def test_tampered_installer_is_not_executed(self):
         self.sign()
@@ -229,7 +272,7 @@ class VerifiedBootstrap(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_initialized_or_interrupted_policy_is_not_bypassed(self):
-        for name in ("publisher-trust.json", "release-trust.initialized"):
+        for name in ("publisher-trust.json", "release-trust.initialized", "slsmassnotifyserver.active.json"):
             with self.subTest(name=name):
                 trust = self.path / name
                 trust.write_text("preserved")

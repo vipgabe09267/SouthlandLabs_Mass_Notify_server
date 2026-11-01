@@ -20,7 +20,7 @@ For a fresh installation, run the following command as root:
 cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
   https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '2bc923928a8adbc30e8fb6fffc99c717d0a1269a702ddca3e523b7b70635fd5e  sls-bootstrap.sh' | sha256sum --check &&
+printf '%s\n' '05fac61c24f70ad59a75418450e83d0c769254d4237fa096f47765e560284900  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
@@ -30,7 +30,7 @@ For an existing **0.1.8-beta or 0.1.9-beta installation**, use this one-time ver
 cd "$(mktemp -d /tmp/sls-upgrade.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
   https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '2bc923928a8adbc30e8fb6fffc99c717d0a1269a702ddca3e523b7b70635fd5e  sls-bootstrap.sh' | sha256sum --check &&
+printf '%s\n' '05fac61c24f70ad59a75418450e83d0c769254d4237fa096f47765e560284900  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
 ```
 

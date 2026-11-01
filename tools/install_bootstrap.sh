@@ -47,6 +47,29 @@ def unique(pairs):
         if name in value:raise ValueError('Duplicate manifest field')
         value[name]=item
     return value
+def installed_helper(name):
+    helper=Path('/usr/local/bin/sls_mass_notify')/(name+'.py')
+    for path in (helper,*helper.parents):
+        info=path.lstat()
+        expected=stat.S_ISREG if path==helper else stat.S_ISDIR
+        if not expected(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
+            raise ValueError('Installed publisher verifier is not root-protected')
+    fd=os.open(helper,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+    try:
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>262144:
+            raise ValueError('Installed publisher verifier is not bounded regular source')
+        with os.fdopen(os.dup(fd),'rb') as stream:source=stream.read(262145)
+        after=os.fstat(fd);named=helper.lstat()
+        identity=lambda x:(x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_nlink)
+        if len(source)!=before.st_size or identity(before)!=identity(after) or identity(after)!=identity(named):
+            raise ValueError('Installed publisher verifier changed')
+    finally:os.close(fd)
+    sys.dont_write_bytecode=True
+    trusted=types.ModuleType('sls_bootstrap_existing_authority');trusted.__file__=str(helper)
+    exec(compile(source,str(helper),'exec'),trusted.__dict__)
+    return trusted
+
 try:
     raw=(root/'release-manifest.json').read_bytes()
     if len(raw)>16384 or (root/'release-manifest.sig').stat().st_size!=64:raise ValueError('Manifest bounds')
@@ -59,37 +82,25 @@ try:
     if existing_mode not in ('0','1'):
         raise ValueError('Invalid existing-installation mode')
     if existing_mode == '1':
-        helper=Path('/usr/local/bin/sls_mass_notify/sls_release_trust.py')
         directory=Path('/var/lib/sls-mass-notify-trust')
-        for path in (helper,*helper.parents):
-            info=path.lstat()
-            expected=stat.S_ISREG if path==helper else stat.S_ISDIR
-            if not expected(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
-                raise ValueError('Installed publisher verifier is not root-protected')
-        fd=os.open(helper,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
-        try:
-            before=os.fstat(fd)
-            if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>262144:
-                raise ValueError('Installed publisher verifier is not bounded regular source')
-            with os.fdopen(os.dup(fd),'rb') as stream:source=stream.read(262145)
-            after=os.fstat(fd);named=helper.lstat()
-            identity=lambda x:(x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_nlink)
-            if len(source)!=before.st_size or identity(before)!=identity(after) or identity(after)!=identity(named):
-                raise ValueError('Installed publisher verifier changed')
-        finally:os.close(fd)
-        sys.dont_write_bytecode=True
-        trusted=types.ModuleType('sls_bootstrap_existing_authority');trusted.__file__=str(helper)
-        exec(compile(source,str(helper),'exec'),trusted.__dict__)
+        trusted=installed_helper('sls_release_trust')
         anchor=(root/'publisher.pem').read_bytes()
         state,initialized=trusted.TrustStore(directory,anchor).load()
         if not initialized:
-            raise ValueError('An upgrade requires an initialized publisher policy')
+            legacy=installed_helper('sls_module_trust')
+            inventory,generation=legacy.load(directory,'slsmassnotifyserver')
+            legacy_version=inventory.get('version','')
+            match=re.fullmatch(r'([0-9]+)\.([0-9]+)\.([0-9]+)(?:-beta)?',legacy_version)
+            if (not match or tuple(map(int,match.groups())) >= (0,1,9)
+                    or inventory.get('source',{}).get('kind')!='publisher-ed25519'):
+                raise ValueError('Existing publisher policy is missing; restore its protected records')
+            anchor=legacy.PUBLIC_KEY
         authorized=trusted.authenticate_manifest(raw,(root/'release-manifest.sig').read_bytes(),anchor=anchor,directory=directory)
         if authorized!=manifest:
             raise ValueError('Existing publisher policy did not authorize this manifest')
     installer=(root/'install_release.sh').read_bytes()
     if not 0<len(installer)<=1048576 or hashlib.sha256(installer).hexdigest()!=manifest['installer_sha256']:raise ValueError('Installer hash')
-except (OSError,ValueError,TypeError,KeyError):
+except (OSError,ValueError,TypeError,KeyError,RuntimeError):
     raise SystemExit('Signed release identity, validity or installer hash did not match. No installer was executed.') from None
 PY
 }
@@ -110,13 +121,13 @@ bootstrap_main() (
     fi
   elif [ "$#" -ne 0 ]; then printf 'Use an optional --lite or --standard profile, --inspect, or the exact --recover transaction path printed by the installer. No installer was executed.\n' >&2; exit 2; fi
   for command in /usr/bin/python3 /usr/bin/openssl /usr/bin/mktemp /usr/bin/timeout /bin/bash; do [ -x "$command" ] || { printf 'Missing bootstrap prerequisite: %s\n' "$command" >&2; exit 2; }; done
-  if [ -e /var/lib/sls-mass-notify-trust/publisher-trust.json ] || [ -L /var/lib/sls-mass-notify-trust/publisher-trust.json ] || [ -e /var/lib/sls-mass-notify-trust/release-trust.initialized ] || [ -L /var/lib/sls-mass-notify-trust/release-trust.initialized ]; then
+  if [ -e /var/lib/sls-mass-notify-trust/publisher-trust.json ] || [ -L /var/lib/sls-mass-notify-trust/publisher-trust.json ] || [ -e /var/lib/sls-mass-notify-trust/release-trust.initialized ] || [ -L /var/lib/sls-mass-notify-trust/release-trust.initialized ] || [ -e /var/lib/sls-mass-notify-trust/slsmassnotifyserver.active.json ] || [ -L /var/lib/sls-mass-notify-trust/slsmassnotifyserver.active.json ]; then
     if [ "$existing_mode" != 1 ]; then
-      printf 'This PBX has an explicit publisher trust policy. Use --upgrade to verify against that policy; the fresh bootstrap will not bypass it.\n' >&2; exit 2
+      printf 'This PBX has an explicit publisher trust policy or an approved existing installation. Use --upgrade to verify against that policy; the fresh bootstrap will not bypass it.\n' >&2; exit 2
     fi
   fi
-  if [ "$existing_mode" = 1 ] && [ ! -e /var/lib/sls-mass-notify-trust/publisher-trust.json ] && [ ! -L /var/lib/sls-mass-notify-trust/publisher-trust.json ] && [ ! -e /var/lib/sls-mass-notify-trust/release-trust.initialized ] && [ ! -L /var/lib/sls-mass-notify-trust/release-trust.initialized ]; then
-    printf 'An upgrade requires an initialized publisher policy. Preserve existing trust data; use the fresh command only on an installation without an established policy.\n' >&2; exit 2
+  if [ "$existing_mode" = 1 ] && [ ! -e /var/lib/sls-mass-notify-trust/publisher-trust.json ] && [ ! -L /var/lib/sls-mass-notify-trust/publisher-trust.json ] && [ ! -e /var/lib/sls-mass-notify-trust/release-trust.initialized ] && [ ! -L /var/lib/sls-mass-notify-trust/release-trust.initialized ] && [ ! -e /var/lib/sls-mass-notify-trust/slsmassnotifyserver.active.json ] && [ ! -L /var/lib/sls-mass-notify-trust/slsmassnotifyserver.active.json ]; then
+    printf 'An upgrade requires protected existing installation records. Preserve trust data; use the fresh command only on a host without an established installation.\n' >&2; exit 2
   fi
   /usr/bin/python3 -I - <<'PY'
 import os,stat

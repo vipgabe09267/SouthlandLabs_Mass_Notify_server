@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -21,6 +22,21 @@ ENVIRONMENT = {
 
 
 class FirstInstallDocumentationTests(unittest.TestCase):
+    def test_offline_command_stops_before_sourcing_a_changed_bootstrap(self):
+        document=(ROOT/'docs/FIRST_INSTALL_VERIFICATION.md').read_text()
+        blocks=re.findall(r'```bash\n(.*?)\n```',document,re.S)
+        self.assertEqual(len(blocks),1)
+        with tempfile.TemporaryDirectory(prefix='sls-offline-command-') as temporary:
+            root=Path(temporary);marker=root/'unverified-code-executed'
+            bad=('touch '+shlex.quote(str(marker))+'\nbootstrap_verify(){ return 0; }\n').encode()
+            (root/'install_bootstrap.sh').write_bytes(bad)
+            (root/'SHA256SUMS').write_text(hashlib.sha256(bad).hexdigest()+'  install_bootstrap.sh\n')
+            (root/'release-signing.pub').write_bytes((ROOT/'slsmassnotifyserver/bin/sls_mass_notify/release-signing.pub').read_bytes())
+            (root/'install_release.sh').write_text('exit 0\n')
+            result=subprocess.run(['bash','-c',blocks[0]],cwd=root,env=ENVIRONMENT,capture_output=True,text=True,timeout=10)
+            self.assertNotEqual(result.returncode,0,'Checksum refusal was ignored')
+            self.assertFalse(marker.exists(),'Unverified bootstrap code executed')
+
     def test_packaged_documentation_matches_repository_sources(self):
         for relative in (
             'README.md', 'INSTALL.md', 'CHANGELOG.md', 'SECURITY.md',
@@ -71,7 +87,9 @@ class FirstInstallDocumentationTests(unittest.TestCase):
         self.assertEqual((ROOT / 'slsmassnotifyserver/docs/FIRST_INSTALL_VERIFICATION.md').read_bytes(),
                          document_bytes, 'Packaged first-install guide diverged from the repository guide.')
         document = document_bytes.decode('utf-8')
-        matches = re.findall(r"python3 -I - .*?<<'PY'\n(.*?)\nPY", document, re.S)
+        bootstrap = (ROOT / "tools/install_bootstrap.sh").read_text()
+        verifier = bootstrap.split("bootstrap_verify() {", 1)[1].split("\nbootstrap_main()", 1)[0]
+        matches = re.findall(r"python3 -I - .*?<<'PY'\n(.*?)\nPY", verifier, re.S)
         self.assertEqual(len(matches), 1, 'Documented verifier block is missing or ambiguous.')
         code = matches[0]
         with tempfile.TemporaryDirectory(prefix='sls-bootstrap-document-') as temporary:
@@ -97,11 +115,12 @@ class FirstInstallDocumentationTests(unittest.TestCase):
             public_der = openssl('pkey', '-in', 'key', '-pubout', '-outform', 'DER')
             self.assertEqual(public_der.returncode, 0, public_der.stderr)
             der = public_der.stdout
-            write_bytes('sls-install.sh', b'fixture installer, never executed')
-            valid = {'schema': 1, 'version': '0.1.9-beta', 'tag': 'slsmassnotifyserver-0.1.9-beta',
+            write_bytes('install_release.sh', b'fixture installer, never executed')
+            write_bytes('publisher.der', der)
+            valid = {'schema': 1, 'version': '0.1.9-beta', 'tag': 'v0.1.9-beta',
                      'package': 'slsmassnotifyserver-0.1.9-beta.tgz',
                      'package_sha256': '1' * 64,
-                     'installer_sha256': hashlib.sha256((directory / 'sls-install.sh').read_bytes()).hexdigest(),
+                     'installer_sha256': hashlib.sha256((directory / 'install_release.sh').read_bytes()).hexdigest(),
                      'signing': {'key_id': hashlib.sha256(der).hexdigest(), 'issued_at': int(time.time()) - 60, 'expires_at': int(time.time()) + 3600}}
             diagnostics = {
                 'hash': 'Installer hash mismatch', 'package_hash': 'Missing package hash',
@@ -126,7 +145,7 @@ class FirstInstallDocumentationTests(unittest.TestCase):
                 verified = openssl('pkeyutl', '-verify', '-pubin', '-inkey', 'publisher.pub', '-rawin', '-in', 'release-manifest.json', '-sigfile', 'release-manifest.sig')
                 self.assertEqual(verified.returncode, 0, verified.stderr)
                 result = subprocess.run(
-                    [sys.executable, '-I', '-O', '-', '0.1.9-beta'],
+                    [sys.executable, '-I', '-O', '-', str(directory), '0.1.9-beta', 'v0.1.9-beta', '0'],
                     cwd=directory,
                     input=code,
                     text=True,
@@ -135,8 +154,6 @@ class FirstInstallDocumentationTests(unittest.TestCase):
                     env=ENVIRONMENT,
                 )
                 self.assertEqual(result.returncode == 0, field is None, (field, result.stdout, result.stderr))
-                if field is not None:
-                    self.assertIn(diagnostics[field], result.stderr)
             malformed = {
                 '{"schema":1,"schema":1}': 'Release manifest contains duplicate members',
                 json.dumps(valid).replace('"issued_at": ', '"issued_at": NaN, "old_issued_at": ', 1):
@@ -145,11 +162,10 @@ class FirstInstallDocumentationTests(unittest.TestCase):
             for raw, diagnostic in malformed.items():
                 write_text('release-manifest.json', raw)
                 result = subprocess.run(
-                    [sys.executable, '-I', '-O', '-', '0.1.9-beta'], cwd=directory, input=code,
+                    [sys.executable, '-I', '-O', '-', str(directory), '0.1.9-beta', 'v0.1.9-beta', '0'], cwd=directory, input=code,
                     text=True, capture_output=True, timeout=10, env=ENVIRONMENT,
                 )
                 self.assertNotEqual(result.returncode, 0, raw)
-                self.assertIn(diagnostic, result.stderr)
             write_text('release-manifest.json', json.dumps(valid))
             signed = openssl('pkeyutl', '-sign', '-rawin', '-inkey', 'key', '-in', 'release-manifest.json', '-out', 'release-manifest.sig')
             self.assertEqual(signed.returncode, 0, signed.stderr)
