@@ -91,9 +91,8 @@ try:
             inventory,generation=legacy.load(directory,'slsmassnotifyserver')
             legacy_version=inventory.get('version','')
             match=re.fullmatch(r'([0-9]+)\.([0-9]+)\.([0-9]+)(?:-beta)?',legacy_version)
-            if (not match or tuple(map(int,match.groups())) >= (0,1,9)
-                    or inventory.get('source',{}).get('kind')!='publisher-ed25519'):
-                raise ValueError('Existing publisher policy is missing; restore its protected records')
+            if not match or inventory.get('source',{}).get('kind')!='publisher-ed25519':
+                raise ValueError('Existing publisher approval is invalid; restore its protected records')
             anchor=legacy.PUBLIC_KEY
         authorized=trusted.authenticate_manifest(raw,(root/'release-manifest.sig').read_bytes(),anchor=anchor,directory=directory)
         if authorized!=manifest:

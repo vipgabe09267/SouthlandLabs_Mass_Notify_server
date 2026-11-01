@@ -218,9 +218,21 @@ class VerifiedBootstrap(unittest.TestCase):
         self.assertFalse((legacy_path/'publisher-trust.json').exists())
         enroll('0.1.9-beta')
         result=subprocess.run(legacy_args,capture_output=True,text=True,timeout=10)
-        self.assertNotEqual(result.returncode,0,'Modern installation silently lost its publisher policy')
-        self.assertFalse(self.marker.exists())
+        self.assertEqual(result.returncode,0,'Approved same-version installation with untouched factory policy was rejected: '+result.stderr)
+        self.assertTrue(self.marker.exists());self.marker.unlink()
         self.assertFalse((legacy_path/'publisher-trust.json').exists())
+        established=trust.TrustStore(legacy_path,(self.path/'publisher.pem').read_bytes())
+        established.initialize()
+        saved_state=established.state.read_bytes();saved_marker=established.marker.read_bytes()
+        for missing in (established.state,established.marker):
+            missing.unlink()
+            before={x.name:x.read_bytes() for x in legacy_path.iterdir() if x.is_file()}
+            result=subprocess.run(legacy_args,capture_output=True,text=True,timeout=10)
+            self.assertNotEqual(result.returncode,0,'Incomplete established publisher policy was bypassed')
+            self.assertFalse(self.marker.exists())
+            self.assertEqual({x.name:x.read_bytes() for x in legacy_path.iterdir() if x.is_file()},before)
+            established.state.write_bytes(saved_state);established.state.chmod(0o600)
+            established.marker.write_bytes(saved_marker);established.marker.chmod(0o600)
 
     def test_tampered_installer_is_not_executed(self):
         self.sign()

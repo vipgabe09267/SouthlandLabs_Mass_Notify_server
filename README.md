@@ -20,7 +20,7 @@ For a fresh installation, run the following command as root:
 cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
   https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '05fac61c24f70ad59a75418450e83d0c769254d4237fa096f47765e560284900  sls-bootstrap.sh' | sha256sum --check &&
+printf '%s\n' '5f4090223b0bdf9fb37ee05cfba73b165f0b6c597764130fb765122cc1818f91  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
@@ -30,11 +30,11 @@ For an existing **0.1.8-beta or 0.1.9-beta installation**, use this one-time ver
 cd "$(mktemp -d /tmp/sls-upgrade.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
   https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '05fac61c24f70ad59a75418450e83d0c769254d4237fa096f47765e560284900  sls-bootstrap.sh' | sha256sum --check &&
+printf '%s\n' '5f4090223b0bdf9fb37ee05cfba73b165f0b6c597764130fb765122cc1818f91  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
 ```
 
-`--upgrade` authenticates the installer against the PBX's existing publisher policy before execution. It preserves installed keys and revocations. The default fresh-install command refuses an initialized policy.
+`--upgrade` authenticates the installer against the PBX's existing publisher authority before execution. It enforces an initialized key policy when present, or the protected signed approval on installations using the original factory authority. It preserves keys and revocations. Incomplete established policies are refused. The default fresh-install command refuses established installation records.
 
 The GitHub tag is now `v0.1.9-beta`; the software version remains `0.1.9-beta`. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
 

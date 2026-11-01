@@ -16,9 +16,9 @@ DER SHA-256 fingerprint: `f2101cc51ecd5fdda7104d7e63ec166928c8985a0b3870f866849f
 
 ## Online installation
 
-Use the complete checksum-pinned command in [README](../README.md#install-or-update). The bootstrap's SHA-256 is `05fac61c24f70ad59a75418450e83d0c769254d4237fa096f47765e560284900`.
+Use the complete checksum-pinned command in [README](../README.md#install-or-update). The bootstrap's SHA-256 is `5f4090223b0bdf9fb37ee05cfba73b165f0b6c597764130fb765122cc1818f91`.
 
-For a fresh host, omit `--upgrade`. If publisher trust is already initialized, the default command refuses to proceed. For an existing installation, append `--upgrade` after the version. That mode requires protected existing installation records. It enforces an initialized publisher policy, including active keys, expiry, revocations and sequence. For signed 0.1.8-and-earlier approvals that predate this policy, it uses the existing protected publisher authority; the authenticated installer establishes the first policy. A newer installation missing its policy is refused. Existing keys and revocations are never reset.
+For a fresh host, omit `--upgrade`. If publisher trust is already initialized, the default command refuses to proceed. For an existing installation, append `--upgrade` after the version. That mode requires protected existing installation records. It enforces an initialized publisher policy, including active keys, expiry, revocations and sequence. For protected signed approvals using the original factory authority without an explicit rotation policy, it uses that existing publisher authority. A partially missing established policy is refused; verification never initializes or replaces policy records. Existing keys and revocations are never reset.
 
 Both paths verify the signed release identity, validity and exact installer hash. The authenticated installer then verifies the package and applies the normal admission, recovery and preservation checks. Lite still requires consent on eligible hardware; unattended users explicitly append `--lite` after `--upgrade` when upgrading.
 
@@ -30,7 +30,7 @@ Obtain the corrected release bundle and its checksum through a trusted channel. 
 (
 set -euo pipefail
 sha256sum --check SHA256SUMS
-printf '%s\n' '05fac61c24f70ad59a75418450e83d0c769254d4237fa096f47765e560284900  install_bootstrap.sh' | sha256sum --check
+printf '%s\n' '5f4090223b0bdf9fb37ee05cfba73b165f0b6c597764130fb765122cc1818f91  install_bootstrap.sh' | sha256sum --check
 cp release-signing.pub publisher.pem
 source ./install_bootstrap.sh
 existing_policy=0
