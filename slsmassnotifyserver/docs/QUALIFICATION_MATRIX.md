@@ -1,6 +1,6 @@
 # Qualification boundaries
 
-`0.1.9-beta` is the corrected unpublished candidate. The original withdrawn installer must not be reused. These entries distinguish native disposable-PBX qualification from isolated fixtures and external acceptance. They do not certify every deployment or delivery provider.
+`0.1.9-beta` is the corrected published release. The original withdrawn installer must not be reused. These entries distinguish native disposable-PBX qualification from isolated fixtures and external acceptance. They do not certify every deployment or delivery provider.
 
 ## Native installer incident qualification — 2026-11-01
 

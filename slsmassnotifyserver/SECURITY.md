@@ -12,11 +12,11 @@ Do not publish configuration, API keys, passwords, authenticator seeds, AMI cred
 
 ## Supported releases
 
-Security fixes target the latest published prerelease, currently `0.1.8-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
+Security fixes target the latest published prerelease, currently `0.1.9-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
 
-The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected candidate retains version `0.1.9-beta` and remains unpublished pending owner acceptance.
+The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected release retains version `0.1.9-beta` with new signed artifacts. Do not reuse the withdrawn installer.
 
-Corrections receive a new version and signed assets. The updater does not replace equal versions. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
+Corrections receive signed assets. The updater does not replace equal versions; same-version corrections require the independently authenticated manual installer. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
 
 ## Administrative and authentication boundaries
 

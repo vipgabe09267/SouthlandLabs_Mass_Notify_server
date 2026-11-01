@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. Candidate: **v0.1.9-beta** (unpublished).
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. Current release: **v0.1.9-beta**.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,7 +14,7 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-After **0.1.9-beta** is published, use the following command as root for a fresh installation:
+For a fresh installation, run the following command as root:
 
 ```bash
 cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
@@ -24,7 +24,7 @@ printf '%s\n' '9131408d0a21bcc6aadbce9e7810b7ea2ff5a71824807927315d934981b4525e 
 bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
-For an existing installation, use **General Settings > Check for updates > Install Selected Release**. The fresh bootstrap refuses an installation that already has a publisher trust policy. For offline installation or recovery, follow [INSTALL.md](INSTALL.md) and the [manual verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
+For an existing installation, use **General Settings > Check for updates > Install Selected Release**. The fresh bootstrap refuses an installation that already has a publisher trust policy. For offline installation or recovery, follow [INSTALL.md](INSTALL.md) and the [manual verification guide](docs/FIRST_INSTALL_VERIFICATION.md). If you installed the withdrawn October 31 version of 0.1.9-beta, use the independently authenticated manual installer; the updater ignores equal versions.
 
 The installer checks resources, verifies signatures and keeps recovery files. It preserves saved settings during an update. Back up your PBX before installing.
 

@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.9-beta — corrected candidate (unpublished)
+## 0.1.9-beta — 2026-11-01
 
-The original October 31 installer was withdrawn after a history-retention conflict caused installation and rollback verification to fail. This corrected candidate keeps version `0.1.9-beta` and includes the fixes below; it remains unpublished pending owner acceptance.
+The original October 31 installer was withdrawn after a history-retention conflict caused installation and rollback verification to fail. This corrected release keeps version `0.1.9-beta` and includes the fixes below. Use its new signed artifacts; do not reuse the withdrawn installer.
 
 - Check runtime audio space in /tmp separately from installer scratch fallback. Refuse an undersized, inaccessible, read-only or inode-exhausted runtime workspace before mutation, preserving the configured speech reserve and concurrency.
 
@@ -31,7 +31,7 @@ The original October 31 installer was withdrawn after a history-retention confli
 - Do not report a failed speech installation when only unselected optional voice packs are absent. Required or selected missing voices still show a repair warning.
 - Retry one complete settings read after a validated atomic file replacement. Concurrent OTP submissions still allow one success and reject reuse; unsafe files, in-place changes, repeated replacement and encryption-key changes continue to fail safely.
 
-Native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. See docs/QUALIFICATION_MATRIX.md for evidence and limits. This candidate is not published.
+Native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. See docs/QUALIFICATION_MATRIX.md for evidence and limits. The corrected release passed owner manual acceptance.
 
 ### Southland Labs rebrand
 

@@ -1,6 +1,6 @@
 # SLL Mass Notify Server Control API
 
-This document describes the unpublished `0.1.9-beta` candidate API. Its changes are additive
+This document describes the published `0.1.9-beta` API. Its changes are additive
 to the existing routes and authentication. Notification payload schema **1** and
 desktop SSE protocol **2** are retained. Features marked **Labs** in the module
 need acceptance with the actual devices, providers and desktop client before
