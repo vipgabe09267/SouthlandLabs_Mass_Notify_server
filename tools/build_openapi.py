@@ -131,8 +131,8 @@ def description():
         actions[name] = schema
     notification = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://southlandservers.xyz/schemas/sls/notification-1.json",
-        "title": "SLS notification payload schema 1",
+        "$id": "https://southlandlabs.dev/schemas/sls/notification-1.json",
+        "title": "SLL notification payload schema 1",
         "type": "object",
         "required": ["id", "created_at", "is_test"],
         "properties": {
@@ -190,9 +190,9 @@ def description():
         "openapi": "3.1.1",
         "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
         "info": {
-            "title": "SLS Mass Notifications API",
+            "title": "SLL Mass Notify Server API",
             "version": version,
-            "description": "Additive Control API, notification schema 1 and desktop SSE protocol 2. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
+            "description": "Additive Control API, notification schema 1 and desktop SSE protocol 2. Signed trigger, provider callback and operator-portal routes have separate authentication contracts and are outside this OpenAPI document. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
             "license": {"name": "AGPL-3.0-or-later", "identifier": "AGPL-3.0-or-later"},
         },
         "servers": [

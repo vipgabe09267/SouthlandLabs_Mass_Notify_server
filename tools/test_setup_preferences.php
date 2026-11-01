@@ -50,4 +50,18 @@ while($written<strlen($program)){$chunk=fwrite($pipes[0],substr($program,$writte
 fclose($pipes[0]);$output=stream_get_contents($pipes[1],262145);fclose($pipes[1]);$error=stream_get_contents($pipes[2],262145);fclose($pipes[2]);
 $check(is_string($output)&&strlen($output)<=262144&&is_string($error)&&strlen($error)<=262144,'JavaScript syntax checker output exceeded its bound.');
 $check(proc_close($process)===0,'Rendered wizard JavaScript is invalid or its checker timed out: '.$error);
+$baseVoices=[['name'=>'Installed required voice','path'=>'/voices/required.onnx','available'=>true,'optional'=>false],
+    ['name'=>'Optional regional voice (optional pack not installed)','path'=>'/voices/optional.onnx','available'=>false,'optional'=>true]];
+foreach (['optional-absent'=>0,'required-absent'=>1,'optional-selected'=>1] as $case=>$warnings) {
+    $settings=$saved;$available_voices=$baseVoices;
+    if ($case==='required-absent') { $available_voices[0]['available']=false; }
+    if ($case==='optional-selected') { $settings['announcement_piper_voice']='/voices/optional.onnx'; }
+    $check(ob_start(),'Unable to start voice availability rendering.');
+    include dirname(__DIR__).'/slsmassnotifyserver/views/setup.php';$voiceHtml=ob_get_clean();
+    $voiceDom=new DOMDocument();$priorErrors=libxml_use_internal_errors(true);$voiceDom->loadHTML($voiceHtml);libxml_clear_errors();libxml_use_internal_errors($priorErrors);
+    $voiceXpath=new DOMXPath($voiceDom);
+    $actualWarnings=$voiceXpath->query('//div[contains(concat(" ",normalize-space(@class)," ")," alert-warning ") and contains(translate(.,"ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"),"voice")]')->length;
+    $check($actualWarnings===$warnings,'Setup misreported missing speech installation: '.$case);
+    $check($voiceXpath->query('//select[@name="announcement_piper_voice"]/option[@value="/voices/optional.onnx"]')->length===1,'Setup hid the optional voice catalogue');
+}
 echo "Setup preferences: $count parsing, preservation and rendered view checks passed.\n";

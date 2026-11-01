@@ -5,6 +5,13 @@ require_once __DIR__ . '/AutomationConfig.php';
 
 final class AutomationInputs
 {
+    /** Server-internal original HTTP proof; never accepted from event JSON. */
+    public static function authenticateProof(array $rule, array $proof, int $now): bool
+    {
+        return count($proof)===2 && is_string($proof['raw']??null) && is_array($proof['headers']??null)
+            && count($proof['headers'])===2 && !array_diff(array_keys($proof['headers']),['timestamp','signature'])
+            && self::authenticate($rule,$proof['raw'],$proof['headers'],$now);
+    }
     public static function authenticate(array $rule, string $raw, array $headers, int $now): bool
     {
         if (!is_string($rule['kind'] ?? null) || !in_array($rule['kind'],['panic','sensor'],true)
@@ -133,10 +140,11 @@ final class AutomationInputs
         foreach ($addresses as $ip) {
             if (!self::publicAddress($ip)) { throw new \DomainException('CAP feed DNS contains a private or reserved address.'); }
         }
+        if(count($addresses)>1&&(!function_exists('curl_version')||(curl_version()['version_number']??0)<0x073b00)){throw new \RuntimeException('CAP feed multi-address pinning requires PHP/libcurl 7.59.0 or newer.');}
         if(!function_exists('curl_init')){throw new \RuntimeException('CAP feed HTTPS support is unavailable.');}
         $handle=curl_init($url);if($handle===false){throw new \RuntimeException('CAP feed HTTPS request could not be initialized.');}$body='';
         $configured=curl_setopt_array($handle,[CURLOPT_FOLLOWLOCATION=>false,CURLOPT_MAXREDIRS=>0,CURLOPT_CONNECTTIMEOUT=>3,CURLOPT_TIMEOUT=>8,CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,
-            CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,CURLOPT_SSLVERSION=>CURL_SSLVERSION_TLSv1_2,CURLOPT_PROXY=>'',CURLOPT_NOPROXY=>'*',CURLOPT_RESOLVE=>[$host.':443:'.$addresses[0]],
+            CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,CURLOPT_SSLVERSION=>CURL_SSLVERSION_TLSv1_2,CURLOPT_PROXY=>'',CURLOPT_NOPROXY=>'*',CURLOPT_RESOLVE=>[$host.':443:'.implode(',',$addresses)],
             CURLOPT_HTTPHEADER=>['Accept: application/cap+xml, application/atom+xml, application/xml','Accept-Encoding: identity'],
             CURLOPT_WRITEFUNCTION=>static function($curl,string $chunk) use(&$body): int { if (strlen($body)+strlen($chunk)>1048576) { return 0; } $body.=$chunk; return strlen($chunk); }]);
         if(!$configured){curl_close($handle);throw new \RuntimeException('CAP feed HTTPS safeguards could not be configured.');}

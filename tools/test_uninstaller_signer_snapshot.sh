@@ -107,20 +107,30 @@ cleanup_recovery_signer
 (
   sound_fixture="$(mktemp -d /tmp/sls-uninstaller-sound-link-test.XXXXXX)"
   trap 'find "$sound_fixture" -depth -delete' EXIT
+  python3 - "$ROOT_DIR/tools/uninstall_release.sh" "$sound_fixture" <<'PYSOUNDFIXTURE'
+from pathlib import Path
+import sys
+source, fixture = map(Path, sys.argv[1:])
+(fixture/'uninstall.sh').write_text(source.read_text().replace('/var/lib/asterisk/sounds',str(fixture/'sounds')).replace('/var/lib/asterisk/SLS_Mass_Notifications_Plugin',str(fixture/'data')))
+PYSOUNDFIXTURE
+  source "$sound_fixture/uninstall.sh"
   DATA_DIR="$sound_fixture/data"
-  mkdir -p "$DATA_DIR/sounds" "$sound_fixture/real-user-directory"
-  printf '%s\n' 'keep-me' >"$sound_fixture/real-user-directory/user.wav"
-  remove_managed_sound_link "$sound_fixture/real-user-directory"
-  [ "$(cat "$sound_fixture/real-user-directory/user.wav")" = 'keep-me' ]
-  ln -s "$DATA_DIR/sounds" "$sound_fixture/managed-link"
-  remove_managed_sound_link "$sound_fixture/managed-link"
-  [ ! -e "$sound_fixture/managed-link" ] && [ ! -L "$sound_fixture/managed-link" ]
-  ln -s "$sound_fixture/real-user-directory" "$sound_fixture/foreign-link"
-  remove_managed_sound_link "$sound_fixture/foreign-link"
-  [ -L "$sound_fixture/foreign-link" ]
-  verify_managed_sound_link_removed "$sound_fixture/foreign-link"
-  ln -s "$DATA_DIR/sounds" "$sound_fixture/managed-remains"
-  if verify_managed_sound_link_removed "$sound_fixture/managed-remains" >/dev/null 2>&1; then
+  managed="$sound_fixture/sounds/SLS_Mass_Notifications_Plugin"
+  foreign="$sound_fixture/sounds/en/SLS_Mass_Notifications_Plugin"
+  mkdir -p "$DATA_DIR/sounds" "$managed" "$(dirname "$foreign")" "$sound_fixture/real-user-directory"
+  printf '%s\n' 'keep-me' >"$managed/user.wav"
+  remove_managed_sound_link "$managed"
+  [ "$(cat "$managed/user.wav")" = 'keep-me' ]
+  rm "$managed/user.wav"; rmdir "$managed"
+  ln -s "$DATA_DIR/sounds" "$managed"
+  remove_managed_sound_link "$managed"
+  [ ! -e "$managed" ] && [ ! -L "$managed" ]
+  ln -s "$sound_fixture/real-user-directory" "$foreign"
+  remove_managed_sound_link "$foreign"
+  [ -L "$foreign" ]
+  verify_managed_sound_link_removed "$foreign"
+  ln -s "$DATA_DIR/sounds" "$managed"
+  if verify_managed_sound_link_removed "$managed" >/dev/null 2>&1; then
     printf 'Uninstaller verification accepted a remaining managed sound link.\n' >&2
     exit 1
   fi

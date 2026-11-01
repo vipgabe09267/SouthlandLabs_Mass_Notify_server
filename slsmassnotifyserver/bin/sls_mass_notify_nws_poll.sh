@@ -1,5 +1,5 @@
 #!/bin/bash
-# Southland Servers Mass Notifications Server by the Southland Servers Group
+# SLL Mass Notify Server by the Southland Labs
 
 # ============================================================
 # NWS Weather Alert -> FreePBX direct recipient script
@@ -35,8 +35,8 @@ esac
 
 NWS_ZONE=""
 NWS_API_BASE_URL="https://api.weather.gov"
-SLS_CALLERID_NAME="SLS Mass Notification System"
-SLS_CALLERID_NUM="SLS"
+SLS_CALLERID_NAME="SLL Mass Notify Server"
+SLS_CALLERID_NUM="SLL"
 SLS_AUDIO_CONTEXT="sls-alert-audio"
 NWS_ALERT_RECIPIENTS=()
 NWS_DESKTOP_RECIPIENTS=()
@@ -102,9 +102,9 @@ NWS_LAST_PAGE_HOLD_SECONDS=0
 NWS_AUDIO_LOCK_FD=""
 LIVE_EMAIL_TO=""
 SOURCE_EXTENSION=""
-SOURCE_NAME="SLS Mass Notification System"
+SOURCE_NAME="SLL Mass Notify Server"
 DELIVERY_TARGETS=""
-ALERT_EMAIL_SUBJECT="Southland Servers Group PBX: EAS alert triggered - {{event}}"
+ALERT_EMAIL_SUBJECT="Southland Labs PBX: EAS alert triggered - {{event}}"
 ALERT_EMAIL_BODY="An EAS alert triggered the configured NWS recipients.
 
 Source Name: {{source_name}}
@@ -510,7 +510,9 @@ timestamp_now() {
 
 queued_delivery_is_current() {
   [ -n "${SLS_WEATHER_JOB_ID:-}" ] || return 0
-  /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_weather_queue.py check "$SLS_WEATHER_JOB_ID"
+  local -a recipient_options=()
+  if [ "$#" -gt 0 ]; then recipient_options=(--phone-recipient "$1"); fi
+  /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_weather_queue.py check "$SLS_WEATHER_JOB_ID" "${recipient_options[@]}"
 }
 
 # Periodic storage maintenance owns event retention and its recovery backups.
@@ -1368,6 +1370,12 @@ CALL
       report_fault "delivery" "Notification HA does not qualify legacy NWS audio, or its protected transport guard is unavailable. No call file was submitted; use durable announcement or owned-site dispatch." "$event" "$alert_id"
       return 1
     fi
+    if ! queued_delivery_is_current "$recipient"; then
+      rm -f "$callfile" 2>/dev/null || true
+      echo "$(date): NWS audio for $recipient suppressed because its source or original route changed; $queued call file(s) were already queued" >> "$LOG"
+      queued_delivery_is_current || return 1
+      continue
+    fi
     if ! mv "$callfile" "$SPOOL/"; then
       echo "$(date): ERROR — Unable to move alert call file for $recipient into $SPOOL" >> "$LOG"
       rm -f "$callfile" 2>/dev/null || true
@@ -1549,7 +1557,7 @@ try:
         state_path,
         config,
         os.environ.get("SLS_EXTERNAL_CORRELATION_KEY", ""),
-        os.environ.get("SLS_DESTINATION_SUBJECT", "Southland Servers Mass Notification"),
+        os.environ.get("SLS_DESTINATION_SUBJECT", "SLL Mass Notify Server"),
         os.environ.get("SLS_DESTINATION_BODY", "A notification was issued."),
         os.environ.get("SLS_DESTINATION_EVENT", ""),
         os.environ.get("SLS_DESTINATION_SEVERITY", ""),

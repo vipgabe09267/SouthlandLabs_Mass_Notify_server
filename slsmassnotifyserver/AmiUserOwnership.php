@@ -2,7 +2,7 @@
 declare(strict_types=1);
 namespace SLS\MassNotify;
 
-/** A historical username alone is not evidence that SLS owns an AMI account. */
+/** A historical username alone is not evidence that SLL owns an AMI account. */
 final class AmiUserOwnership
 {
     public static function matches(array $row, string $name, string $secretHash): bool

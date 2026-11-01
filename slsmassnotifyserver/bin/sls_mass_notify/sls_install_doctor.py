@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Read-only SLS installation diagnostics and redacted deployment profile."""
+"""Read-only SLL installation diagnostics and redacted deployment profile."""
 from __future__ import annotations
 
 import argparse
@@ -25,6 +25,7 @@ import xml.etree.ElementTree as ET
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sls_php_security import evaluate as php_security
+from sls_web_readiness import probe as freepbx_gui_probe
 
 PROFILE = {'id': 'freepbx17-debian12-amd64', 'freepbx_major': 17,
            'os_id': 'debian', 'os_version': '12', 'python': 'CPython 3.11',
@@ -233,14 +234,27 @@ def served_php_local():
     return served_php_probe(served_php_targets(dump if status==0 else ''))
 
 
-def resource_probe(desktops,phones):
+def freepbx_gui_local():
+    status,dump=command(['/usr/sbin/apache2ctl','-t','-D','DUMP_VHOSTS'],1)
+    return freepbx_gui_probe(served_php_targets(dump if status==0 else ''))
+
+
+def resource_probe(desktops,phones,profile=None):
     helper=RUNTIME/'sls_resource_capacity.py'
     if not protected(helper):return {'ok':False,'failure_code':'resource_helper_unsafe_or_missing'}
-    status,output=command(['/usr/bin/python3','-I',str(helper),'--check','--mode','install','--desktop-limit',str(desktops),'--phone-limit',str(phones)],5)
+    arguments=['/usr/bin/python3','-I',str(helper),'--check','--mode','install',
+               '--desktop-limit',str(desktops),'--phone-limit',str(phones)]
+    config=DATA/'mass-notifications.config'
+    if config.exists() or config.is_symlink():arguments.extend(('--config',str(config)))
+    if profile is not None:arguments.extend(('--profile',profile))
+    # A root walk can hide traversal failures in the actual PBX/web account.
+    # The helper is already protected; measure it with the runtime identity.
+    if os.geteuid()==0:arguments=['/usr/sbin/runuser','-u','asterisk','--',*arguments]
+    status,output=command(arguments,5)
     try:
         value=json.loads(output)
         if not isinstance(value,dict) or value.get('schema')!=1 or not isinstance(value.get('resource_checks'),dict):raise ValueError()
-        result={key:value.get(key) for key in ('schema','requested_limit','requested_phone_limit','eligible_limit','eligible_phone_limit','requirements','resource_checks')}
+        result={key:value.get(key) for key in ('schema','deployment_profile','requested_limit','requested_phone_limit','eligible_limit','eligible_phone_limit','requirements','resource_checks')}
         return {'ok':status==0,'allocation':result}
     except (ValueError,TypeError):return {'ok':False,'failure_code':'resource_probe_timeout' if status in (124,137) else 'resource_probe_invalid'}
 
@@ -290,10 +304,13 @@ def installation_state():
 
 
 def module_version(path, rawname):
+    class NoDocumentTypes(ET.TreeBuilder):
+        def doctype(self, name, public_id, system_id):
+            raise ValueError('Unsupported module XML declarations')
     try:
         body=bounded(path,1048576)
         if b'<!DOCTYPE' in body.upper() or b'<!ENTITY' in body.upper(): return None
-        root=ET.fromstring(body)
+        root=ET.fromstring(body, parser=ET.XMLParser(target=NoDocumentTypes()))
         value=root.findtext('version','')
         return value if root.findtext('rawname')==rawname and re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,4}(?:-beta)?',value) else None
     except (OSError, ValueError, ET.ParseError): return None
@@ -309,7 +326,7 @@ def protected(path):
     except OSError: return False
 
 
-def report(desktops=25, phones=25):
+def report(desktops=25, phones=25, profile=None):
     checks=[]
     def add(code,ok,observed,fix,severity='error'):
         checks.append({'code':code,'ok':bool(ok),'observed':observed,'remedy':None if ok else fix,'severity':severity})
@@ -338,8 +355,8 @@ def report(desktops=25, phones=25):
         tasks={unit:workers.submit(command,['/usr/bin/systemctl','is-active',unit],1) for unit in ('apache2','cron','sls-mass-notify-phone-events')}
         tasks.update(apache=workers.submit(command,['/usr/sbin/apache2ctl','configtest'],2),
                      asterisk=workers.submit(command,['/usr/sbin/asterisk','-rx','core show version'],2),
-                     served_php=workers.submit(served_php_local),collector=workers.submit(collector_probe),
-                     release=workers.submit(release_probe),resource=workers.submit(resource_probe,desktops,phones))
+                     served_php=workers.submit(served_php_local),freepbx_gui=workers.submit(freepbx_gui_local),collector=workers.submit(collector_probe),
+                     release=workers.submit(release_probe),resource=workers.submit(resource_probe,desktops,phones,profile))
         observations={name:task.result() for name,task in tasks.items()}
     for unit in ('apache2','cron','sls-mass-notify-phone-events'):
         status,output=observations[unit]
@@ -352,6 +369,9 @@ def report(desktops=25, phones=25):
     php=observations['served_php']
     add('served_php_runtime',php.get('ok') is True,php,
         'Check the local Apache virtual host/API route and its PHP handler. Enable the named extensions/functions and use the asterisk runtime account; CLI PHP alone is insufficient.')
+    gui=observations['freepbx_gui']
+    add('freepbx_web_response',gui.get('ok') is True,gui,
+        'Inspect the FreePBX web interface and its served PHP vendor loader. HTTP 200 with an ionCube loader error is not readiness. Authentication or an access-controlled redirect still needs a manual browser check.')
     status,output=observations['asterisk'];match=re.match(r'^Asterisk ([0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._~-]{1,48})?)\b',output.strip())
     asterisk=match[1] if status==0 and match else None
     add('asterisk_version',asterisk is not None,asterisk,'Run asterisk -rx "core show version" and inspect the local control socket; this doctor does not restart Asterisk.')
@@ -384,12 +404,13 @@ def main():
     parser.add_argument('--json',action='store_true',help='Print a redacted JSON support profile to stdout.')
     parser.add_argument('--desktop-limit',type=int,default=25)
     parser.add_argument('--phone-limit',type=int,default=25)
+    parser.add_argument('--profile',choices=('standard','lite'),help='Inspect a profile explicitly; otherwise use the protected active profile.')
     args=parser.parse_args()
     if not 1<=args.desktop_limit<=1000 or not 1<=args.phone_limit<=1000: parser.error('Capacities must be between 1 and 1000.')
-    value=report(args.desktop_limit,args.phone_limit)
+    value=report(args.desktop_limit,args.phone_limit,args.profile)
     if args.json: print(json.dumps(value,indent=2,sort_keys=True))
     else:
-        print('SLS installation doctor · read-only · '+value['profile']['id'])
+        print('SLL installation doctor · read-only · '+value['profile']['id'])
         for row in value['checks']:
             print(('PASS' if row['ok'] else 'WARN' if row['severity']=='warning' else 'FAIL')+' '+row['code']+': '+json.dumps(row['observed'],sort_keys=True))
             if row['remedy']: print('  '+row['remedy'])

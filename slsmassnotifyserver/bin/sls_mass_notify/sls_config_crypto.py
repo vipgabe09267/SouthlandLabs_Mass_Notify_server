@@ -314,15 +314,47 @@ def initialize_keyring(path, gid, now=None):
 
 @contextlib.contextmanager
 def _lock(path, uid, gid):
+    path = Path(path)
     with _parent(path) as (parent, name):
-        descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, 0o640, dir_fd=parent)
+        flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
-            metadata = os.fstat(descriptor)
-            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_mode & 0o027
-                    or (uid == 0 and metadata.st_uid != 0)):
-                raise ConfigCryptoError("A configuration maintenance lock is unsafe.")
-            os.fchown(descriptor, uid, gid)
+            descriptor = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o640, dir_fd=parent)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(name, flags, dir_fd=parent)
+            created = False
+        try:
+            def verify():
+                metadata = os.fstat(descriptor)
+                try:
+                    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    with _parent(path) as (current, _):
+                        original_directory = os.fstat(parent)
+                        current_directory = os.fstat(current)
+                except OSError as error:
+                    raise ConfigCryptoError("A configuration maintenance lock changed during coordination.") from error
+                for value in (metadata, named):
+                    if (not stat.S_ISREG(value.st_mode) or value.st_nlink != 1 or value.st_size != 0
+                            or value.st_uid not in {0, uid} or value.st_gid not in {0, gid}
+                            or stat.S_IMODE(value.st_mode) not in (0o600, 0o640)):
+                        raise ConfigCryptoError("A configuration maintenance lock has unsafe ownership, mode or contents.")
+                if ((metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+                        or (original_directory.st_dev, original_directory.st_ino)
+                        != (current_directory.st_dev, current_directory.st_ino)):
+                    raise ConfigCryptoError("A configuration maintenance lock changed during coordination.")
+                return metadata
+
+            verify()
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            metadata = verify()
+            # Known legacy root/Asterisk metadata is repaired only while this
+            # exact empty mutex is held. A busy or unknown file is untouched.
+            if metadata.st_uid != uid or metadata.st_gid != gid:
+                os.fchown(descriptor, uid, gid)
+                os.fsync(descriptor)
+            if created:
+                os.fsync(parent)
+            verify()
             yield
         finally:
             os.close(descriptor)

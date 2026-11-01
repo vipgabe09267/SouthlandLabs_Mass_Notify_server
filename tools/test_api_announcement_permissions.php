@@ -30,7 +30,48 @@ try {
         throw new RuntimeException('Authorized preview submitted a channel, recorded delivery, or queued work.');
     }
 }finally{foreach(glob($previewDirectory.'/*')?:[] as $file)unlink($file);rmdir($previewDirectory);$fixture->jobDirectory='';}
+
+// Legacy Control API jobs must retain a non-secret generation marker so a
+// key rotation or disable takes effect after admission but before submission.
+$legacyDirectory=sys_get_temp_dir().'/sls-api-legacy-'.bin2hex(random_bytes(8));mkdir($legacyDirectory,0700);
+try {
+    $legacyControl=['enabled'=>true,'api_key'=>'legacy-fixture-key-before-rotation'];
+    $fixture->settings=['enabled'=>true,'control_api'=>$legacyControl,
+        'desktop_clients'=>[['client_id'=>'device_gabe','username'=>'gabe','enabled'=>true]]];
+    $legacy=\SLS\MassNotify\ApiSecurity::authenticate($legacyControl,$legacyControl['api_key']);
+    $GLOBALS['sls_control_principal']=$legacy;$fixture->jobDirectory=$legacyDirectory;
+    $queuedRequest=$request;unset($queuedRequest['api_credential_id']);$queuedRequest['force_queue']=true;
+    $queued=$method->invoke($fixture,$queuedRequest);
+    if(empty($queued['queued'])||!preg_match('/^job_[a-f0-9]{32}$/D',$queued['job_id']??'')){
+        throw new RuntimeException('Legacy Control API announcement was not queued in the inert fixture.');
+    }
+    $stored=json_decode(file_get_contents($legacyDirectory.'/'.$queued['job_id'].'.json'),true,512,JSON_THROW_ON_ERROR)['request'];
+    if(($stored['api_credential_id']??'')!=='legacy'
+        ||($stored['api_credential_revision']??'')!==($legacy['authority_revision']??null)
+        ||!preg_match('/^[a-f0-9]{64}$/D',$stored['api_credential_revision']??'')){
+        throw new RuntimeException('Queued legacy authority did not retain its non-secret key generation.');
+    }
+    unset($GLOBALS['sls_control_principal']);
+    $before=count($fixture->commands);$fixture->settings['control_api']['api_key']='legacy-fixture-key-after-rotation';
+    $rotated=$fixture->run($stored);
+    if(count($fixture->commands)!==$before||!$rotated['receipts']
+        ||count(array_filter($rotated['receipts'],static fn($row)=>$row['state']==='cancelled'))!==count($rotated['receipts'])){
+        throw new RuntimeException('Rotated legacy key retained queued delivery authority.');
+    }
+    $fixture->settings['control_api']=$legacyControl;$fixture->settings['control_api']['enabled']=false;
+    $disabled=$fixture->run($stored);
+    if(count($fixture->commands)!==$before||!$disabled['receipts']
+        ||count(array_filter($disabled['receipts'],static fn($row)=>$row['state']==='cancelled'))!==count($disabled['receipts'])){
+        throw new RuntimeException('Disabled legacy Control API retained queued delivery authority.');
+    }
+}finally{
+    unset($GLOBALS['sls_control_principal']);
+    foreach(glob($legacyDirectory.'/*')?:[] as $file)unlink($file);
+    rmdir($legacyDirectory);$fixture->jobDirectory='';
+}
 unset($GLOBALS['sls_control_principal']);
+$fixture->settings=['control_api'=>['enabled'=>true,'credentials'=>[$issued['credential']]],
+    'desktop_clients'=>[['client_id'=>'device_gabe','username'=>'gabe','enabled'=>true]]];
 $fixture->settings['control_api']['credentials'][0]['revoked_at']=gmdate('c');
 $before=count($fixture->commands);$cancelled=$fixture->run($request);
 if(count($fixture->commands)!==$before||count($cancelled['receipts'])!==3

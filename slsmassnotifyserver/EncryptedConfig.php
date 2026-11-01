@@ -22,7 +22,7 @@ final class SlsEncryptedConfig
     private static function passphrase($value): string
     {
         if (!is_string($value) || strlen($value) < 12 || strlen($value) > 1024 || strpos($value, "\0") !== false) {
-            throw new \DomainException(_('Use a backup passphrase of 12–1,024 bytes. Spaces are significant. Keep it somewhere separate from the backup; SLS cannot recover it.'));
+            throw new \DomainException(_('Use a backup passphrase of 12–1,024 bytes. Spaces are significant. Keep it somewhere separate from the backup; SLL cannot recover it.'));
         }
         return $value;
     }
@@ -65,11 +65,11 @@ final class SlsEncryptedConfig
             throw new \DomainException(_('The configuration upload must be between 1 byte and 6 MiB.'));
         }
         try { $payload = \SLS\MassNotify\ApiSecurity::jsonObject($file); }
-        catch (\Throwable $error) { throw new \DomainException(_('The configuration file must contain unambiguous JSON with finite numbers. Select an SLS configuration export.')); }
+        catch (\Throwable $error) { throw new \DomainException(_('The configuration file must contain unambiguous JSON with finite numbers. Select an SLL configuration export.')); }
         if (!is_array($payload) || array_is_list($payload)) { throw new \DomainException(_('The configuration must contain a JSON object.')); }
         if (($payload['format'] ?? '') !== self::FORMAT) {
             if (array_key_exists('format', $payload) && $payload['format'] !== 'sls-mass-notify-config-v1') {
-                throw new \DomainException(_('This configuration export format is unsupported. Use a compatible SLS export.'));
+                throw new \DomainException(_('This configuration export format is unsupported. Use a compatible SLL export.'));
             }
             if (strlen($file) > self::MAX_PLAIN_BYTES) { throw new \DomainException(_('The plain configuration export exceeds 4 MiB.')); }
             return $payload;
@@ -104,10 +104,10 @@ final class SlsEncryptedConfig
         }
         if ($plaintext === false) { throw new \DomainException(_('The backup passphrase is incorrect or the encrypted file was changed. No configuration was imported.')); }
         try { $decoded = \SLS\MassNotify\ApiSecurity::jsonObject($plaintext); }
-        catch (\Throwable $error) { throw new \DomainException(_('The decrypted backup does not contain an unambiguous SLS configuration with finite numbers.')); }
+        catch (\Throwable $error) { throw new \DomainException(_('The decrypted backup does not contain an unambiguous SLL configuration with finite numbers.')); }
         finally { sodium_memzero($plaintext); }
         if (!is_array($decoded) || ($decoded['format'] ?? '') !== 'sls-mass-notify-config-v1' || !is_array($decoded['settings'] ?? null)) {
-            throw new \DomainException(_('The decrypted backup is not an SLS configuration export.'));
+            throw new \DomainException(_('The decrypted backup is not an SLL configuration export.'));
         }
         return $decoded;
     }

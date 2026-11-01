@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the actual installer transaction with private trees and inert PBX phases."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -20,7 +21,7 @@ trace() { printf '%s\n' "$*" >>"$fixture/trace"; }
 mktemp() {
  case "$*" in
   '-d /tmp/sls-mass-notify-bootstrap.XXXXXX') command mktemp -d "$fixture/bootstrap.XXXXXX" ;;
-  *'.sls-mass-notify-recovery.XXXXXX') command mktemp -d "$fixture/modules/.sls-mass-notify-recovery.XXXXXX" ;;
+  *'.sls-mass-notify-recovery.XXXXXX') command mktemp -d "$fixture/web/admin/modules/.sls-mass-notify-recovery.XXXXXX" ;;
   '/tmp/slsmassnotifyserver-config.XXXXXX') command mktemp "$fixture/config-backup.XXXXXX" ;;
   '/tmp/slsmassnotifyserver-pending.XXXXXX') command mktemp "$fixture/pending-backup.XXXXXX" ;;
   *) command mktemp "$@" ;;
@@ -37,10 +38,12 @@ preflight_python() { :; }
 detect_served_php_profiles() { SERVED_PHP_PROFILES='8.2:apache2'; }
 verify_served_php_configuration() { :; }
 verify_php_security_versions_before_mutation() { trace php-security-floor; [ "$scenario" != php-rejected ] || return 38; }
+verify_freepbx_web_response() { [ "$scenario" != web-rejected ] || return 41; }
 bootstrap_missing_dashboard() { trace stock-dashboard-bootstrap; }
 preflight_profile_identity() { :; }
 ensure_freepbx_prerequisites() { :; }
 initialize_configuration_keyring() { trace config-keyring-init; }
+prepare_module_ami_intent() { trace protected-ami-intent; }
 download_tgz() {
  DOWNLOAD_DIR="$fixture/download"; mkdir "$DOWNLOAD_DIR"
  printf 'fixture package' >"$TGZ"
@@ -58,19 +61,28 @@ stage_module_directory() {
  mkdir -p "$STAGING_DIR/$MODULE/bin/sls_mass_notify"
  cp "$FIXTURE_HELPERS"/sls_{module_trust,release_trust,privileged_install,installer_recovery,install_transaction,install_idle,install_guard,audio_state,config_crypto,upgrade_trust,legacy_permissions}.py "$STAGING_DIR/$MODULE/bin/sls_mass_notify/"
  cp "$FIXTURE_HELPERS/freepbx-mirror-signing.pub" "$STAGING_DIR/$MODULE/bin/sls_mass_notify/"
+ /usr/bin/python3 -I - "$STAGING_DIR/$MODULE/bin/sls_mass_notify/sls_upgrade_trust.py" "$fixture/web" <<'PYFIXTUREWEB'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]);p.write_text(p.read_text().replace("WEB = Path('/var/www/html')",'WEB = Path('+repr(sys.argv[2])+')'))
+PYFIXTUREWEB
  HAD_EXISTING_MODULE=1; MODULE_WAS_ENABLED=1
 }
 prepare_authenticated_installer() {
  trace approval-preflight
  if [ "$scenario" = approval-rejected ]; then return 31; fi
- RECOVERY_DIR="$fixture/recovery"; mkdir -m700 "$RECOVERY_DIR"
  UPGRADE_TRUST_DIR="$fixture/approval"; mkdir -m700 "$UPGRADE_TRUST_DIR"
+ cp "$fixture/previous-web-approval.json" "$UPGRADE_TRUST_DIR/previous-web-approval.json"
  RECOVERY_TOOL="$fixture/recovery.py"; IDLE_TOOL="$fixture/idle.py"
- printf '{"schema":1,"ok":true,"phone_history":{},"closed_phone_batches":0}' >"$RECOVERY_DIR/idle-before.json"
- chmod 0600 "$RECOVERY_DIR/idle-before.json"
 }
 commit_authenticated_installer() {
  RECOVERY_TOOL="$fixture/recovery.py"; IDLE_TOOL="$fixture/idle.py"
+ RECOVERY_DIR="$(command mktemp -d "$INSTALL_TRANSACTION_DIR/sls-mass-notify-recovery.XXXXXX")"
+ chmod 0700 "$RECOVERY_DIR"
+ printf '{"schema":1,"ok":true,"phone_history":{},"closed_phone_batches":0}' >"$RECOVERY_DIR/idle-before.json"
+ printf '{"schema":3}' >"$RECOVERY_DIR/module-registration.json"
+ chmod 0600 "$RECOVERY_DIR/idle-before.json" "$RECOVERY_DIR/module-registration.json"
+ seal_install_recovery_inputs
  trace approved-snapshot; STATIC_MUTATION_STARTED=1
  persist_install_transaction mutating
 }
@@ -96,6 +108,7 @@ sls_as_asterisk() { trace "asterisk-fixed-command"; }
 verify_runtime_shell_syntax() { :; }
 verify_announcement_worker_health() { :; }
 verify_piper_voices() { :; }
+verify_phone_collector() { trace collector-ready; [ "$scenario" != startup-collector-failed ] || return 39; }
 verify_served_php_runtime() { trace served-php; }
 verify_install() { trace verification; if [ "$scenario" = pending-drift ]; then printf modified >"$DATA_DIR/mass-notifications.pending.config"; fi; [[ "$scenario" != final-failed* ]] || return 34; }
 verify_confirmed_system_timezone() { :; }
@@ -106,27 +119,77 @@ record_install_failure() { trace "failure-$INSTALL_EXIT_CODE-$INSTALL_ERROR_CATE
 # The real journal, stage recording, worker locks, settings snapshots, module
 # swap, rollback ordering and final cleanup remain in use. PBX/provider phases
 # and release authentication are inert; no fixture grants trust to live files.
-if [ "$scenario" = final-failed-rollback-ok ]; then
- printf 'pass\n' >"$fixture/previous-check.py"
- original_prepare="$(declare -f prepare_authenticated_installer)"
- eval "${original_prepare/prepare_authenticated_installer/prepare_fixture_approval}"
- prepare_authenticated_installer() {
-  prepare_fixture_approval
-  cp "$fixture/previous-check.py" "$INSTALL_BOOTSTRAP_DIR/sls_upgrade_trust.py"
- }
-fi
 main
 '''
 
 @unittest.skipUnless(os.geteuid()==0,'requires root for protected staging/worker lock fixtures')
 class TransactionTests(unittest.TestCase):
+ def make_private_backup(self,root):
+  installer=root/'installer.sh';installer.write_text(SOURCE.replace('/var/www/html',str(root/'web')))
+  return subprocess.run(['bash','-c','source "$1"; create_module_recovery_directory','fixture',str(installer)],capture_output=True,text=True,timeout=5)
+ def test_module_backup_uses_private_same_mount_parent_and_reuses_it_safely(self):
+  with tempfile.TemporaryDirectory(prefix='sls-private-module-backups-') as name:
+   root=Path(name);public=root/'web/admin/modules';public.mkdir(parents=True)
+   results=[self.make_private_backup(root) for _ in range(2)]
+   for result in results:self.assertEqual(result.returncode,0,result.stderr)
+   paths=[Path(result.stdout.strip()) for result in results]
+   self.assertNotEqual(paths[0],paths[1])
+   for path in [paths[0].parent,*paths]:
+    self.assertEqual((path.stat().st_uid,path.stat().st_gid,path.stat().st_mode&0o7777),(0,0,0o700))
+    self.assertEqual(path.stat().st_dev,public.stat().st_dev)
+   self.assertEqual(paths[0].parent,public/'.sls-mass-notify-recovery')
+ def test_module_backup_rejects_unsafe_existing_anchor_without_adopting_it(self):
+  import pwd
+  for kind in ('symlink','runtime-owned','public','file','fifo','mount-alias'):
+   with self.subTest(kind=kind),tempfile.TemporaryDirectory(prefix='sls-private-module-backups-') as name:
+    root=Path(name);public=root/'web/admin/modules';public.mkdir(parents=True)
+    anchor=public/'.sls-mass-notify-recovery';victim=root/'untouched';victim.mkdir(mode=0o700)
+    (victim/'file').write_bytes(b'preserve');(victim/'file').chmod(0o600)
+    mounted=False
+    if kind=='symlink':anchor.symlink_to(victim,target_is_directory=True)
+    elif kind=='file':anchor.write_bytes(b'preserve');anchor.chmod(0o600)
+    elif kind=='fifo':os.mkfifo(anchor,0o600)
+    else:
+     anchor.mkdir(mode=0o700)
+     if kind=='runtime-owned':account=pwd.getpwnam('asterisk');os.chown(anchor,account.pw_uid,account.pw_gid)
+     elif kind=='public':anchor.chmod(0o775)
+     elif kind=='mount-alias':subprocess.run(['/usr/bin/mount','--bind',str(victim),str(anchor)],check=True,capture_output=True);mounted=True
+    before=anchor.lstat()
+    try:
+     result=self.make_private_backup(root);self.assertNotEqual(result.returncode,0)
+     after=anchor.lstat();self.assertEqual((before.st_ino,before.st_uid,before.st_gid,before.st_mode),(after.st_ino,after.st_uid,after.st_gid,after.st_mode))
+     self.assertEqual((victim/'file').read_bytes(),b'preserve');self.assertEqual(list(victim.iterdir()),[victim/'file'])
+    finally:
+     if mounted:subprocess.run(['/usr/bin/umount',str(anchor)],check=True,capture_output=True)
+ def test_private_module_backup_handles_a_native_group_inheriting_parent(self):
+  import pwd
+  with tempfile.TemporaryDirectory(prefix='sls-private-module-backups-') as name:
+   root=Path(name);public=root/'web/admin/modules';public.mkdir(parents=True)
+   account=pwd.getpwnam('asterisk');os.chown(public,account.pw_uid,account.pw_gid);public.chmod(0o2775)
+   result=self.make_private_backup(root);self.assertEqual(result.returncode,0,result.stderr)
+   path=Path(result.stdout.strip())
+   for item in (path,path.parent):self.assertEqual((item.stat().st_uid,item.stat().st_gid,item.stat().st_mode&0o7777),(0,0,0o700))
+ def test_empty_interrupted_root_anchor_is_repaired_without_replacing_its_inode(self):
+  import pwd
+  with tempfile.TemporaryDirectory(prefix='sls-private-module-backups-') as name:
+   root=Path(name);public=root/'web/admin/modules';public.mkdir(parents=True)
+   anchor=public/'.sls-mass-notify-recovery';anchor.mkdir(mode=0o700)
+   os.chown(anchor,0,pwd.getpwnam('asterisk').pw_gid);anchor.chmod(0o2700);before=anchor.stat().st_ino
+   result=self.make_private_backup(root);self.assertEqual(result.returncode,0,result.stderr)
+   self.assertEqual(anchor.stat().st_ino,before)
+   self.assertEqual((anchor.stat().st_uid,anchor.stat().st_gid,anchor.stat().st_mode&0o7777),(0,0,0o700))
  def run_case(self,scenario,expected,cross_mount=False):
   with tempfile.TemporaryDirectory(prefix='sls-installer-transaction-') as name:
    root=Path(name); data=root/'data';data.mkdir();config=data/'mass-notifications.config';config.write_text('{"preserve":"exact bytes"}\n')
-   module=root/'modules/slsmassnotifyserver';module.mkdir(parents=True);(module/'module.xml').write_text('original')
+   module=root/'web/admin/modules/slsmassnotifyserver';module.mkdir(parents=True);(module/'module.xml').write_text('original')
+   prior={'slsmassnotifyserver':{'schema':1,'module':'slsmassnotifyserver','version':'0.1.8-beta',
+    'source':{'kind':'publisher-ed25519','archive_sha256':'a'*64},
+    'files':{'module.xml':{'target':'admin/modules/slsmassnotifyserver/module.xml',
+     'sha256':hashlib.sha256(b'original').hexdigest()}}},'dashboard':None,'framework':None}
+   approval=root/'previous-web-approval.json';approval.write_text(json.dumps(prior));approval.chmod(0o600)
    (data/'delivery-ledger').write_text('current receipt')
    pending=data/'mass-notifications.pending.config';pending.write_text('{"staged":"preserve exact bytes"}\n')
-   installer=root/'installer.sh';installer.write_text(SOURCE.replace('/var/www/html/admin/modules',str(root/'modules')))
+   installer=root/'installer.sh';installer.write_text(SOURCE.replace('/var/www/html',str(root/'web')))
    if scenario=='unknown-prepared-stage':
     installer.write_text(installer.read_text().replace('set_install_stage "FreePBX ownership protection"', 'set_install_stage "unrecognized fixture stage"'))
    elif scenario=='unknown-mutating-stage':
@@ -146,7 +209,7 @@ class TransactionTests(unittest.TestCase):
    self.assertEqual(pending.read_text(),'{"staged":"preserve exact bytes"}\n')
    trace=(root/'trace').read_text().splitlines()
    journals=list((root/'journal').glob('transaction-*/transaction.json'))
-   if scenario in ('approval-rejected','php-rejected'):
+   if scenario in ('approval-rejected','php-rejected','web-rejected'):
     self.assertEqual(journals,[])
    else:
     self.assertEqual(len(journals),1)
@@ -156,7 +219,7 @@ class TransactionTests(unittest.TestCase):
     self.assertEqual(journal['phase'],expected_phase)
     self.assertEqual(journals[0].stat().st_mode & 0o777,0o600)
     expected_stage={'unknown-prepared-stage':'publisher and stock approval','unknown-mutating-stage':'protected runtime preparation','prepare-failed':'protected runtime preparation','install-failed':'module activation',
-                    'chown-failed':'FreePBX ownership protection','legacy-permissions-failed':'legacy configuration and runtime permissions','collector-failed':'previous phone collector recovery'}.get(scenario,'post-install verification')
+                    'chown-failed':'FreePBX ownership protection','legacy-permissions-failed':'legacy configuration and runtime permissions','collector-failed':'previous phone collector recovery','startup-collector-failed':'runtime integration'}.get(scenario,'post-install verification')
     self.assertEqual(journal['stage'],expected_stage)
     self.assertEqual(bool(list(journals[0].parent.glob('config.snapshot'))),expected_phase=='recovery_failed')
    self.assertNotIn('asterisk-fwconsole-chown',trace)
@@ -164,19 +227,22 @@ class TransactionTests(unittest.TestCase):
     self.assertEqual((module/'module.xml').read_text(),'candidate')
     self.assertLess(trace.index('protected-activate --apply'),trace.index('asterisk-fwconsole-reload'))
     self.assertLess(trace.index('asterisk-fwconsole-reload'),trace.index('protected-verify'))
+    self.assertLess(trace.index('asterisk-fwconsole-reload'),trace.index('collector-ready'))
+    self.assertLess(trace.index('collector-ready'),trace.index('protected-verify'))
+    self.assertLess(trace.index('protected-ami-intent'),trace.index('module-install'))
     self.assertEqual(trace[-1],'success')
     phases=['php-security-floor','stock-dashboard-bootstrap','approval-preflight','chown-protected','legacy-permissions-repaired','approved-prerequisites','previous-collector-healthy','approved-snapshot','protected-prepare --apply']
     self.assertEqual([trace.index(item) for item in phases],sorted(trace.index(item) for item in phases))
-    self.assertFalse((root/'recovery').exists())
+    self.assertEqual(list(journals[0].parent.glob('sls-mass-notify-recovery.*')),[])
    else:
     self.assertEqual((module/'module.xml').read_text(),'original')
-    if scenario in ('approval-rejected','php-rejected'):
+    if scenario in ('approval-rejected','php-rejected','web-rejected'):
      self.assertFalse(any(x.startswith('static-') for x in trace))
-     failure='failure-38-php_security_preflight_failed' if scenario=='php-rejected' else 'failure-31-install_command_failed'
+     failure={'php-rejected':'failure-38-php_security_preflight_failed','web-rejected':'failure-41-freepbx_web_preflight_failed'}.get(scenario,'failure-31-install_command_failed')
      self.assertIn(failure,trace)
      self.assertNotIn('chown-protected',trace)
      self.assertNotIn('legacy-permissions-repaired',trace)
-     if scenario=='php-rejected':
+     if scenario in ('php-rejected','web-rejected'):
       self.assertNotIn('stock-dashboard-bootstrap',trace)
       self.assertNotIn('approval-preflight',trace)
     elif scenario=='unknown-prepared-stage':
@@ -190,14 +256,14 @@ class TransactionTests(unittest.TestCase):
     else:
      self.assertIn('static-restore',trace);self.assertIn('static-restore-services',trace);self.assertIn('db-restored',trace)
      if scenario=='final-failed-rollback-ok':
-      self.assertFalse((root/'recovery').exists())
+      self.assertEqual(list(journals[0].parent.glob('sls-mass-notify-recovery.*')),[])
       self.assertIn('failure-34-install_command_failed',trace)
      else:
-      self.assertTrue((root/'recovery/idle-before.json').exists())
+      self.assertTrue((Path(journal['settings']['RECOVERY_DIR'])/'idle-before.json').exists())
       self.assertIn('failure-'+str(expected)+'-install_rollback_failed',trace)
    # The EXIT guard always releases worker slots, including every failure path.
    import fcntl
-   if scenario not in ('approval-rejected','php-rejected','unknown-prepared-stage','chown-failed','legacy-permissions-failed','collector-failed'):
+   if scenario not in ('approval-rejected','php-rejected','web-rejected','unknown-prepared-stage','chown-failed','legacy-permissions-failed','collector-failed'):
     with (data/'schedule-runner.lock').open('r+') as handle:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
    else:
     self.assertFalse((data/'schedule-runner.lock').exists())
@@ -207,8 +273,9 @@ class TransactionTests(unittest.TestCase):
   self.run_case('final-failed',34,True)
  def test_prerequisite_rejection_does_not_restore_or_disable_old_automation(self):self.run_case('approval-rejected',31)
  def test_security_floor_rejection_precedes_stock_bootstrap_and_trust_mutation(self):self.run_case('php-rejected',38)
+ def test_broken_freepbx_web_response_precedes_stock_bootstrap_and_trust_mutation(self):self.run_case('web-rejected',41)
  def test_failure_stages_preserve_old_module_config_and_operational_records(self):
-  for scenario,code in [('prepare-failed',32),('install-failed',33),('final-failed',34),('pending-drift',1)]:
+  for scenario,code in [('prepare-failed',32),('install-failed',33),('startup-collector-failed',39),('final-failed',34),('pending-drift',1)]:
    with self.subTest(scenario=scenario):self.run_case(scenario,code)
  def test_verified_rollback_is_recorded_before_evidence_cleanup(self):self.run_case('final-failed-rollback-ok',34)
  def test_unknown_stage_preserves_the_last_valid_stage_for_finalization(self):

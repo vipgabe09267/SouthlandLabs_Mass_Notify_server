@@ -570,7 +570,7 @@
           "created_at",
           "is_test"
         ],
-        "title": "SLS notification payload schema 1",
+        "title": "SLL notification payload schema 1",
         "type": "object"
       }
     },
@@ -588,13 +588,13 @@
     }
   },
   "info": {
-    "description": "Additive Control API, notification schema 1 and desktop SSE protocol 2. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
+    "description": "Additive Control API, notification schema 1 and desktop SSE protocol 2. Signed trigger, provider callback and operator-portal routes have separate authentication contracts and are outside this OpenAPI document. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
     "license": {
       "identifier": "AGPL-3.0-or-later",
       "name": "AGPL-3.0-or-later"
     },
-    "title": "SLS Mass Notifications API",
-    "version": "0.1.8-beta"
+    "title": "SLL Mass Notify Server API",
+    "version": "0.1.9-beta"
   },
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "openapi": "3.1.1",

@@ -50,7 +50,8 @@ trait SlsSupportDiagnostics
         $checks[] = SlsDeploymentReadiness::certificate(SlsAdvertisedAddress::checkLocalHttps($settings), $now);
         $media = SlsLocalWebProbe::mediaAccess($settings);
         $checks[] = SlsDeploymentReadiness::check('media_access', _('Generated-media access'), $media['ok'] ? 'ok' : 'warning', $media['message']);
-        $capacity = $this->checkDesktopCapacityResources((int)($settings['desktop_client_limit'] ?? 25), (int)($settings['phone_device_limit'] ?? 25));
+        $capacity = $this->checkDesktopCapacityResources((int)($settings['desktop_client_limit'] ?? 25),
+            (int)($settings['phone_device_limit'] ?? 25), (($settings['deployment_profile'] ?? 'standard') === 'lite') ? 'lite' : 'standard');
         $checks[] = SlsDeploymentReadiness::capacity($capacity);
         $checks = array_merge($checks, $this->automationDependencyChecks($settings));
         $attention = count(array_filter($checks, static function ($check) { return $check['state'] === 'warning'; }));

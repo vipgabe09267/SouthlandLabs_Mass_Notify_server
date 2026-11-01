@@ -15,7 +15,7 @@ trait SlsEnterpriseAdministration
     public function assertEnterprisePageAdministrator(): void { $this->assertEnterpriseAdministrator(); }
     protected function assertEnterpriseAdministrator(): array
     {
-        // A portal administrator administers SLS operations, not PBX security.
+        // A portal administrator administers SLL operations, not PBX security.
         // Labs activation is confined to the authenticated FreePBX admin panel.
         if (isset($GLOBALS['sls_operator_portal_principal']) || isset($GLOBALS['sls_control_principal'])) {
             throw new \DomainException('Manage Enterprise Labs from the FreePBX administrator panel.');
@@ -35,6 +35,9 @@ trait SlsEnterpriseAdministration
     protected function saveEnterpriseNamespaces(array $changes,array $expected=[],?array $featureSelection=null): void
     {
         $this->assertEnterpriseAdministrator();
+        if (array_diff(array_keys($changes), ['beta_notice','labs_safety'])) {
+            \SLS\MassNotify\RuntimeState::requireEnterpriseAvailable($this->getActiveSettings());
+        }
         if (!$changes || array_diff(array_keys($changes), ['beta_notice','labs_safety','enterprise_labs','enterprise_cluster','enterprise_identity','directory_sync',
             'subscriber_browser','enterprise_integrations','enterprise_operations','incident_workflows'])) {
             throw new \InvalidArgumentException('Unsupported Enterprise Labs configuration section.');
@@ -50,6 +53,9 @@ trait SlsEnterpriseAdministration
             $lock = $this->acquireSettingsLock(false);
             $active = $this->loadSettingsFile(self::SETTINGS_JSON);
             $active = $this->normalizeSettings($active);
+            if (array_diff(array_keys($changes), ['beta_notice','labs_safety'])) {
+                \SLS\MassNotify\RuntimeState::requireEnterpriseAvailable($active);
+            }
             if ($featureSelection!==null) {
                 LabsSafety::requireReceipt($active,LabsSafety::PAGE_FEATURE);
                 $manager=EnterpriseLabsConfig::state($active);
@@ -118,7 +124,7 @@ trait SlsEnterpriseAdministration
         if (($config['enabled']??'0')!=='1'
             || (($config['speakers']['enabled']??'0')!=='1' && ($config['radios']['enabled']??'0')!=='1')) { return; }
         if (!method_exists($this,'getConfiguredPjsipExtensionNumbers')) {
-            throw new \DomainException('This PBX cannot enumerate configured PJSIP extensions. Repair the SLS module before enabling speaker or radio profiles.');
+            throw new \DomainException('This PBX cannot enumerate configured PJSIP extensions. Repair the SLL module before enabling speaker or radio profiles.');
         }
         try { $extensions=$this->getConfiguredPjsipExtensionNumbers(); }
         catch (\Throwable $error) { throw new \DomainException('The PBX could not read configured PJSIP extensions. Restore its extension inventory before enabling speaker or radio profiles.',0,$error); }
@@ -183,6 +189,7 @@ trait SlsEnterpriseAdministration
     public function enterpriseAdministratorAction(string $action,array $input): array
     {
         $this->assertEnterpriseAdministrator();
+        \SLS\MassNotify\RuntimeState::requireEnterpriseAvailable($this->getActiveSettings());
         if ($action==='labs_features_state') {
             if ($input!==[]) { throw new \InvalidArgumentException('Feature manager state accepts no options.'); }
             LabsSafety::requireReceipt($this->getActiveSettings(),LabsSafety::PAGE_FEATURE);
@@ -272,6 +279,9 @@ trait SlsEnterpriseAdministration
     {
         $this->assertEnterpriseAdministrator();
         $settings = $this->getActiveSettings();
+        if (!\SLS\MassNotify\RuntimeState::enterpriseAvailable($settings)) {
+            return load_view(__DIR__.'/views/enterprise_lite.php');
+        }
         if (!LabsSafety::hasReceipt($settings, LabsSafety::PAGE_FEATURE)) {
             return load_view(__DIR__.'/views/enterprise_locked.php', ['csrf_token'=>$this->getCsrfToken(),
                 'safety'=>LabsSafety::normalize($settings['labs_safety']??[])]);

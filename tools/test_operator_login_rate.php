@@ -86,6 +86,29 @@ try{
  unset($GLOBALS['operatorRateRetirementProbe']);
  $expiry=$root.'/expiry.json';for($i=0;$i<20;$i++){$at=$now+intdiv($i,6)*300;$g=Rate::begin($expiry,$ip,$at);Rate::finish($expiry,$ip,$g['reservation'],true,$at);}
  rateCheck(Rate::begin($expiry,$ip,$now+900+86400)['retry_after']===0,'Expired daily lock survived');
+ // Distributed one-failure churn must not turn the bounded registry into a
+ // 24-hour denial for every previously unseen source. Preserve all existing
+ // evidence while bounding overflow password work to a short window.
+ $churn=$root.'/churn.json';
+ for($i=0;$i<512;$i++){
+  $source='2001:db8::'.dechex($i+1);$g=Rate::begin($churn,$source,$now);
+  Rate::finish($churn,$source,$g['reservation'],true,$now);
+ }
+ $churnBefore=json_decode(file_get_contents($churn),true);
+ $fresh=Rate::begin($churn,'2001:db8:1::1',$now+1);
+ rateCheck($fresh['retry_after']===0&&$fresh['reservation']!=='','Full registry denied every new source for 24 hours');
+ Rate::finish($churn,'2001:db8:1::1',$fresh['reservation'],false,$now+1);
+ $churnAfter=json_decode(file_get_contents($churn),true);
+ rateCheck(count($churnAfter['ips'])===512&&$churnAfter['ips']===$churnBefore['ips'],'Overflow admission discarded existing lockout evidence');
+ $overflowGrants=0;
+ for($i=0;$i<6;$i++){
+  $source='2001:db8:2::'.dechex($i+1);$g=Rate::begin($churn,$source,$now+2);
+  if($g['retry_after']===0){$overflowGrants++;Rate::finish($churn,$source,$g['reservation'],true,$now+2);}
+ }
+ rateCheck($overflowGrants>0&&Rate::begin($churn,'2001:db8:3::1',$now+2)['retry_after']>0,'Overflow password work was not bounded');
+ $expiredOverflow=Rate::begin($churn,'2001:db8:3::1',$now+303);
+ rateCheck($expiredOverflow['retry_after']===0,'Overflow throttle survived its five-minute safety window');
+ Rate::finish($churn,'2001:db8:3::1',$expiredOverflow['reservation'],false,$now+303);
  // Concurrent workers reserve before expensive password hashing.
  $concurrent=$root.'/concurrent.json';$children=[];
  for($i=0;$i<12;$i++){
@@ -100,6 +123,10 @@ try{
  $general=$root.'/general.json';for($i=0;$i<10;$i++)Portal::loginAttempt($general,$ip,'owner',$now);
  rateCheck(Portal::loginAttempt($general,$ip,'owner',$now+1)>0,'Account backstop absent');
  Portal::recoveredLogin($general,$ip,'owner',$now+1);rateCheck(Portal::loginAttempt($general,$ip,'owner',$now+1)===0,'Verified recovery did not clear short backstop');
+
+ $portalSource=file_get_contents(dirname(__DIR__).'/slsmassnotifyserver/portal/index.php');
+ rateCheck(str_contains($portalSource,"OperatorPortal::loginAttempt(\$generalRatePath,\$network['ip'],'',\$now)"),
+     'Password login still permits unauthenticated username-wide denial.');
  $state=json_decode(file_get_contents($general),true);rateCheck(($state['global']['count']??0)===11,'Recovery cleared global budget');
  echo "$checks durable password-limit, expiry, recovery, protected storage and concurrency checks passed.\n";
 }finally{foreach(glob($root.'/*')as$f)unlink($f);rmdir($root);}

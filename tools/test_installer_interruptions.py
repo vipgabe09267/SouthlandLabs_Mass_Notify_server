@@ -139,6 +139,78 @@ recover_interrupted_installation "$2"
             self.assertEqual((second/'unknown').read_bytes(),b'preserve')
             self.assertFalse((second/'transaction.json').exists())
 
+    def test_malformed_sequence_name_is_never_offered_as_recovery_authority(self):
+        with tempfile.TemporaryDirectory(dir='/root') as name:
+            root=Path(name)/'journal';root.mkdir(mode=0o700)
+            sequence=root/'transaction-sequence';sequence.write_bytes(b'17\ninvalid\n');sequence.chmod(0o600)
+            harness='source "$1"; INSTALL_TRANSACTION_ROOT="$2"; check_interrupted_installation'
+            result=subprocess.run(['bash','-c',harness,'fixture',str(SOURCE),str(root)],
+                capture_output=True,text=True,timeout=4)
+            self.assertNotEqual(result.returncode,0)
+            self.assertNotIn('--recover '+str(sequence),result.stderr)
+            self.assertEqual(sequence.read_bytes(),b'17\ninvalid\n')
+
+    def test_valid_legacy_sequence_is_metadata_not_an_interrupted_transaction(self):
+        with tempfile.TemporaryDirectory(dir='/root') as name:
+            root=Path(name)/'journal';root.mkdir(mode=0o700)
+            sequence=root/'transaction-sequence';sequence.write_bytes(b'17\n');sequence.chmod(0o600)
+            before=sequence.stat()
+            harness='source "$1"; INSTALL_TRANSACTION_ROOT="$2"; check_interrupted_installation'
+            result=subprocess.run(['bash','-c',harness,'fixture',str(SOURCE),str(root)],
+                capture_output=True,text=True,timeout=4)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(self.module.pending(root),[])
+            self.assertEqual(sequence.read_bytes(),b'17\n')
+            self.assertEqual((sequence.stat().st_ino,sequence.stat().st_mtime_ns),
+                             (before.st_ino,before.st_mtime_ns))
+
+    def test_legacy_sequence_validation_preserves_read_only_metadata_and_rejects_unsafe_files(self):
+        harness='source "$1"; INSTALL_TRANSACTION_ROOT="$2"; check_interrupted_installation'
+        for content,mode in [(b'0\n',0o600),(b'17\n',0o640),(b'9223372036854775807\n',0o644)]:
+            with self.subTest(content=content,mode=mode),tempfile.TemporaryDirectory(dir='/root') as name:
+                root=Path(name)/'journal';root.mkdir(mode=0o700)
+                path=root/'transaction-sequence';path.write_bytes(content);path.chmod(mode);before=path.stat()
+                result=subprocess.run(['bash','-c',harness,'fixture',str(SOURCE),str(root)],capture_output=True,text=True,timeout=4)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(self.module.pending(root),[])
+                self.assertEqual(path.read_bytes(),content)
+                self.assertEqual((path.stat().st_ino,path.stat().st_mtime_ns,path.stat().st_mode),
+                                 (before.st_ino,before.st_mtime_ns,before.st_mode))
+        for case in ('empty','negative','overflow','leading-zero','extra-line','world-writable','executable','link','hardlink','directory','runtime-owner'):
+            with self.subTest(case=case),tempfile.TemporaryDirectory(dir='/root') as name:
+                root=Path(name)/'journal';root.mkdir(mode=0o700);path=root/'transaction-sequence'
+                values={'empty':b'','negative':b'-1\n','overflow':b'9223372036854775808\n','leading-zero':b'01\n','extra-line':b'17\n18\n'}
+                if case=='directory':path.mkdir(mode=0o700)
+                else:
+                    path.write_bytes(values.get(case,b'17\n'));path.chmod(0o600)
+                    if case=='link':
+                        target=root.parent/'target';path.rename(target);path.symlink_to(target)
+                    elif case=='hardlink':os.link(path,root.parent/'alias')
+                    elif case=='world-writable':path.chmod(0o666)
+                    elif case=='executable':path.chmod(0o700)
+                    elif case=='runtime-owner':
+                        import pwd
+                        os.chown(path,pwd.getpwnam('asterisk').pw_uid,-1)
+                result=subprocess.run(['bash','-c',harness,'fixture',str(SOURCE),str(root)],capture_output=True,text=True,timeout=4)
+                self.assertNotEqual(result.returncode,0)
+                self.assertNotIn('--recover '+str(path),result.stderr)
+                with self.assertRaises((self.module.TransactionError,OSError,ValueError)):
+                    self.module.pending(root)
+                self.assertTrue(path.exists() or path.is_symlink())
+
+    def test_legacy_sequence_allows_admission_and_completed_generation_cleanup(self):
+        with tempfile.TemporaryDirectory(dir='/root') as name:
+            root=Path(name)/'journal';root.mkdir(mode=0o700)
+            sequence=root/'transaction-sequence';sequence.write_bytes(b'17\n');sequence.chmod(0o600)
+            before=sequence.stat()
+            first=self.module.begin(root)
+            self.assertEqual(self.module.state(first)['phase'],'preparing')
+            self.module.update(first,'abandoned',{})
+            second=self.module.begin(root)
+            self.assertNotEqual(first,second)
+            self.assertEqual(sequence.read_bytes(),b'17\n')
+            self.assertEqual((sequence.stat().st_ino,sequence.stat().st_mtime_ns),(before.st_ino,before.st_mtime_ns))
+
     @unittest.skipUnless(os.geteuid()==0,'requires root for private installer journals')
     def test_standalone_discovery_rejects_ambiguous_or_mistyped_metadata(self):
         harness='source "$1"; INSTALL_TRANSACTION_ROOT="$2"; check_interrupted_installation'
@@ -455,9 +527,8 @@ recover_interrupted_installation "$3"
 '''
                 installer_text=re.sub(r'^set_install_stage\(\) \{.*?^\}\n',lambda unused:legacy_setter,
                     installer_text,count=1,flags=re.M|re.S)
-                # The saved installer really executes after the patched caller
-                # authenticates it. Replace only external PBX coordination with
-                # inert fixture commands inside this signed, private artifact.
+                # A retained, signed old installer remains valid evidence but
+                # must never take execution back from the repaired carrier.
                 overrides='''
 INSTALL_TRANSACTION_ROOT="FIXTURE/journal"
 DATA_DIR="FIXTURE/absent-data"; FREEPBX_CHOWN_CONFIG="FIXTURE/freepbx_chown.conf"
@@ -468,6 +539,7 @@ acquire_worker_coordination() { printf worker >>"FIXTURE/trace"; }
 acquire_settings_coordination() { :; }
 clear_install_failure() { :; }
 record_install_failure() { :; }
+main() { printf 'old-installer-executed\n' >>"FIXTURE/trace"; return 91; }
 '''.replace('FIXTURE',str(root))
                 installer_text=installer_text.replace('if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then',
                     overrides+'\nif [[ "${BASH_SOURCE[0]}" == "$0" ]]; then')
@@ -525,15 +597,34 @@ set_install_stage "FreePBX ownership protection" "fixture recovery instruction"'
             else:
                 self.assertTrue((transaction/'approval/freepbx-chown.snapshot').is_file())
                 self.assertNotEqual(config.read_bytes(),original)
+                # Runtime rollback removes only the data-directory exclusion.
+                # The separate installer backup area must remain private on a
+                # later native FreePBX boot, even after this transaction ends.
+                import base64
+                permanent=(b'\n; BEGIN SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n[blacklist]\n'
+                    b'directory = /var/www/html/admin/modules/.sls-mass-notify-recovery\n'
+                    b'; END SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n')
+                permanent_snapshot=transaction/'approval/freepbx-module-recovery-chown.snapshot'
+                protection=json.loads(permanent_snapshot.read_bytes())
+                self.assertEqual(protection['scope'],'recovery')
+                self.assertEqual(base64.b64decode(protection['original_base64']),original)
+                self.assertEqual(protection['installed_sha256'],hashlib.sha256(original+permanent).hexdigest())
+                self.assertEqual((permanent_snapshot.stat().st_uid,permanent_snapshot.stat().st_mode & 0o777),(0,0o600))
+                runtime_snapshot=json.loads((transaction/'approval/freepbx-chown.snapshot').read_bytes())
+                self.assertEqual(base64.b64decode(runtime_snapshot['original_base64']),original+permanent)
             recovery=r'''
 source "$1"
 fixture="$2"; INSTALL_TRANSACTION_ROOT="$fixture/journal"
 INSTALLER_SOURCE_PATH="$3/installer.sh"
+URL=""
 DATA_DIR="$fixture/absent-data"; FREEPBX_CHOWN_CONFIG="$fixture/freepbx_chown.conf"
 LOG_FILE="$fixture/recovery.log"; INSTALL_NOTIFICATION_SIDE_EFFECTS=0
 acquire_update_coordination() { :; }
 acquire_maintenance_coordination() { :; }
-acquire_worker_coordination() { printf worker >>"$fixture/trace"; }
+acquire_worker_coordination() {
+  printf worker >>"$fixture/trace"
+  [[ "${FIXTURE_REFUSE_GUARD:-0}" != 1 ]]
+}
 acquire_settings_coordination() { :; }
 clear_install_failure() { :; }
 record_install_failure() { :; }
@@ -542,13 +633,47 @@ recover_interrupted_installation "$3"
             if legacy_stage_failure:
                 recovery=recovery.replace('INSTALLER_SOURCE_PATH="$3/installer.sh"','INSTALLER_SOURCE_PATH="$1"')
                 patched=root/'patched-installer.sh'
-                patched.write_text(SOURCE.read_text().replace('/usr/local/bin/sls_mass_notify/sls_release_trust.py',
-                    str(root/'recovery-verifier.py')))
+                text=SOURCE.read_text().replace('/usr/local/bin/sls_mass_notify/sls_release_trust.py',
+                    str(root/'recovery-verifier.py'))
+                text=text.replace('MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=',
+                    public.decode().splitlines()[1])
+                patched.write_text(text)
                 patched.chmod(0o600)
+                carrier=root/'carrier';carrier.mkdir(mode=0o700)
+                carrier_package=carrier/'slsmassnotifyserver-0.1.9-beta.tgz'
+                current={name:(BIN/name).read_bytes() for name in names}
+                current['sls_release_trust.py']=verifier.encode()
+                with tarfile.open(carrier_package,'w:gz') as archive:
+                    for filename,body in current.items():
+                        member=tarfile.TarInfo('slsmassnotifyserver/bin/sls_mass_notify/'+filename)
+                        member.size=len(body);archive.addfile(member,io.BytesIO(body))
+                    body=b'<module><rawname>slsmassnotifyserver</rawname><version>0.1.9-beta</version></module>'
+                    member=tarfile.TarInfo('slsmassnotifyserver/module.xml');member.size=len(body)
+                    archive.addfile(member,io.BytesIO(body))
+                carrier_manifest=carrier/'release-manifest.json'
+                carrier_manifest.write_text(json.dumps({'schema':1,'version':'0.1.9-beta',
+                    'tag':'slsmassnotifyserver-0.1.9-beta','package':carrier_package.name,
+                    'installer_sha256':hashlib.sha256(patched.read_bytes()).hexdigest(),
+                    'package_sha256':hashlib.sha256(carrier_package.read_bytes()).hexdigest()}))
+                subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(key),'-in',str(carrier_manifest),
+                    '-out',str(carrier/'release-manifest.sig')],check=True,capture_output=True)
+                for item in carrier.iterdir():item.chmod(0o600)
+                carrier_env={**os.environ,'SLS_MASS_NOTIFY_TGZ':str(carrier_package),
+                    'SLS_MASS_NOTIFY_SHA256':hashlib.sha256(carrier_package.read_bytes()).hexdigest(),
+                    'SLS_MASS_NOTIFY_MANIFEST':str(carrier_manifest),
+                    'SLS_MASS_NOTIFY_MANIFEST_SIGNATURE':str(carrier/'release-manifest.sig')}
+                prior_evidence={p:p.read_bytes() for p in transaction.rglob('*') if p.is_file()}
+                refused=subprocess.run(['bash','-c',recovery,'fixture',str(patched),str(root),str(transaction)],
+                    env={**carrier_env,'FIXTURE_REFUSE_GUARD':'1'},capture_output=True,text=True,timeout=10)
+                self.assertNotEqual(refused.returncode,0)
+                self.assertTrue((root / 'trace').exists(), refused.stdout + refused.stderr)
+                self.assertNotIn('old-installer-executed',(root/'trace').read_text())
+                for item,body in prior_evidence.items():self.assertEqual(item.read_bytes(),body)
+                self.assertTrue(list(transaction.glob('recovery-carrier.*/release-manifest.sig')))
             restored=subprocess.run(['bash','-c',recovery,'fixture',str(patched) if legacy_stage_failure else str(transaction/'installer.sh'),str(root),str(transaction)],
-                capture_output=True,text=True,timeout=10)
+                env=carrier_env if legacy_stage_failure else None,capture_output=True,text=True,timeout=10)
             self.assertEqual(restored.returncode,0,restored.stdout+restored.stderr)
-            self.assertEqual(config.read_bytes(),original)
+            self.assertEqual(config.read_bytes(),original if legacy_stage_failure else original+permanent)
             self.assertEqual(config.stat().st_mode & 0o777,0o640)
             self.assertFalse((root/'absent-data').exists())
             self.assertEqual(self.module.pending(root/'journal'),[])

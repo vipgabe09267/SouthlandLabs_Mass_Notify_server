@@ -39,7 +39,7 @@ trait SlsIncidents
         }
         if ($actor) { return $actor; }
         $user = $_SESSION['AMP_user'] ?? null;
-        return ['identity' => is_object($user) && is_string($user->username ?? null) ? $user->username : (PHP_SAPI === 'cli' ? 'SLS incident worker' : 'FreePBX administrator'),
+        return ['identity' => is_object($user) && is_string($user->username ?? null) ? $user->username : (PHP_SAPI === 'cli' ? 'SLL incident worker' : 'FreePBX administrator'),
             'source' => PHP_SAPI === 'cli' ? 'incident_worker' : 'freepbx'];
     }
     private function incidentTemplates(bool $pending = false): array

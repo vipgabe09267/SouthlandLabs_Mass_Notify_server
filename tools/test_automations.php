@@ -18,6 +18,8 @@ try {
 check(mkdir($parent,0700)&&chmod($parent,0700),'Unable to create the private automation fixture.');
 $root=$parent.'/automations';check(mkdir($root,0700),'Unable to create the automation journal fixture.');
 $action=AutomationConfig::action(['id'=>'act_'.str_repeat('a',24),'name'=>'Fixture screen','enabled'=>true,'kind'=>'brightsign_udp','host'=>'192.168.1.20','port'=>5000,'message'=>'evacuation']);
+$legacyScript=AutomationConfig::action(['id'=>'act_'.str_repeat('f',24),'name'=>'Legacy script','enabled'=>true,'kind'=>'script','path'=>'/opt/sls/action.sh','sha256'=>str_repeat('1',64)]);
+check(($legacyScript['execution_mode']??'')==='restricted','Legacy script action did not migrate to fail-closed restricted execution.');
 $rule=AutomationConfig::rule(['id'=>'trg_'.str_repeat('b',24),'name'=>'Fixture sensor','enabled'=>true,'kind'=>'sensor','secret'=>str_repeat('c',64),'event'=>'smoke','action_ids'=>[$action['id']],'allow_tests'=>true,'cooldown_seconds'=>10]);
 $settings=['enabled'=>'0','runtime_enabled'=>true,'automations'=>['schema'=>1,'rules'=>[$rule],'actions'=>[$action]]];
 $time=time(); $calls=[]; $store=new AutomationStore($root);
@@ -312,7 +314,7 @@ foreach(['GET','POST']as$method){
     check(is_resource($process),'Role controller fixture could not start');check(fclose($pipes[0]),'Role controller input pipe could not be closed.');
     $body=stream_get_contents($pipes[1],8193);$status=stream_get_contents($pipes[2],1025);fclose($pipes[1]);fclose($pipes[2]);
     $exit=proc_close($process);
-    check(is_string($body)&&strlen($body)<=8192&&is_string($status)&&strlen($status)<=1024&&$exit===0&&$status==='403'&&str_contains($body,'current SLS role'),'Trigger page bypassed its SLS role gate.');
+    check(is_string($body)&&strlen($body)<=8192&&is_string($status)&&strlen($status)<=1024&&$exit===0&&$status==='403'&&str_contains($body,'current SLL role'),'Trigger page bypassed its SLL role gate.');
 }
 $passed=true;
 } finally { automationFixtureCleanup($parent,$passed); }

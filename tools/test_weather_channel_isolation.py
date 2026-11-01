@@ -15,7 +15,7 @@ spec.loader.exec_module(lightning)
 
 
 class IsolationTests(unittest.TestCase):
-    def queued_lightning(self, *, observation=None, area_changes=None, audio_error=False):
+    def queued_lightning(self, *, observation=None, area_changes=None, audio_error=False, source_decision='eligible'):
         area = {'id': 'fixture', '_service_enabled': '1', 'enabled': '1', 'radius_miles': 10,
                 'location': 'this area', 'recipients': ['1000'], 'desktop_clients': ['fixture-desktop'],
                 'query_interval_minutes': 5, 'all_clear': 'send'}
@@ -35,6 +35,16 @@ class IsolationTests(unittest.TestCase):
         def visual(*args, **kwargs):
             self.assertEqual(kwargs['desktop_bindings'], {'fixture-desktop': 'fixture-enrollment'})
             order.append('desktop')
+        def authority(context):
+            # This fixture isolates channel order/failure, with no protected
+            # source files. Actual source reads and delay-time cancellation are
+            # covered by test_deep_lightning_audio_boundary.py.
+            self.assertEqual(context['phones'], ['1000'])
+            self.assertEqual(context['desktops'], ['fixture-desktop'])
+            self.assertEqual(context['desktop_client_ids'], {'fixture-desktop': 'fixture-enrollment'})
+            return (source_decision, '' if source_decision == 'eligible' else 'fixture_source_revoked',
+                    ['1000'] if source_decision == 'eligible' else [], ['fixture-desktop'])
+        source_authority = mock.Mock(side_effect=authority)
         with mock.patch.multiple(lightning,
              load_config=mock.Mock(return_value=({'desktop_clients': [{'username': 'fixture-desktop', 'client_id': 'fixture-enrollment', 'enabled': '1'}]}, {})),
              select_group=mock.Mock(return_value=area), configure_group_runtime=mock.Mock(),
@@ -42,12 +52,17 @@ class IsolationTests(unittest.TestCase):
              CURRENT_GROUP_ID='fixture',
              read_state=mock.Mock(return_value=observation or {'last_observed_at': time.time(), 'active': True, 'cluster_started': 1}),
              send_visual=mock.Mock(side_effect=visual),
+             local_source_authority=source_authority,
              generate_audio=mock.Mock(side_effect=audio),
              submit_local_channels=mock.Mock(side_effect=lambda *args, **kwargs: (order.append('phone') or 1, [])),
              queue_external_delivery=mock.Mock(side_effect=lambda *args, **kwargs: order.append('external-queue')),
              append_event=mock.Mock(), record_xweather_outcome=mock.Mock(),
              atomic_json_update=mock.Mock(side_effect=AssertionError('Dispatcher must not rewrite observer state'))):
             result = lightning.deliver_queued_event(record)
+        if order:
+            source_authority.assert_called_once()
+        else:
+            source_authority.assert_not_called()
         return result, order
 
     def test_queued_lightning_desktop_precedes_audio_and_external_work(self):
@@ -59,6 +74,12 @@ class IsolationTests(unittest.TestCase):
         result, order = self.queued_lightning(audio_error=True)
         self.assertEqual(result[0], 'failed')
         self.assertEqual(order, ['desktop', 'audio', 'phone', 'external-queue'])
+
+    def test_queued_lightning_current_source_refusal_preserves_earlier_desktop_only(self):
+        result, order = self.queued_lightning(source_decision='cancelled')
+        self.assertEqual(result[0], 'failed')
+        self.assertEqual(order, ['desktop', 'audio', 'external-queue'])
+        self.assertIn('fixture_source_revoked', result[1])
 
     def test_queued_lightning_rejects_stale_changed_and_disabled_targets(self):
         for observation, area in [({'last_observed_at': 1}, {}),

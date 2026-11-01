@@ -379,5 +379,14 @@ if (strpos($html, 'Every 7 days · 1 planned run') === false
 	|| strpos($html, '"editor_start_datetime":"2099-01-15T09:30"') === false) {
 	scheduling_contract_fail('Recurring schedule display or editor start time was not rendered.');
 }
+if (!preg_match('/data-schedule-enabling="1"[^>]*data-schedule-name="Disabled future schedule"/', $html)
+	|| strpos($html, 'Confirm enabling schedule') === false) {
+	scheduling_contract_fail('Schedule activation lacks a contextual confirmation contract.');
+}
+foreach (['Edit schedule: Enabled future schedule', 'Disable schedule: Enabled future schedule', 'Delete schedule: Enabled future schedule'] as $label) {
+	if (strpos($html, 'aria-label="' . $label . '"') === false) {
+		scheduling_contract_fail('Schedule icon action lacks the accessible label: ' . $label);
+	}
+}
 
 fwrite(STDOUT, "Scheduling contract checks passed.\n");

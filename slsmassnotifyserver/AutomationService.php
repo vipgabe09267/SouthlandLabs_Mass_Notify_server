@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace SLS\MassNotify;
 require_once __DIR__ . '/AutomationConfig.php';
+require_once __DIR__ . '/AutomationInputs.php';
 require_once __DIR__ . '/AutomationStore.php';
 require_once __DIR__ . '/bin/sls_mass_notify/sls_runtime_state.php';
 
@@ -13,12 +14,14 @@ final class AutomationService
     {
         $this->store=$store; $this->settings=$settings; $this->announce=$announce; $this->action=$action; $this->clock=$clock ?? static fn()=>time();
     }
-    public function challenge(string $ruleId, string $requestId): array
+    public function challenge(string $ruleId, string $requestId, ?array $authentication=null): array
     {
         $current=AutomationConfig::resolve(($this->settings)(),$ruleId);
         if ($current['rule']['kind']!=='panic') { throw new \DomainException('This identity is not enrolled for panic activation.'); }
         IncidentConfig::identifier($requestId,'/^[a-f0-9]{32}$/D','Panic request identifier');
-        $now=($this->clock)(); $key=hash('sha256',$ruleId.'|'.$requestId);
+        $now=($this->clock)();
+        if ($authentication!==null && !AutomationInputs::authenticateProof($current['rule'],$authentication,$now)) { throw new \DomainException('Trigger authentication expired or its enrollment changed.'); }
+        $key=hash('sha256',$ruleId.'|'.$requestId);
         return $this->store->transaction(static function(array &$state) use($current,$ruleId,$requestId,$now,$key): array {
             AutomationStore::prune($state,$now);
             if (isset($state['challenges'][$key])) { return $state['challenges'][$key]; }
@@ -30,11 +33,12 @@ final class AutomationService
             $state['challenges'][$key]=$challenge; return $challenge;
         });
     }
-    public function activate(string $ruleId, array $input, string $source): array
+    public function activate(string $ruleId, array $input, string $source, ?array $authentication=null): array
     {
         $settings=($this->settings)();
         RuntimeState::requireRunning($settings);
         $resolved=AutomationConfig::resolve($settings,$ruleId); $rule=$resolved['rule']; $now=($this->clock)();
+        if ($authentication!==null && !AutomationInputs::authenticateProof($rule,$authentication,$now)) { throw new \DomainException('Trigger authentication expired or its enrollment changed.'); }
         $phone=$source==='panic_phone' && $rule['kind']==='panic' && ($rule['dial_extension'] ?? '')!=='';
         if ($rule['kind']!==$source && !$phone) { throw new \DomainException('The enrolled source does not permit this activation method.'); }
         IncidentConfig::object($input,['request_id','sent_at','expires_at','event','message','caller','is_test','confirmation','references','invalidate','operation'],'Trigger event');
@@ -129,7 +133,7 @@ final class AutomationService
     }
     public function process(string $id): array
     {
-        if (!RuntimeState::running(($this->settings)())) { return ['state'=>'queued', 'deferred'=>true, 'message'=>'SLS notifications are stopped.']; }
+        if (!RuntimeState::running(($this->settings)())) { return ['state'=>'queued', 'deferred'=>true, 'message'=>'SLL notifications are stopped.']; }
         IncidentConfig::identifier($id,'/^[a-f0-9]{64}$/D','Trigger event identifier'); $now=($this->clock)();
         $row=$this->store->transaction(static function(array &$state) use($id,$now): array {
             $row=$state['events'][$id] ?? null;

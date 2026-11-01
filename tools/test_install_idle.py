@@ -4,8 +4,10 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from copy import deepcopy
 from unittest import mock
@@ -77,6 +79,194 @@ class Idle(unittest.TestCase):
     def test_new_closed_history_is_allowed(self):
         before=self.baseline();self.state['batches']['d'*32]={'status':'closed','closed_at':3};self.save('phone-admission.json',self.state)
         self.assertEqual(self.check.inspect(before)['closed_phone_batches'],2)
+
+    def test_collector_atomic_commit_waits_for_the_read_only_history_snapshot(self):
+        sys.path.insert(0,str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify'))
+        import sls_phone_admission as phone
+        path=self.data/'phone-admission.json';path.unlink()
+        store=phone.PhoneAdmissionStore(self.data,clock=lambda:1000,monotonic=lambda:100,boot_id='fixture-boot')
+        store.collector_heartbeat('b'*32)
+        token=store.admit({'1000':['PJSIP/1000/sip:fixture@192.0.2.1']},25,
+            {'complete':True,'started_tick':100,'generation':'b'*32,'boot_id':'fixture-boot','channels':[]},service='manual')
+        with store.locked() as state:state['batches'][token].update(status='closed',closed_at=1000)
+        before=self.baseline();inode=path.stat().st_ino
+        original_read=os.read;started=threading.Event();finished=threading.Event();errors=[];committed_during_read=[]
+        def update():
+            try:store.collector_heartbeat('c'*32)
+            except BaseException as error:errors.append(error)
+            finally:finished.set()
+        writer=threading.Thread(target=update)
+        def read(fd,size):
+            if not started.is_set() and os.fstat(fd).st_ino==inode:
+                started.set();writer.start()
+                committed_during_read.append(finished.wait(.15))
+            return original_read(fd,size)
+        try:
+            with mock.patch.object(m.os,'read',side_effect=read):
+                report=self.check.inspect(before)
+        finally:
+            if started.is_set():writer.join(timeout=3)
+        self.assertTrue(started.is_set())
+        self.assertTrue(finished.is_set())
+        self.assertEqual(errors,[])
+        self.assertEqual(committed_during_read,[False])
+        self.assertEqual(report['closed_phone_batches'],1)
+        self.check.inspect(before)
+
+    def test_collector_retention_expiry_during_upgrade_keeps_history_verification_valid(self):
+        # Reproduce the reported 22 -> 19 transition with the real store and
+        # collector transaction, without invoking a PBX or a delivery transport.
+        sys.path.insert(0,str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify'))
+        import sls_phone_admission as phone
+        (self.data/'phone-admission.json').unlink()
+        now=[1800000000-phone.HISTORY_SECONDS+1];tick=[100.0]
+        store=phone.PhoneAdmissionStore(self.data,clock=lambda:now[0],
+            monotonic=lambda:tick[0],boot_id='fixture-boot')
+        generation='b'*32;store.collector_heartbeat(generation)
+        old=[]
+        for index in range(22):
+            now[0]=1800000000-phone.HISTORY_SECONDS+(1 if index<3 else 3600)
+            inventory={'complete':True,'started_tick':tick[0],
+                'generation':generation,'boot_id':'fixture-boot','channels':[]}
+            token=store.admit({'1000':['PJSIP/1000/sip:fixture@192.0.2.1']},25,inventory,service='manual')
+            with store.locked() as state:
+                state['batches'][token].update(status='closed',closed_at=now[0])
+            if index<3:old.append(token)
+        now[0]=1800000000;store.collector_heartbeat(generation)
+        self.check.clock=lambda:now[0];self.check.monotonic=lambda:tick[0]
+        before=self.baseline()
+        original=json.loads((self.data/'phone-admission.json').read_text())['batches']
+        self.assertEqual(len(original),22)
+        now[0]+=2;tick[0]+=2
+        # A collector restart after activation takes a real ledger transaction.
+        store.collector_heartbeat('c'*32)
+        retained=json.loads((self.data/'phone-admission.json').read_text())['batches']
+        self.assertEqual(len(retained),19)
+        self.assertTrue(all(token not in retained for token in old))
+        self.assertTrue(all(row==original[token] for token,row in retained.items()))
+        result=self.check.inspect(before)
+        self.assertTrue(result['ok']);self.assertEqual(result['retired_phone_batches'],3)
+
+    def test_legacy_baseline_missing_rows_require_matching_private_evidence_and_expiry(self):
+        self.check.clock=lambda:1000000
+        before=self.baseline();legacy=json.loads(before.read_text());legacy.pop('phone_history_retention')
+        before.write_text(json.dumps(legacy))
+        proof=self.base/'old-phone-evidence.json';proof.write_text(json.dumps(self.state));proof.chmod(0o600)
+        self.state['batches']={};path=self.save('phone-admission.json',self.state)
+        unchanged=[(p,p.read_bytes(),p.stat().st_ino,p.stat().st_mtime_ns) for p in (before,proof,path)]
+        with self.assertRaisesRegex(m.IdleError,'without retention evidence'):self.check.inspect(before)
+        result=self.check.inspect(before,history_evidence=proof)
+        self.assertTrue(result['ok']);self.assertEqual(result['retired_phone_batches'],1)
+        for p,body,inode,mtime in unchanged:
+            self.assertEqual((p.read_bytes(),p.stat().st_ino,p.stat().st_mtime_ns),(body,inode,mtime))
+
+    def test_recovery_evidence_is_retained_privately_without_overwriting_live_history(self):
+        before=self.baseline()
+        proof=self.base/'pre-upgrade-phone.json';proof.write_text(json.dumps(self.state));proof.chmod(0o600)
+        transaction=self.base/'protected-recovery';transaction.mkdir(mode=0o700)
+        retained=transaction/'history-evidence.json'
+        live=self.data/'phone-admission.json'
+        original=(live.read_bytes(),live.stat().st_ino,live.stat().st_mtime_ns,proof.read_bytes())
+        m.retain_history_evidence(before,proof,retained)
+        self.assertEqual(json.loads(retained.read_text()),{'schema':1,'batches':self.state['batches']})
+        self.assertEqual(retained.stat().st_mode&0o777,0o600)
+        inode=retained.stat().st_ino
+        m.retain_history_evidence(before,proof,retained)
+        self.assertEqual(retained.stat().st_ino,inode)
+        self.assertEqual(original,(live.read_bytes(),live.stat().st_ino,live.stat().st_mtime_ns,proof.read_bytes()))
+        changed=deepcopy(self.state);changed['collector']['heartbeat_tick']=98
+        proof.write_text(json.dumps(changed))
+        m.retain_history_evidence(before,proof,retained)
+        self.assertEqual(retained.stat().st_ino,inode)
+        changed['batches'][self.token]['detail']='unverified replacement'
+        proof.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(m.IdleError,'does not match'):
+            m.retain_history_evidence(before,proof,retained)
+        self.assertEqual(retained.stat().st_ino,inode)
+
+    def test_matching_history_evidence_can_be_completed_from_multiple_old_backups(self):
+        self.check.clock=lambda:1000000
+        b,c,d='b'*32,'c'*32,'d'*32
+        self.state['batches'][b]={'status':'closed','closed_at':3,'detail':'second baseline row'}
+        self.state['batches'][c]={'status':'closed','closed_at':4,'detail':'third baseline row'}
+        self.save('phone-admission.json',self.state);before=self.baseline()
+        legacy=json.loads(before.read_text());legacy.pop('phone_history_retention');before.write_text(json.dumps(legacy))
+        first={'schema':1,'collector':{'old':'unneeded'},'batches':{
+            self.token:deepcopy(self.state['batches'][self.token]),
+            b:{'status':'active','created_at':1},d:{'status':'closed','closed_at':1}}}
+        second={'schema':1,'batches':{b:deepcopy(self.state['batches'][b]),c:deepcopy(self.state['batches'][c])}}
+        a=self.base/'backup-a.json';a.write_text(json.dumps(first));a.chmod(0o600)
+        z=self.base/'backup-b.json';z.write_text(json.dumps(second));z.chmod(0o600)
+        raw=(a.read_bytes(),z.read_bytes())
+        destination=self.base/'recovery';destination.mkdir(mode=0o700)
+        retained=destination/'history-evidence.json'
+        self.state['batches']={};live=self.save('phone-admission.json',self.state);live_before=live.read_bytes()
+        m.retain_history_evidence(before,a,retained)
+        proof=json.loads(retained.read_text());self.assertEqual(set(proof['batches']),{self.token})
+        with self.assertRaisesRegex(m.IdleError,'without retention evidence'):
+            self.check.inspect(before,history_evidence=retained)
+        m.retain_history_evidence(before,z,retained)
+        merged=json.loads(retained.read_text());self.assertEqual(set(merged['batches']),{self.token,b,c})
+        self.assertEqual(merged['batches'][self.token],proof['batches'][self.token])
+        result=self.check.inspect(before,history_evidence=retained)
+        self.assertEqual(result['retired_phone_batches'],3)
+        self.assertEqual((a.read_bytes(),z.read_bytes()),raw)
+        self.assertEqual(live.read_bytes(),live_before)
+
+    def test_recovery_evidence_rejects_unsafe_sources_and_unmatched_records(self):
+        before=self.baseline()
+        transaction=self.base/'protected-recovery';transaction.mkdir(mode=0o700)
+        retained=transaction/'history-evidence.json'
+        proof=self.base/'pre-upgrade-phone.json';proof.write_text(json.dumps(self.state));proof.chmod(0o640)
+        with self.assertRaises(m.IdleError):m.retain_history_evidence(before,proof,retained)
+        self.assertFalse(retained.exists())
+        proof.chmod(0o600)
+        altered=deepcopy(self.state);altered['batches'][self.token]['detail']='unapproved alternate record'
+        proof.write_text(json.dumps(altered))
+        with self.assertRaisesRegex(m.IdleError,'does not match'):
+            m.retain_history_evidence(before,proof,retained)
+        self.assertFalse(retained.exists())
+        proof.write_text(json.dumps(self.state))
+        outside=self.base/'outside';outside.write_bytes(b'preserved')
+        retained.symlink_to(outside)
+        with self.assertRaises(OSError):m.retain_history_evidence(before,proof,retained)
+        self.assertEqual(outside.read_bytes(),b'preserved')
+
+    def test_legacy_evidence_never_authorizes_modified_or_unexpired_missing_history(self):
+        self.check.clock=lambda:1000000
+        before=self.baseline();legacy=json.loads(before.read_text());legacy.pop('phone_history_retention');before.write_text(json.dumps(legacy))
+        proof=self.base/'old-phone-evidence.json';forged=deepcopy(self.state);forged['batches'][self.token]['closed_at']=3
+        proof.write_text(json.dumps(forged));proof.chmod(0o600)
+        self.state['batches']={};self.save('phone-admission.json',self.state)
+        with self.assertRaisesRegex(m.IdleError,'does not match'):self.check.inspect(before,history_evidence=proof)
+        self.state['batches'][self.token]={'status':'closed','closed_at':999999,'detail':'unexpired'}
+        self.save('phone-admission.json',self.state);before=self.baseline()
+        legacy=json.loads(before.read_text());legacy.pop('phone_history_retention');before.write_text(json.dumps(legacy))
+        proof.write_text(json.dumps(self.state));self.state['batches']={};self.save('phone-admission.json',self.state)
+        with self.assertRaisesRegex(m.IdleError,'before expiry'):self.check.inspect(before,history_evidence=proof)
+
+    def test_retention_policy_cannot_be_shortened_or_retyped(self):
+        before=self.baseline();original=json.loads(before.read_text())
+        cases=[{'schema':True,'seconds':604800,'closed_at':{}},
+               {'schema':1,'seconds':1,'closed_at':{}},
+               {'schema':1,'seconds':'604800','closed_at':{}},
+               {'schema':1,'seconds':604800,'closed_at':{'f'*64:2}},
+               {'schema':1,'seconds':604800,'closed_at':{hashlib.sha256(self.token.encode()).hexdigest():True}}]
+        for policy in cases:
+            with self.subTest(policy=policy):
+                value=deepcopy(original);value['phone_history_retention']=policy;before.write_text(json.dumps(value))
+                with self.assertRaisesRegex(m.IdleError,'retention baseline'):self.check.inspect(before)
+
+    def test_expired_history_that_is_still_present_must_not_be_modified(self):
+        self.check.clock=lambda:1000000;before=self.baseline()
+        self.state['batches'][self.token]['detail']='changed';self.save('phone-admission.json',self.state)
+        with self.assertRaisesRegex(m.IdleError,'changed or disappeared'):self.check.inspect(before)
+
+    def test_history_at_the_retention_boundary_is_still_required(self):
+        self.check.clock=lambda:604802;before=self.baseline();self.state['batches']={};self.save('phone-admission.json',self.state)
+        with self.assertRaisesRegex(m.IdleError,'before expiry'):self.check.inspect(before)
+        self.check.clock=lambda:604802.01
+        self.assertEqual(self.check.inspect(before)['retired_phone_batches'],1)
     def test_active_reserved_and_corrupt_phone_batches_stop_installation(self):
         for status in ('active','reserved',None):
             self.state['batches'][self.token]['status']=status;self.save('phone-admission.json',self.state)

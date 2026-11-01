@@ -240,7 +240,7 @@ def handle(mode, agi, store):
         except OutboundRouteError as error:
             raise PhoneAdmissionError(str(error)) from None
         store.bind_origin(token, recipient, uid, channel)
-        # Set only the SLS origin's local variable. Do not modify GLOBAL(), the
+        # Set only the SLL origin's local variable. Do not modify GLOBAL(), the
         # trunk's AstDB override or administrator predial hooks.
         agi.set('TRUNK_OPTIONS', trunk_options)
         for key in ('route_mode', 'trunk_id', 'number', 'caller_id'):
@@ -274,7 +274,7 @@ def main():
         if agi is not None and re.fullmatch(r'phone_[a-z_]{1,80}', code):
             try: agi.set('SLS_PHONE_ERROR', code)
             except Exception: pass
-        print('SLS phone admission: ' + operator_message(code), file=sys.stderr)
+        print('SLL phone admission: ' + operator_message(code), file=sys.stderr)
         return 1
 
 

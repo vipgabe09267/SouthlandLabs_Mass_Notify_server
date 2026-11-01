@@ -56,7 +56,9 @@ namespace {
     // Exercise the actual module import/export methods without any PBX access.
     $class = new ReflectionClass(FreePBX\modules\Slsmassnotifyserver::class);
     $lines = file($class->getFileName()); $methods = '';
-    foreach (['exportConfig', 'encodeConfigExport', 'exportEncryptedConfig', 'importConfigUpload'] as $name) {
+    foreach (['generateApiKey', 'disableControlApiAfterRecovery', 'normalizeDeploymentProfile',
+        'assertDeploymentProfileUnchanged', 'exportConfig', 'encodeConfigExport',
+        'exportEncryptedConfig', 'importConfigUpload'] as $name) {
         $method = $class->getMethod($name);
         $methods .= implode('', array_slice($lines, $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1));
     }
@@ -96,9 +98,21 @@ namespace {
 	        $expected['announcement_sms']['enabled'] = false;
 	        $expected['outbound_voice']['enabled'] = '0';
 	        $expected['scheduled_announcements'][0]['enabled'] = '0';
+        $expected['control_api']['enabled'] = '0';
+        $expected['control_api']['credentials'] = [];
+        check(preg_match('/^[A-Za-z0-9_-]{43}$/D', $module->staged['control_api']['api_key'] ?? '') === 1,
+            'Imported Control API credential was not rotated to a strong URL-safe key.');
+        check($module->staged['control_api']['api_key'] !== $settings['control_api']['api_key'],
+            'Imported Control API retained its old credential.');
+        $expected['control_api']['api_key'] = $module->staged['control_api']['api_key'];
         check($result['success'] && $module->staged === $expected, 'Authenticated import lost config or re-enabled schedules.');
         $module->staged = null; file_put_contents($file, $plain); $upload['size'] = strlen($plain);
-        check($module->importConfigUpload($upload)['success'] && $module->staged === $expected, 'Legacy import no longer stages safely.');
+        check($module->importConfigUpload($upload)['success'], 'Legacy import no longer stages safely.');
+        check(preg_match('/^[A-Za-z0-9_-]{43}$/D', $module->staged['control_api']['api_key'] ?? '') === 1
+            && $module->staged['control_api']['api_key'] !== $expected['control_api']['api_key'],
+            'A repeated import reused the prior recovery credential.');
+        $expected['control_api']['api_key'] = $module->staged['control_api']['api_key'];
+        check($module->staged === $expected, 'Legacy import changed settings beyond the required replay-safe controls.');
         $module->staged = null; $upload['tmp_name'] = '/not-an-upload';
         check(!$module->importConfigUpload($upload)['success'] && $module->staged === null, 'Non-upload file was accepted.');
     } finally { unlink($file); }

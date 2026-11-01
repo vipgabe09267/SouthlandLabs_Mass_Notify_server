@@ -147,7 +147,9 @@ try {
     $fixture->batch(['failed_start' => 'simulate_start_failure', 'nonzero' => '/bin/false'] + array_fill_keys(range(2001, 2032), '/bin/true'),
         static function ($target, $result) use (&$results) { $results[$target] = $result; });
     checkVisual(!$results['failed_start']['started'] && !$results['failed_start']['success']
-        && $results['nonzero']['started'] && !$results['nonzero']['success'], 'Launch failure and nonzero exit lost their distinct outcomes.');
+        && $results['nonzero']['started'] && !$results['nonzero']['success']
+        && $results['nonzero']['reason'] === 'sender_exit_nonzero' && $results['nonzero']['exit_code'] === 1,
+        'Launch failure and nonzero sender exit lost their distinct outcomes.');
     checkVisual(count(array_filter($results, static function ($row) { return $row['success']; })) === 32, 'A short-lived successful child lost its exit status.');
     echo "Launch failures, nonzero exit and fast-child exit-status checks passed.\n";
 

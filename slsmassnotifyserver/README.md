@@ -1,179 +1,109 @@
 <p align="center">
-  <a href="https://southlandservers.xyz"><img src="https://raw.githubusercontent.com/vipgabe09267/SouthlandServers_Mass_Notify_server/main/slsmassnotifyserver/assets/SLS_Mass_Notif_Email.png" width="112" alt="Southland Servers"></a>
+  <a href="https://southlandlabs.dev/projects/mass-notify/server"><img src="https://southlandlabs.dev/images/mass-notify-server.png?v=20261029" width="128" alt="SLL Mass Notify Server"></a>
 </p>
 
-# SLS Mass Notifications Server
+# SLL Mass Notify Server
 
-Phone, desktop, weather, lightning and scheduled notifications for FreePBX 17 on Debian 12. `0.1.8-beta` prerelease · AGPL-3.0-or-later.
+Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-> **Beta software for noncritical testing. Do not rely on SLS for critical or urgent notifications.** Each FreePBX administrator accepts the warning once; their acknowledgment survives upgrades. Confirmation requires five visible seconds.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. Candidate: **v0.1.9-beta** (unpublished).
 
-[Install/update](#install-or-update) · [Uninstall](#uninstall) · [Service commands](#service-commands) · [Repair/recovery](#repair-and-recovery) · [Requirements](#requirements) · [Documentation](#documentation)
+> Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
+
+[Installation](#install-or-update) · [Requirements](#requirements) · [Features](#features) · [Documentation](#documentation) · [Report an issue](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/issues)
 
 ## Install or update
 
-Run the correction command below as **root** for a fresh installation, an upgrade, or a repeated installation of **0.1.8-beta**. It fixes AMI detection on Asterisk 20 and custom builds. The original immutable release assets remain available for recovery; this command uses the separately signed correction bundle.
+After **0.1.9-beta** is published, use the following command as root for a fresh installation:
 
 ```bash
 cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandServers_Mass_Notify_server/correction-0.1.8-beta/install_bootstrap.sh &&
-printf '%s\n' '3039a6b1a877695c1515e672366abde03d2702abb1f9b12f88107ab3128c27fb  sls-bootstrap.sh' | sha256sum --check &&
-bash ./sls-bootstrap.sh 0.1.8-beta --correction
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/slsmassnotifyserver-0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '9131408d0a21bcc6aadbce9e7810b7ea2ff5a71824807927315d934981b4525e  sls-bootstrap.sh' | sha256sum --check &&
+bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
-The pinned bootstrap verifies the signature, release identity, expiry, installer and package before execution. Its pinned verifier honors an existing publisher policy and refuses incomplete or revoked authority. No policy is reset. For future version upgrades, use **General Settings > Check for updates > Install Selected Release**. See [installation profiles](INSTALL.md) and [manual verification](docs/FIRST_INSTALL_VERIFICATION.md).
+For an existing installation, use **General Settings > Check for updates > Install Selected Release**. The fresh bootstrap refuses an installation that already has a publisher trust policy. For offline installation or recovery, follow [INSTALL.md](INSTALL.md) and the [manual verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
 
-## Uninstall
-
-Run the included local uninstaller. It works **offline**, with no download or reinstallation:
-
-```bash
-sudo /usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh
-```
-
-You can also use `sudo slsconsole uninstall`.
-
-Normal removal preserves configuration, backups, uploaded tones, schedule/delivery history and logs. It drains SLS workers and refuses active phone delivery. Missing unrelated runtime helpers do not prevent removal; changed security evidence requires review. Complete purge is destructive and requires confirmation. See [removal and purge](INSTALL.md#uninstall) and [recovery-key retention](docs/RECOVERY.md).
-
-Add `--help` to the local shell uninstaller to view usage. Unsupported arguments stop before removal starts; use `sudo slsconsole uninstall --purge` only for deliberate deletion of retained SLS data.
-
-## Service commands
-
-| Command | Purpose |
-| --- | --- |
-| `sudo slsconsole status` | Show notification admission and collector state; add `--json` for scripts. |
-| `sudo slsconsole stop` | Pause new SLS notifications; existing calls and receipts continue. |
-| `sudo slsconsole start` | Start the collector if needed and resume SLS notifications. |
-| `sudo slsconsole reboot` | Restart the SLS collector and retain the prior running/stopped state. |
-| `sudo slsconsole doctor` | Inspect installation health without repair or notification delivery; add `--json` for scripts. |
-| `slsconsole help` | Show command usage. |
-
-These commands preserve other active and pending settings. They do not reboot the host or restart Asterisk, Apache or the FreePBX firewall. A failed collector restart leaves SLS admission paused.
-
-## Repair and recovery
-
-Use **General Settings > Danger Zone > Repair Installation**. Repairs preserve settings and delivery history. Unknown executable changes, unsafe files and unsupported layouts require review rather than bypassing verification.
-
-For CLI inspection or recovery, first obtain and independently verify the matching standalone `sls-install.sh` using the [manual verification guide](docs/FIRST_INSTALL_VERIFICATION.md). The fresh bootstrap deliberately refuses an initialized publisher trust policy.
-
-```bash
-bash ./sls-install.sh --inspect 'https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.8-beta/slsmassnotifyserver-0.1.8-beta.tgz'
-```
-
-If an attempt reports an unfinished transaction, preserve its directory and substitute the **exact path printed in the installer log**:
-
-```bash
-bash ./sls-install.sh --recover '/var/lib/sls-mass-notify-installer/transaction-<id>'
-```
-
-Then rerun the verified installer. Do not delete recovery evidence or change live hashes to force approval. Keep `/tmp/slsmassnotifyserver-install.log`; see [troubleshooting](INSTALL.md#installer-log-and-runtime-errors), [legacy permission recovery](docs/INSTALLER_OPERATIONS.md#recognized-legacy-permission-recovery) and [interrupted installation recovery](docs/INSTALLER_OPERATIONS.md#interrupted-installations).
-
-Upgrade inspection supports both current and original managed collector service templates. Custom service commands, identities and systemd overrides still require administrator review.
-
-## Health and optional integrations
-
-Help shows current worker, storage and Postfix service/queue checks with recovery guidance. Historical delivery faults remain in Notification Logs; they are not treated as a current outage after their relevant health window. System fault emails are opt-in and the same condition is suppressed for at least 24 hours.
-
-Dial-in paging callers should wait for the ready tone before speaking. SLS keeps the microphone muted while selected phones connect; the tone marks live or voicemail recording readiness. See [paging setup](docs/PAGING.md).
-
-Detected phones remain grouped by extension. Numbered contacts pair each phone format with its transport and User-Agent. Invalid transport telemetry is rejected. Desktop app version checks default to `1.0.13-beta`; missing or stale reports show **Update required** without blocking delivery.
-
-Open **Feature manager** to enable Enterprise Labs and choose its tools from one checklist. The saved master switch controls **Active/Inactive**; every tool requires it. Review the warning and agree before saving. Turning Labs off disables its tools while retaining their configuration. The timed first-use warning remains separate. Side navigation shows each section's saved status, and settings follow the PBX theme with hover/focus/tap help. Speaker/radio hardware requires local acceptance; meetings keep separate Zoom, Google Meet and Webex accounts. See [device/provider setup](docs/ENTERPRISE_INTEGRATIONS.md), [continuity and remote sites](docs/ENTERPRISE_CLUSTER.md) and [triggers/actions](docs/TRIGGERS.md).
+The installer checks resources, verifies signatures and keeps recovery files. It preserves saved settings during an update. Back up your PBX before installing.
 
 ## Requirements
 
-The supported installer profile is **FreePBX 17 / Debian 12 / amd64**, with PJSIP and standard FreePBX paths. Prerequisites and supported configuration variants are listed in [INSTALL.md](INSTALL.md). The installer checks capabilities, installs missing supported dependencies and preserves administrator-controlled listeners, trunks, firewall and handset settings.
+| Profile | Minimum resources | Limits |
+| --- | --- | --- |
+| Standard | 2 effective CPU cores, nominal 4 GiB RAM | Starts at 25 desktops and 25 phone contacts; higher capacity needs more resources. |
+| Lite | 2 effective CPU cores, nominal 2 GiB RAM | 25 desktops, 25 phone contacts; Enterprise Labs and enterprise SSO unavailable. |
 
-- **Default capacity:** 25 desktops and 25 phone contacts; combined minimum **2 effective CPU cores and 4 GiB RAM**. Allow 4 cores / 8 GiB for ordinary PBX traffic, recording or more synthesis.
-- **Scaling:** desktop capacity supports up to 1,000 identities. Phone capacity counts contacts, including multiple handsets on an extension. Fresh phone inventories above 25 round up to the next 50; upgrades preserve saved limits.
-- **Storage:** checks require additional free SLS workspace on the affected filesystems, including temporary and recovery space. There is no fixed whole-volume minimum. PBX recordings, voicemail and backups need separate space.
-- **Admission:** insufficient resources reject capacity increases. Oversized audiences are rejected; occupied phone capacity allows a bounded wait. Recipients are never silently dropped to fit a limit.
+**Standard is the default.** If usable RAM falls below its baseline, the installer checks whether Lite can run, explains its limits and asks before installing it. Ordinary kernel reservations on a nominal 4 GiB system are allowed. Declining the Lite prompt cancels installation.
 
-**General Settings > Phones and address** previews CPU, RAM and workspace requirements with green checks or red X indicators. These are engineering allocations, not certified fleet throughput. See [capacity tables, storage calculations and retention](docs/RESOURCES.md).
+For an unattended Lite installation, explicitly select it:
 
-## New in 0.1.8-beta
+```bash
+bash ./sls-bootstrap.sh 0.1.9-beta --lite
+```
 
-- Reviewed delivery summaries with exact recipients, unavailable phones, measured speech previews and SMS cost estimates.
-- Faster desktop polling, complete cursor pagination and separate receipt history; an optional authenticated browser display.
-- Operator passkeys, expiring scoped API credentials, aggregate monitoring and machine-readable API schemas.
-- Recoverable paired saves for operator, API, directory and subscriber settings that preserve unrelated pending changes.
-- Person profiles, 200 saved audiences, a visual programme calendar and conditional incident escalation.
-- Optional Entra/Google directory imports, Google Chat/Mattermost/Matrix connectors, scoped TLS trust, read-only Postfix delivery evidence and regional speech packs.
-- Two-way radio gateways through existing PJSIP extensions. Radio profiles, restricted scripts and other new integrations are **Labs**, disabled until configured and enabled.
+Lite allows one speech renderer, two waiting speech jobs, four simultaneous desktop streams, one Weather/Lightning delivery worker and two Weather.gov fetch workers. It retains core notifications, scheduling and local operator authentication. Saved Enterprise configuration is retained but disabled. Hosts that meet Standard requirements cannot select Lite.
+
+Both profiles need free space for the application, speech models, logs and installer recovery. PBX recordings and backups need additional space. See [resource requirements](docs/RESOURCES.md) for capacity and storage details. A 2 GiB installation is intended for light use; plan more RAM for ordinary PBX traffic or frequent speech generation.
 
 ## Features
 
-| Page | What it provides |
+| Feature | Details |
 | --- | --- |
-| Dashboard | Selected phone/desktop/email/SMS/webhook destinations, tones or speech, colored messages, previews and per-destination results. |
-| Weather Alerts | Up to five U.S. Weather.gov zones with separate audiences, quiet hours, detailed email and webhook delivery. |
-| Lightning Alerts | Up to five areas, provider/radius/strike settings, adaptive polling, quota controls and all-clear rules. |
-| Scheduling | Dated or repeating announcements, weekdays, A/B calendars, holidays and reviewed CSV/iCalendar imports. |
-| Dial-in Paging · Labs | One extension, up to ten groups, live audio, saved SIP text, authorized callers and individual 4–8-digit PINs. |
-| Locations and Audiences · Labs | Sites/buildings/floors/rooms, individual destinations and reviewed groups combining a person's devices or shared recipients. |
-| Operator Access / Portal · Labs | Scoped logins with passwords, TOTP or enrolled passkeys, expiry, recovery and audited announcements. |
-| Incidents and Drills · Labs | Templates, separate updates/all-clear, reviewed language variants, responses, checklists and reports. |
-| Triggers and Actions · Labs | Approved panic/sensor/CAP inputs and configured device, webhook or script actions. |
-| General Settings / Help | Channel configuration, voices, capacity, backups, updates, diagnostics and deployment readiness. |
+| Announcements | Phone audio and displays, desktop messages, email, SMS and webhooks with per-destination results. |
+| Scheduling | One-time and repeating announcements, calendars, holidays and reviewed imports. |
+| Weather and lightning | Weather.gov alerts and configured lightning providers, with separate audiences and delivery settings. |
+| Paging | Dial-in groups, caller restrictions, live audio and optional voicemail delivery. |
+| Operators and incidents | Scoped accounts, passkeys or TOTP, incident templates, drills, responses and reports. |
+| Enterprise Labs | Optional SSO, remote-site coordination, device integrations and automation. Disabled by default; unavailable in Lite. |
 
-Optional channels and Labs features start disabled. Phone/SMS contacts share one recipient editor with independent Call/SMS choices. Reviewed groups and submitted announcements keep their recipients fixed; later directory changes cannot add recipients to old work.
+Optional channels require their own setup. Email uses local Postfix; SMS and cloud services need provider accounts. The [desktop app](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_app) is a separate project.
 
-## Delivery and compatibility
+Delivery reports distinguish submission from confirmed receipt. A mail server accepting a message does not prove inbox delivery, and a phone answering does not prove someone heard the whole announcement. Uncertain submissions are not automatically replayed. See [delivery behavior](docs/DELIVERY.md).
 
-- **Phones:** audio and visual delivery require appropriate handset provisioning. Multiple registrations are handled per contact where safe routing is supported. If HTTPS does not work, try HTTP for legacy phones. See [phone formats](PHONE_FORMATS.md).
-- **Voicemail:** actual Weather, Lightning and recorded live pages can leave one message per unanswered internal extension with an eligible FreePBX mailbox. Independent controls start enabled. Ordinary Dashboard TTS, manual alert tests and external-number calls are unchanged.
-- **Weather:** speech retains the alert's official instructions. Invalid enabled quiet hours suppress noncritical delivery; missing, unsafe or full deduplication history blocks new alerts and preserves records for review.
-- **Alert settings:** new Weather groups include site, SMS and external-call selections. Imported Weather recordings remain selected on reopening. Lightning preserves the chosen polling period and offers the selected provider’s supported range.
-- **Desktops:** the [separate desktop app](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_app) receives live alerts. It skips messages missed while disconnected and applies a ten-minute maximum lifetime. `Received by desktop app` confirms software receipt, not human reading. Schema 1 and SSE protocol 2 remain compatible. PHP-FPM uses cursor-based polling so desktop connections do not hold shared PBX workers.
-- **Email:** disabled on fresh installs. Configure local Postfix and recipients, then enable announcement email under **General Settings > Delivery**. Queue backpressure and shared quotas prevent unlimited SLS mail submission; mail-service acceptance does not confirm inbox delivery.
-- **SMS/MMS · Labs:** Twilio, Telnyx and BulkVS adapters require provider setup and consented recipients. BulkVS currently reports API acceptance; authenticated inbound delivery and STOP callbacks are unsupported. See [SMS setup and limits](docs/SMS.md).
-- **Webhooks:** native JSON, Discord, Slack and Teams Workflows. Accepted or unconfirmed one-way delivery does not require a human receipt; explicit HTTP failures still need attention.
-- **External voice · Labs:** opt-in FreePBX routing, independent answer-gated playback, optional keypad acknowledgment and a daily call allowance. Supported route profiles are restricted; carrier-greeting detection is not implemented.
+## Service commands
 
-Phone answer, conference entry and service acceptance do not prove full playback or human receipt. Interrupted or uncertain submissions are not automatically replayed. A collector fault blocks new SLS phone audio but does not prevent ordinary FreePBX reloads. See [delivery behavior, voicemail, defaults and troubleshooting](docs/DELIVERY.md).
+| Command | Action |
+| --- | --- |
+| `sudo slsconsole status` | Show notification and collector status. |
+| `sudo slsconsole doctor` | Check installation health without sending notifications. |
+| `sudo slsconsole stop` | Pause new SLL notifications. |
+| `sudo slsconsole start` | Resume SLL notifications. |
+| `sudo slsconsole reboot` | Restart the SLL collector. |
+| `slsconsole help` | List available commands. |
 
-## Configuration and backups
+These commands manage SLL; they do not reboot the PBX or restart Asterisk. Add `--json` to status and doctor for scripts.
 
-All portable user settings remain in:
+## Repair and recovery
 
-```text
-/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config
+Use **General Settings > Danger Zone > Repair Installation**, or follow the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Repairs preserve settings and delivery history. Keep the recovery path printed by a failed installer; do not delete it or change live file hashes to bypass a check.
+
+Export configuration under **General Settings > Config Backup**. Keep the export passphrase separately. Native FreePBX backups also include module recovery data; protect the whole backup archive. See [backup and restore](docs/RECOVERY.md).
+
+## Uninstall
+
+The included uninstaller works offline:
+
+```bash
+sudo slsconsole uninstall
+# Equivalent local script:
+sudo /usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh
 ```
 
-Active, pending and retained settings use **AES-256-GCM**. The protected keyring is `/etc/sls-mass-notify/config-keys.json`; maintenance rotates the active key every 365 days and retains recovery keys for older backups. Missing keys or damaged ciphertext block access. Runtime journals and signing authority are separate operational data. See [configuration security](docs/CONFIGURATION_SECURITY.md).
-
-**General Settings > Config Backup** exports a portable encrypted configuration using a separate passphrase of at least 12 characters. It excludes recordings and delivery history. Keep the passphrase separately; there is no recovery for a lost export passphrase. The UI reminds admins to export after 90 days. Plain legacy exports contain reusable credentials.
-
-Native FreePBX module backups include configuration, recovery keys, custom tones and bounded operational evidence. **Protect or encrypt the whole archive.** Install SLS before restoring its module backup; restored automation requires review and old work is not replayed. See [backup and recovery](docs/RECOVERY.md).
-
-## Operator single sign-on · Labs
-
-Configure SAML or OIDC providers under **Operator Access** in the FreePBX admin panel. SSO signs users into `/mass-notify/` only. Saved operator permissions, account expiry and local authenticator verification still apply. Account permissions and SSO settings apply when saved; no FreePBX Apply Config is required. FreePBX and UCP sign-in are unchanged. Providers start disabled and require deployment testing; see [operator SSO and directory setup](docs/ENTERPRISE_IDENTITY.md).
-
-## Enterprise Labs
-
-All integrations require explicit configuration and deployment testing. Failover/mirroring, enterprise login, door actuation and public-warning origination require the danger acknowledgment and are limited to non-production labs. Acknowledgment does not enable a feature.
-
-[Continuity and remote sites](docs/ENTERPRISE_CLUSTER.md) · [Identity and subscribers](docs/ENTERPRISE_IDENTITY.md) · [Devices and providers](docs/ENTERPRISE_INTEGRATIONS.md) · [Incident coordination](docs/ENTERPRISE_OPERATIONS.md)
-
-Offline delivery still needs a working local PBX, network and power. Cloud channels and fresh weather observations require internet access. Notification failover is separate from full PBX/telephone failover. Native mobile push and visitor enrollment are not available.
+Normal removal preserves configuration, backups, recordings and history. Use `sudo slsconsole uninstall --purge` only when you intend to delete retained SLL data. See [removal and purge](INSTALL.md#uninstall).
 
 ## Documentation
 
-[Qualification matrix](docs/QUALIFICATION_MATRIX.md) · [OpenAPI 3.1](docs/openapi.json) · [Notification JSON Schema](docs/schemas/notification.schema.json)
+- [Installation](INSTALL.md), [resource requirements](docs/RESOURCES.md), and [troubleshooting](docs/INSTALLER_OPERATIONS.md)
+- [Paging](docs/PAGING.md), [scheduling](docs/SCHEDULING.md), and [locations](docs/LOCATIONS.md)
+- [Operators](docs/OPERATORS.md), [incidents](docs/INCIDENT_API.md), and [triggers](docs/TRIGGERS.md)
+- [Control API](docs/CONTROL_API.md), [OpenAPI](docs/openapi.json), and [desktop compatibility](docs/DESKTOP_READINESS.md)
+- [Enterprise setup](docs/ENTERPRISE_INTEGRATIONS.md), [identity](docs/ENTERPRISE_IDENTITY.md), and [remote sites](docs/ENTERPRISE_CLUSTER.md)
+- [Changelog](CHANGELOG.md), [security policy](SECURITY.md), and [qualification results](docs/QUALIFICATION_MATRIX.md)
 
-| Guide | Contents |
-| --- | --- |
-| [Installation and recovery](INSTALL.md) / [Installer operations](docs/INSTALLER_OPERATIONS.md) | Prerequisites, signatures, offline packages, repair, recovery and removal. |
-| [Resources](docs/RESOURCES.md) / [Delivery](docs/DELIVERY.md) | Capacity, storage, defaults, channel evidence and troubleshooting. |
-| [Paging](docs/PAGING.md) / [Locations](docs/LOCATIONS.md) / [Scheduling](docs/SCHEDULING.md) | Caller access, recipients, calendars and deadlines. |
-| [Operators](docs/OPERATORS.md) / [Incidents](docs/INCIDENT_API.md) / [Triggers](docs/TRIGGERS.md) | Permissions, recovery, workflows and input contracts. |
-| [Control API](docs/CONTROL_API.md) / [Desktop readiness](docs/DESKTOP_READINESS.md) | Authentication, scoped credentials, integration examples and client contracts. |
-| [Deployment readiness](docs/DEPLOYMENT_READINESS.md) / [Media access](docs/MEDIA_ACCESS.md) | Current health, external monitoring, device acceptance and forwarded addresses. |
-| [Updates](docs/UPDATE_POLICY.md) / [Release trust](docs/RELEASE_TRUST.md) | Release policy, publisher signatures and recovery. |
-| [Changelog](CHANGELOG.md) / [Security policy](SECURITY.md) | Release changes, known limits and vulnerability reporting. |
+For development and release checks, see [VALIDATION.md](docs/VALIDATION.md). On a PBX, run source tests through `sudo bash tools/run_isolated_tests.sh --build` so fixtures cannot use live PBX state.
 
-For development, see [validation](docs/VALIDATION.md), [qualification boundaries](docs/QUALIFICATION_MATRIX.md) and the [dependency inventory](docs/DEPENDENCIES.md). On a PBX, run checks through `bash tools/run_isolated_tests.sh --build` in private namespaces. Release signing uses `python3 tools/sign_release.py` with the publisher key stored outside the repository; publish the TGZ and both signed-manifest assets together.
+Licensed under [AGPL-3.0-or-later](LICENSE).
 
-[Southland Servers](https://southlandservers.xyz) · [Discord](https://southlandservers.xyz/discord) · [Report an issue](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/issues)
+[Project page](https://southlandlabs.dev/projects/mass-notify/server) · [Southland Labs](https://southlandlabs.dev) · [Discord](https://southlandlabs.dev/discord) · [GitHub issues](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/issues)

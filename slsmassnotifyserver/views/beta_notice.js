@@ -62,7 +62,7 @@
         document.addEventListener('visibilitychange', resetTick);
         window.addEventListener('focus', resetTick);
         window.addEventListener('blur', resetTick);
-        status.textContent = 'Read this warning before agreeing. SLS is for noncritical testing only.';
+        status.textContent = 'Read this warning before agreeing. SLL is for noncritical testing only.';
         const timer = setInterval(() => {
             const now = performance.now();
             if (document.visibilityState === 'visible' && document.hasFocus() && dialog.open) {

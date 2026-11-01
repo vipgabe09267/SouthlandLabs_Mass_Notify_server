@@ -91,6 +91,15 @@ class SpeechTests(unittest.TestCase):
             self.addCleanup(file.close);fcntl.flock(file,fcntl.LOCK_EX|fcntl.LOCK_NB);waiting.append(file)
         with self.assertRaisesRegex(speech.SpeechAdmissionError, 'queue is full'): self.admission(config).acquire()
 
+    def test_lite_profile_enforces_runtime_limits_even_if_config_is_malformed(self):
+        admission = self.admission({'deployment_profile': 'lite', 'speech_queue_wait_seconds': 0})
+        self.assertEqual((admission.limit, admission.queue), (1, 2))
+        for config in ({'deployment_profile': 'lite', 'speech_synthesis_limit': 2},
+                       {'deployment_profile': 'lite', 'speech_queue_limit': 3},
+                       {'deployment_profile': 'unknown'}):
+            with self.subTest(config=config), self.assertRaisesRegex(speech.SpeechAdmissionError, 'Invalid speech admission setting'):
+                self.admission(config)
+
     def test_current_media_and_reserved_work_share_the_budget(self):
         path = self.root / 'sounds/tts/announcement_tts_fixture.wav'
         with path.open('wb') as handle: handle.truncate(64 * speech.MIB)

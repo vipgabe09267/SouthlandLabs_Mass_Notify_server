@@ -3,8 +3,9 @@
 namespace FreePBX\modules {
 	function exec($command, &$output, &$status) {
 		$GLOBALS['discovery_commands'][] = $command;
-		$output = explode("\n", $GLOBALS['vhost_fixture']);
-		$status = 0;
+		$expanded = str_contains($command, '_sls_local_vhost_discovery.invalid');
+		$output = explode("\n", $expanded ? ($GLOBALS['vhost_expanded_fixture'] ?? $GLOBALS['vhost_fixture']) : $GLOBALS['vhost_fixture']);
+		$status = $expanded ? ($GLOBALS['expanded_discovery_status'] ?? 0) : 0;
 	}
 	function file_get_contents($url, $includePath, $context, $offset, $length) {
 		$GLOBALS['probe_requests'][] = [$url, stream_context_get_options($context), $length];
@@ -29,7 +30,7 @@ namespace {
 		. "https://external.invalid:9999 ignored\n";
 	$GLOBALS['discovery_commands'] = [];
 	$targets = SlsLocalWebProbe::targets('pbx.example.test');
-	check(count($GLOBALS['discovery_commands']) === 1, 'Apache discovery was not called exactly once');
+	check(count($GLOBALS['discovery_commands']) >= 1 && count($GLOBALS['discovery_commands']) <= 2, 'Apache discovery exceeded two bounded native inspections');
 	check(strpos($GLOBALS['discovery_commands'][0], '/usr/bin/timeout 5 ') === 0, 'Discovery lacks a time bound');
 	check($targets[0]['url'] === 'https://pbx.example.test:8443', 'Configured hostname listener was not prioritized');
 	check($targets[0]['resolve'] === 'pbx.example.test:8443:127.0.0.1', 'Custom HTTPS host was not pinned to loopback');
@@ -52,6 +53,36 @@ namespace {
 			check($target['host'] === '127.0.0.1', 'Invalid configured host reached a probe');
 		}
 	}
+	// Apache hides aliases in its compact single-vhost output. A temporary
+	// command-line vhost in configuration-test mode exposes the native aliases
+	// without writing configuration, reloading Apache, or relaxing credentials.
+	$originalDump=$GLOBALS['vhost_fixture'];
+	$GLOBALS['vhost_fixture']="*:8443 primary.example.test (/etc/apache2/sites-enabled/pbx.conf:1)\n";
+	$GLOBALS['vhost_expanded_fixture']="*:8443 is a NameVirtualHost\n"
+		." port 8443 namevhost primary.example.test (/etc/apache2/sites-enabled/pbx.conf:1)\n"
+		."  alias pbx.example.test\n  wild alias *.branch.example.test\n"
+		." port 8443 namevhost _sls_local_vhost_discovery.invalid (-c/-C directives:1)\n";
+	$GLOBALS['discovery_commands']=[];
+	$aliases=SlsLocalWebProbe::targets('pbx.example.test');
+	check(count(array_filter($aliases,static fn($target)=>$target['host_matched'] && $target['url']==='https://pbx.example.test:8443'))===1,
+		'Native alias on a single custom-port virtual host was not discovered');
+	check(count($GLOBALS['discovery_commands'])===2,'Single-vhost alias discovery did not use two native inspections');
+	foreach($GLOBALS['discovery_commands'] as $command){
+		check(str_starts_with($command,'/usr/bin/timeout 5 /usr/sbin/apache2ctl -t -D DUMP_VHOSTS'), 'Alias inspection could activate Apache or lack a deadline');
+		check(!str_contains($command,'pbx.example.test')&&!str_contains($command,'sudo'), 'Caller hostname or privilege escalation entered the discovery command');
+	}
+	check(str_contains($GLOBALS['discovery_commands'][1],'-c')&&str_contains($GLOBALS['discovery_commands'][1],'*:8443'), 'Native alias query did not retain the observed listener binding');
+	$GLOBALS['expanded_discovery_status']=1;
+	check(count(array_filter(SlsLocalWebProbe::targets('pbx.example.test'),static fn($target)=>$target['host_matched']))===0,'Failed native alias inspection granted credential authority');
+	unset($GLOBALS['expanded_discovery_status']);
+	$wild=SlsLocalWebProbe::targets('east.branch.example.test',$GLOBALS['vhost_expanded_fixture']);
+	check(count(array_filter($wild,static fn($target)=>$target['host_matched']&&$target['url']==='https://east.branch.example.test:8443'))===1,'Native wildcard alias did not match its configured host');
+	$adjacent="*:8443 is a NameVirtualHost\n port 8443 namevhost primary.example.test (/etc/a:1)\n alias other.example.test\n"
+		." port 8443 namevhost _sls_local_vhost_discovery.invalid (-c/-C directives:1)\n alias pbx.example.test\n";
+	check(count(array_filter(SlsLocalWebProbe::targets('pbx.example.test',$adjacent),static fn($t)=>$t['host_matched']))===0,'Synthetic query vhost granted credential authority');
+	$orphaned=" alias pbx.example.test\n*:9443 other.example.test (/etc/a:1)\nServerRoot: /etc/apache2\n alias pbx.example.test\n";
+	check(count(array_filter(SlsLocalWebProbe::targets('pbx.example.test',$orphaned),static fn($t)=>$t['host_matched']))===0,'Alias outside its native virtual-host block granted credential authority');
+	$GLOBALS['vhost_fixture']=$originalDump;unset($GLOBALS['vhost_expanded_fixture']);
 	$GLOBALS['probe_requests'] = [];
 	$responses = SlsLocalWebProbe::responses('pbx.example.test', '/api/sipnotify/desktop/stream?stream_seconds=1', ['Authorization: Basic fixture', 'Accept: text/event-stream'], 8, $GLOBALS['vhost_fixture']);
 	foreach ($responses as $response) {

@@ -105,7 +105,9 @@ if($p==='/mass-notify/subscriber-worker.js'){header('Content-Type: text/javascri
         page.on('console',lambda message:errors.append(message.text) if message.type=='error' else None)
         with page.expect_response(lambda reply:reply.url==self.origin+'/mass-notify/sso.php') as response:
             page.get_by_role('button',name='Federated sign-in').click()
-        self.assertEqual(response.value.status,200,response.value.text()[-2000:])
+        # Successful SSO navigation can discard Chromium's prior response
+        # body. Do not eagerly fetch it as an assertion message after redirect.
+        self.assertEqual(response.value.status,200,'Federated sign-in start did not return HTTP 200')
         try:page.wait_for_url('https://idp.example.test/authorize?**',timeout=5000)
         except Exception:
             self.fail('SSO navigation did not complete: '+page.locator('main').inner_text()+'; browser errors: '+json.dumps(errors))

@@ -58,6 +58,8 @@ echo (new ServiceTemplateFixture())->contents();'''
         self.assertEqual(body,r.SAFE_UNIT)
 
     def test_exact_current_and_legacy_units_support_preflight_and_recovery(self):
+        self.assertTrue(any(b'Description=SLS Mass Notify phone outcome collector\n' in unit
+            and b'CPUAccounting=yes\n' in unit for unit in r.SUPPORTED_UNITS))
         for unit in r.SUPPORTED_UNITS:
             with self.subTest(current=unit==r.SAFE_UNIT):
                 self.service={'enabled':'enabled','active':'active'}

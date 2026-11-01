@@ -31,7 +31,7 @@ try {
         $freepbx=\FreePBX::create();
         $service=$freepbx->Slsmassnotifyserver??null;
         if (!is_object($service) || !method_exists($service,'validateEnterpriseMirrorCandidate')) {
-            throw new RuntimeException('SLS mirror configuration validation is unavailable.');
+            throw new RuntimeException('SLL mirror configuration validation is unavailable.');
         }
         return $service->validateEnterpriseMirrorCandidate($candidate,$shared);
     };

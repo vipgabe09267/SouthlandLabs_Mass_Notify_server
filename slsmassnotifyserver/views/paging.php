@@ -143,7 +143,7 @@ $help = static function (string $id, string $text) use ($escape): void {
             <div class="sls-paging-card-title"><h2 id="sls-paging-access-title"><i class="fa fa-phone text-primary" aria-hidden="true"></i> <?php echo _('Paging access'); ?></h2></div>
             <div class="sls-paging-card-body sls-paging-grid">
                 <div class="form-group">
-                    <div class="sls-paging-label"><label for="sls-paging-extension"><?php echo _('Paging extension'); ?></label> <?php $help('sls-paging-extension-tip', _('Choose an unused internal number. SLS checks for conflicts with existing extensions and dialplan routes before activation.')); ?></div>
+                    <div class="sls-paging-label"><label for="sls-paging-extension"><?php echo _('Paging extension'); ?></label> <?php $help('sls-paging-extension-tip', _('Choose an unused internal number. SLL checks for conflicts with existing extensions and dialplan routes before activation.')); ?></div>
                     <input class="form-control sls-paging-short" id="sls-paging-extension" name="live_paging[extension]" value="<?php echo $escape($paging['extension'] ?? ''); ?>" inputmode="numeric" pattern="[0-9]{1,20}" maxlength="20" placeholder="<?php echo $escape(_('e.g. 799')); ?>" aria-describedby="sls-paging-extension-help">
                     <span class="help-block" id="sls-paging-extension-help"><?php echo _('Authorized phones dial this number to hear the group menu.'); ?></span>
                 </div>
@@ -390,7 +390,7 @@ $help = static function (string $id, string $text) use ($escape): void {
             card.append($('<div>', {'class':'help-block'}).append(icon(row.require_pin !== '0' ? 'fa-lock' : 'fa-unlock-alt'), ' ' + pinStatus));
             var edit = $('<button>', {type:'button', 'class':'btn btn-default btn-sm', 'aria-label':labels.edit + ': ' + groupName(row)}).append(icon('fa-pencil'), ' ' + labels.edit).on('click', function () { openEditor(index, this); });
             var remove = $('<button>', {type:'button', 'class':'btn btn-link btn-sm text-danger', 'aria-label':labels.remove + ': ' + groupName(row)}).append(icon('fa-trash-o'), ' ' + labels.remove).on('click', function () {
-                if (window.confirm(labels.removeConfirm)) { rows.splice(index, 1); refresh(); $('#sls-paging-add').trigger('focus'); }
+                if (window.confirm(labels.removeConfirm)) { rows.splice(index, 1); refresh(); window.SlsSaveState?.set(document.getElementById('sls-live-paging'),'unsaved'); $('#sls-paging-add').trigger('focus'); }
             });
             card.append($('<div>', {'class':'sls-paging-group-footer'}).append(edit, remove)); list.append(card);
         });
@@ -508,7 +508,7 @@ $help = static function (string $id, string $text) use ($escape): void {
         }
         var problem = rowError(draft, editing); if (problem) { error(problem, true); return; }
         if (editing < 0) { rows.push(draft); } else { rows[editing] = draft; }
-        closeEditor(); refresh(); error('');
+        closeEditor(); refresh(); error(''); window.SlsSaveState?.set(document.getElementById('sls-live-paging'),'unsaved');
         $('#sls-paging-form').trigger('submit');
     });
     editor.on('keydown', function (event) {
@@ -548,7 +548,7 @@ $help = static function (string $id, string $text) use ($escape): void {
             form.attr('aria-busy', 'true'); controls.prop('disabled', true);
             $.ajax({url:form.attr('action'), type:'POST', dataType:'json', data:body, timeout:30000})
                 .done(function (result) {
-                    if (result && result.success === true) { window.location.assign('config.php?display=slsmassnotifyserver_paging'); }
+                    if (result && result.success === true) { window.SlsSaveState?.set(document.getElementById('sls-live-paging'),'pending'); window.location.assign('config.php?display=slsmassnotifyserver_paging'); }
                     else if (result && result.success === false && typeof result.message === 'string') { error([result.message].concat(Array.isArray(result.errors) ? result.errors : []).filter(Boolean).join(' ')); }
                     else { error('The save response could not be verified. Reload Paging to check your saved changes before trying again.'); }
                 }).fail(function () { error('The save response was interrupted. Reload Paging to check whether your changes were saved before trying again.'); })
@@ -562,3 +562,5 @@ $help = static function (string $id, string $text) use ($escape): void {
 </script>
 
 <?php $source_picker_mode = 'paging'; include __DIR__ . '/audience_source_picker.php'; ?>
+<script><?php readfile(__DIR__.'/save_state.js'); ?>
+window.SlsSaveState.attach(document.getElementById('sls-live-paging'),{mode:'apply',initial:'active',submit:'#sls-paging-form'});</script>

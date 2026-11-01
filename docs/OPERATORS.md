@@ -1,6 +1,6 @@
 # Operator portal — Labs
 
-Administrators create dedicated logins in **SLS → Operator Access** in the PBX
+Administrators create dedicated logins in **SLL → Operator Access** in the PBX
 admin panel. Operators sign in at **https://your-pbx/mass-notify/**. Use the same
 hostname and forwarded HTTPS port as the PBX. Distribution defaults contain no
 installation-specific port. A portal login grants no FreePBX or UCP session.
@@ -21,7 +21,7 @@ installation-specific port. A portal login grants no FreePBX or UCP session.
 Site and location grants include descendants. Grants are combined; personal
 assignments alone allow notifications only to those devices. A username never
 implies device ownership. Delivery channel restrictions also apply after a saved
-audience expands. Administrators have full SLS authority; use another preset for
+audience expands. Administrators have full SLL authority; use another preset for
 recipient restrictions. Individual action checkboxes can combine sending,
 scheduling, and roll call without granting administrator access.
 
@@ -31,7 +31,7 @@ scheduling, and roll call without granting administrator access.
 | Sender | Send reviewed announcements and authorized incident updates. |
 | Scheduler | Create and manage their own schedules. |
 | Warden | Record assigned human responses. |
-| Administrator | Manage SLS and use all portal actions. |
+| Administrator | Manage SLL and use all portal actions. |
 
 Operations uses the Dashboard's announcement jobs and delivery engine. Its
 composer starts with saved tones and speech and supports text or colored phone
@@ -103,7 +103,7 @@ authentication is unchanged.
 
 **Forgot password?** requires the operator username and registered email. Its
 response is the same for matching, unknown, disabled and exhausted accounts.
-SLS attempts at most **two recovery emails** per account. Two email attempts or
+SLL attempts at most **two recovery emails** per account. Two email attempts or
 two failed self-service recovery verifications disable further recovery emails;
 normal password sign-in remains available subject to its rate limits. Failed or
 uncertain Postfix handoffs count toward the allowance and are never automatically

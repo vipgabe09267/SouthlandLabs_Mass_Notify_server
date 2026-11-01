@@ -26,6 +26,10 @@ try{
  $changed=$record;$changed['destination_receipts']['discord:discord_fixture']=['status'=>'failed','http_status'=>429,'error'=>'http_rate_limited','recorded_at'=>1000];$changed['terminal_status']='expired';$write($changed);
  $row=WeatherDeliveryReceipts::forEvent($root,$event)['rows'][0];receiptCheck($row['status']==='failed'&&$row['http_status']===429&&$row['queue_state']==='expired','Expired delivery lost its failed transport evidence.');
  $changed['destination_receipts']['discord:discord_fixture']['error']='https://secret.invalid/token';$write($changed);receiptCheck(WeatherDeliveryReceipts::forEvent($root,$event)['rows'][0]['error']==='','Unsafe transport message escaped the projection.');
+ $partial=$record;$partial['terminal_status']='partial_cancelled';$partial['terminal_reason']='source_cancelled';$write($partial);
+ $row=WeatherDeliveryReceipts::forEvent($root,$event)['rows'][0];receiptCheck($row['status']==='accepted'&&$row['queue_state']==='partial_cancelled','Source cancellation after an accepted effect was relabelled complete.');
+ $partial['destination_receipts']['discord:discord_fixture']['status']='uncertain';$write($partial);
+ $row=WeatherDeliveryReceipts::forEvent($root,$event)['rows'][0];receiptCheck($row['status']==='uncertain'&&$row['queue_state']==='partial_cancelled','Partial cancellation erased prior uncertain evidence.');
  $changed['routing_snapshot']['webhook_ids']='invalid';$write($changed);receiptCheck(WeatherDeliveryReceipts::forEvent($root,$event)['warnings']!==[],'Malformed destination evidence caused an unhandled UI error.');
  $write($record);$handle=fopen($path,'r+b');receiptCheck(is_resource($handle)&&flock($handle,LOCK_EX),'Unable to lock receipt fixture.');$start=microtime(true);$busy=WeatherDeliveryReceipts::forEvent($root,$event);
  receiptCheck(!$busy['rows']&&$busy['warnings']&&microtime(true)-$start<0.5,'Busy receipt storage blocked the UI or presented unconfirmed evidence.');receiptCheck(fclose($handle),'Unable to close receipt fixture lock.');

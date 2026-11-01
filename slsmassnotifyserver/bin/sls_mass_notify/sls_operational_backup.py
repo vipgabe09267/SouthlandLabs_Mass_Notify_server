@@ -636,7 +636,19 @@ def incident_replay_ids(body):
                     db.execute('PRAGMA trusted_schema=OFF')
                     if db.execute('PRAGMA user_version').fetchone()[0] != 1:
                         raise RecoveryError('The archived incident replay identities use an unsupported schema.')
-                    rows = db.execute('SELECT id FROM reports LIMIT 20001').fetchall()
+                    schema = db.execute("SELECT type, rootpage FROM main.sqlite_schema WHERE name='reports'").fetchall()
+                    if (len(schema) != 1 or schema[0][0] != 'table'
+                            or type(schema[0][1]) is not int or schema[0][1] <= 0):
+                        raise RecoveryError('The archived incident identities require a stored reports table.')
+                    columns = db.execute("PRAGMA main.table_xinfo('reports')").fetchall()
+                    identifiers = [column for column in columns if len(column) == 7 and column[1] == 'id']
+                    if (len(identifiers) != 1 or identifiers[0][2].upper() != 'TEXT'
+                            or identifiers[0][6] != 0):
+                        raise RecoveryError('The archived incident identities require a plain stored text column.')
+                    # Reject malformed identities without materializing oversized
+                    # rows; filtering them out would lose retained replay fences.
+                    rows = db.execute("SELECT CASE WHEN typeof(id)='text' AND length(CAST(id AS BLOB))=36 "
+                                      "THEN id ELSE NULL END FROM main.reports LIMIT 20001").fetchall()
                     if len(rows) > 20000 or any(not isinstance(r[0], str) or not re.fullmatch(r'inc_[a-f0-9]{32}', r[0]) for r in rows):
                         raise RecoveryError('The archived incident replay identities are invalid or exceed their bound.')
                     ids.update(r[0] for r in rows)

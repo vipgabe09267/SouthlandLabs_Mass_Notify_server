@@ -35,7 +35,7 @@ try{
         // Top-level navigation is independent of form-action. The destination
         // comes from the validated provider adapter, never a caller URL.
         $target=json_encode($url,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT|JSON_THROW_ON_ERROR);
-        echo OperatorPortal::document('<h1>SLS Operator Portal</h1><p>Continuing to your identity provider.</p><noscript><a href="'.$e($url).'">Continue sign-in</a></noscript><script nonce="'.$e($nonce).'">window.location.replace('.$target.');</script>',$nonce,[],'','sso');exit;
+        echo OperatorPortal::document('<h1>SLL Operator Portal</h1><p>Continuing to your identity provider.</p><noscript><a href="'.$e($url).'">Continue sign-in</a></noscript><script nonce="'.$e($nonce).'">window.location.replace('.$target.');</script>',$nonce,[],'','sso');exit;
     }
     $browser=$_COOKIE['SLSIDP']??'';if(!setcookie('SLSIDP','',['expires'=>1,'path'=>OperatorPortal::BASE,'secure'=>true,'httponly'=>true,'samesite'=>'None'])){throw new RuntimeException('Browser binding could not be cleared.');}
     if(!is_string($browser)||!preg_match('/^[a-f0-9]{64}$/D',$browser)){throw new DomainException('Authentication browser binding missing.');}
@@ -71,7 +71,7 @@ try{
         'identity'=>\SLS\MassNotify\OperatorAuth::identity($grant['account']),'started_at'=>$now,'mfa_passed'=>false,
         'enterprise_identity'=>$grant['binding']];
     OperatorPortal::csrf($_SESSION);if(!session_write_close()){throw new RuntimeException('Session state could not be saved.');}header('Location: '.OperatorPortal::BASE,true,303);exit;
-}catch(DomainException|InvalidArgumentException|JsonException $error){$status=http_response_code();http_response_code(is_int($status)&&$status>=400?$status:401);$message='Enterprise sign-in failed. '.$error->getMessage();}
+}catch(DomainException|InvalidArgumentException|JsonException $error){$status=http_response_code();http_response_code(is_int($status)&&$status>=400?$status:401);$message='Enterprise sign-in failed. Start again from the operator portal or ask an administrator to review the protected identity audit.';}
 catch(Throwable $error){http_response_code(503);$message='Enterprise sign-in is unavailable. Use your local operator login or ask an administrator to check the provider registration and protected state.';}
 finally{if(session_status()===PHP_SESSION_ACTIVE){session_write_close();}}
 header('Content-Type: text/html; charset=utf-8');echo OperatorPortal::document('<section class="portal-login"><h1>Enterprise sign-in</h1><p class="portal-error" role="alert">'.$e($message).'</p><a href="'.OperatorPortal::BASE.'">Return to local sign-in</a></section>',$nonce,[],'','login');

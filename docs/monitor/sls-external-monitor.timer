@@ -1,5 +1,5 @@
 [Unit]
-Description=Check SLS PBX readiness from this separate host every minute
+Description=Check SLL PBX readiness from this separate host every minute
 
 [Timer]
 OnBootSec=30

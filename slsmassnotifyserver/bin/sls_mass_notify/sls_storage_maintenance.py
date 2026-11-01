@@ -633,7 +633,7 @@ def prune_configured_event_logs(directory=None, paths=None):
             result = prune_event_log(path, settings.get('log_retention_days', 90), recovery_directory=directory / 'event-log-recovery')
         except PermissionError as error:
             raise RuntimeError('Event retention cannot access %s or its private recovery directory %s. '
-                               'Use the verified installer to repair these SLS paths; do not grant write access to /var/log.'
+                               'Use the verified installer to repair these SLL paths; do not grant write access to /var/log.'
                                % (path, directory / 'event-log-recovery')) from error
         if result.get('preserved_invalid'):
             print('Event retention preserved %d record(s) with malformed or unknown timestamps.' % result['preserved_invalid'])
@@ -1309,7 +1309,7 @@ def main():
         try:
             action()
         except BlockingIOError:
-            print('Storage retention %s deferred while another SLS writer holds its lock.' % stage)
+            print('Storage retention %s deferred while another SLL writer holds its lock.' % stage)
         except (OSError, ValueError, RuntimeError, TypeError, AttributeError, OverflowError, ImportError) as error:
             detail = str(error) if isinstance(error, RuntimeError) else type(error).__name__
             print('Storage retention %s deferred: %s' % (stage, detail))

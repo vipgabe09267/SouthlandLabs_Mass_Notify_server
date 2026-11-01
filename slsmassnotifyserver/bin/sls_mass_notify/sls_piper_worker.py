@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Single-threaded CPU synthesis for the admitted SLS speech process."""
+"""Single-threaded CPU synthesis for the admitted SLL speech process."""
 import argparse
 import json
 import math
@@ -47,7 +47,7 @@ def main():
         not args.output_file.startswith("/proc/self/fd/")
         or not args.output_file[14:].isdigit()
     ):
-        parser.error("Use the SLS speech supervisor with a private output descriptor.")
+        parser.error("Use the SLL speech supervisor with a private output descriptor.")
     import onnxruntime
     from piper import PiperVoice, SynthesisConfig
     from piper.config import PiperConfig

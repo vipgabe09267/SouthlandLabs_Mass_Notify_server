@@ -49,8 +49,12 @@ def setting(config, name, default, minimum, maximum):
 class Admission:
     def __init__(self, config, seconds, directory=DATA, web=WEB, clock=time.monotonic):
         self.directory, self.web = Path(directory), Path(web)
-        self.limit = setting(config, 'speech_synthesis_limit', 1, 1, MAX_SLOTS)
-        self.queue = setting(config, 'speech_queue_limit', 8, 1, MAX_WAITERS)
+        profile = config.get('deployment_profile', 'standard')
+        if profile not in ('standard', 'lite'):
+            raise SpeechAdmissionError('Invalid speech admission setting: deployment_profile', 78)
+        self.limit = setting(config, 'speech_synthesis_limit', 1, 1, 1 if profile == 'lite' else MAX_SLOTS)
+        self.queue = setting(config, 'speech_queue_limit', 2 if profile == 'lite' else 8,
+                             1, 2 if profile == 'lite' else MAX_WAITERS)
         self.wait = setting(config, 'speech_queue_wait_seconds', 15, 0, 60)
         self.reserve = setting(config, 'generated_media_min_free_mib', 128, 64, 4096) * MIB
         self.budget = generated_cache_limit(config)
@@ -463,7 +467,7 @@ def main():
         if command or args.max_seconds is not None or not 1 <= args.reserve_media_bytes <= 128 * MIB:
             parser.error('A media reservation accepts 1 byte through 128 MiB and no command.')
     elif args.max_seconds is None or not 1 <= args.max_seconds <= 600 or not command or command[0] != PIPER:
-        parser.error('Only the fixed SLS Piper executable and a 1–600 second speech limit are accepted.')
+        parser.error('Only the fixed SLL Piper executable and a 1–600 second speech limit are accepted.')
     admission = None
     try:
         if os.geteuid() == 0:
@@ -487,7 +491,7 @@ def main():
         print(str(error), file=sys.stderr)
         return error.code
     except (OSError, RuntimeError, ValueError):
-        print('Speech admission could not verify configuration, storage or lock permissions. Inspect SLS diagnostics before retrying.', file=sys.stderr)
+        print('Speech admission could not verify configuration, storage or lock permissions. Inspect SLL diagnostics before retrying.', file=sys.stderr)
         return 73
     finally:
         if admission is not None:

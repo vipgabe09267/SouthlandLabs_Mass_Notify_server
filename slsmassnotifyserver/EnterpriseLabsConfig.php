@@ -7,6 +7,7 @@ require_once __DIR__.'/DirectoryConfig.php';
 require_once __DIR__.'/SubscriberConfig.php';
 require_once __DIR__.'/EnterpriseIntegrationsConfig.php';
 require_once __DIR__.'/EnterpriseOperationsConfig.php';
+require_once __DIR__.'/bin/sls_mass_notify/sls_runtime_state.php';
 
 /** Master activation and the fixed, non-secret feature-manager contract. */
 final class EnterpriseLabsConfig
@@ -27,11 +28,12 @@ final class EnterpriseLabsConfig
 
     public static function enabled(array $settings): bool
     {
-        return self::normalize($settings['enterprise_labs'] ?? [])['enabled'];
+        return RuntimeState::enterpriseAvailable($settings) && self::normalize($settings['enterprise_labs'] ?? [])['enabled'];
     }
 
     public static function requireEnabled(array $settings): void
     {
+        RuntimeState::requireEnterpriseAvailable($settings);
         if (!self::enabled($settings)) {
             throw new \DomainException('Enterprise Labs is disabled. Enable it in Feature manager before running this operation.');
         }
@@ -94,6 +96,10 @@ final class EnterpriseLabsConfig
     /** Mask legacy flags until the master is explicitly enabled; never discard data. */
     public static function disableWhenOff(array $settings): array
     {
+        if (!RuntimeState::enterpriseAvailable($settings)) {
+            $settings['enterprise_labs'] = ['enabled'=>false];
+            if (isset($settings['enterprise_identity'])) { $settings['enterprise_identity']['enabled'] = false; }
+        }
         if (self::enabled($settings)) { return $settings; }
         foreach (self::catalog() as $feature) {
             if (array_key_exists($feature['path'][0], $settings)) { self::set($settings, $feature['path'], false); }
@@ -107,6 +113,11 @@ final class EnterpriseLabsConfig
     /** Reject explicit enable requests before a normalizer can mask them. */
     public static function assertActivation(array $settings): void
     {
+        if (!RuntimeState::enterpriseAvailable($settings)
+            && (self::on($settings['enterprise_labs']['enabled'] ?? false)
+                || self::on($settings['enterprise_identity']['enabled'] ?? false))) {
+            throw new \DomainException(RuntimeState::LITE_ENTERPRISE_MESSAGE);
+        }
         if (self::enabled($settings)) { return; }
         foreach (self::catalog() as $feature) {
             if (self::on(self::value($settings, $feature['path']))) {
@@ -135,7 +146,8 @@ final class EnterpriseLabsConfig
     public static function state(array $settings): array
     {
         $sections = self::sections($settings);
-        $enabled = $sections['enterprise_labs']['enabled'];
+        $available = RuntimeState::enterpriseAvailable($settings);
+        $enabled = $available && $sections['enterprise_labs']['enabled'];
         $features = [];
         foreach (self::catalog() as $feature) {
             $parent = $feature['path'][0];
@@ -143,12 +155,14 @@ final class EnterpriseLabsConfig
                 && self::on(self::value($sections, $feature['path']));
         }
         return ['config'=>['enabled'=>$enabled,'features'=>$features],
-            'revision'=>EnterpriseIntegrationsConfig::fingerprint($sections),'catalog'=>self::catalog()];
+            'available'=>$available,'blocked_reason'=>$available?'':RuntimeState::LITE_ENTERPRISE_MESSAGE,
+            'revision'=>EnterpriseIntegrationsConfig::fingerprint([$settings['deployment_profile']??'standard',$sections]),'catalog'=>self::catalog()];
     }
 
     /** Produce only the six immediate namespace patches; preserve every other value. */
     public static function changes(array $settings, bool $enabled, array $features): array
     {
+        if ($enabled || in_array(true,$features,true)) { RuntimeState::requireEnterpriseAvailable($settings); }
         $catalog = self::catalog(); $ids = array_column($catalog, 'id');
         if (array_diff(array_keys($features), $ids) || array_diff($ids, array_keys($features))) {
             throw new \InvalidArgumentException('Feature manager requires one selection for each supported feature. Reload the manager.');

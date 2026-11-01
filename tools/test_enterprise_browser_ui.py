@@ -38,6 +38,16 @@ spec = importlib.util.spec_from_file_location('enterprise_portal_browser_helper'
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 
+def unnamed_editable_controls(page):
+    return page.locator('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]),select,textarea').evaluate_all('''nodes=>nodes.filter(node=>{
+        if(!node.getClientRects().length||node.disabled||node.getAttribute('aria-hidden')==='true')return false;
+        if(node.closest('label'))return false;
+        if(node.id&&document.querySelector('label[for="'+CSS.escape(node.id)+'"]'))return false;
+        if((node.getAttribute('aria-label')||'').trim())return false;
+        const ids=(node.getAttribute('aria-labelledby')||'').trim().split(/\\s+/).filter(Boolean);
+        return !ids.some(id=>{const label=document.getElementById(id);return label&&(label.textContent||'').trim();});
+    }).map(node=>({tag:node.tagName.toLowerCase(),id:node.id,name:node.name,html:node.outerHTML.slice(0,240)}))''')
+
 
 class EnterpriseBrowserTests(unittest.TestCase):
     @classmethod
@@ -200,7 +210,7 @@ function load_view($path,$variables=[]){extract($variables);ob_start();include $
 if($_SERVER['REQUEST_METHOD']==='POST'){file_put_contents(__DIR__.'/general-post.json',json_encode($_POST));header('Content-Type: text/plain');echo 'Inert UI fixture: request captured; no update or notification.';return;}
 ?><!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>*{box-sizing:border-box}body{margin:0;font:14px Arial;color:#334155}.container-fluid{padding:0 15px}table{width:100%;border-collapse:collapse}td,th{padding:8px;text-align:left}.label{padding:3px 6px;border-radius:4px}.label-info{background:#dbeafe}.label-warning{background:#fef3c7}.label-danger{color:#b91c1c}.panel{border:1px solid #ddd;border-radius:6px;margin:12px 0}.panel-heading,.panel-body{padding:12px}.btn{padding:9px 12px;border:1px solid #aaa;border-radius:4px;display:inline-block}.row{display:flex;flex-wrap:wrap}.col-md-4{width:33.333%;padding:12px}.col-md-12{width:100%;padding:12px}.form-control{display:block;width:100%;padding:8px;min-height:36px;border:1px solid #ccc;border-radius:4px}.help-block{font-size:13px;line-height:1.5;color:#64748b}label{display:block}@media(max-width:600px){.col-md-4{width:100%}}</style></head><body><?php
 if(isset($_GET['settings'])){
- $settings=['log_retention_days'=>90,'phone_device_limit'=>25,'desktop_client_limit'=>25,'updates'=>['github_enabled'=>'0','channel'=>'beta']];$csrf_token='fixture-csrf';$package_version='0.1.8-beta';$package_update_status=['state'=>'update','label'=>'Fixture update available','message'=>'Synthetic release; no installation.'];
+ $settings=['log_retention_days'=>90,'phone_device_limit'=>25,'desktop_client_limit'=>25,'updates'=>['github_enabled'=>'0','channel'=>'beta']];$csrf_token='fixture-csrf';$package_version='0.1.9-beta';$package_update_status=['state'=>'update','label'=>'Fixture update available','message'=>'Synthetic release; no installation.'];
  include MODULE.'/views/other_settings.php';
 }else{
  $diagnostics=['checks'=>[['label'=>'Postfix service and queue','ok'=>true,'detail'=>'Postfix running. Zero queued messages.'],['label'=>'Phone collector','ok'=>false,'detail'=>'Fixture error: authenticated heartbeat missing. Check the collector service journal.']],
@@ -491,6 +501,76 @@ if($path==='/mass-notify/'){require __DIR__.'/mass-notify/index.php';return;}htt
         page.set_viewport_size({'width':1440,'height':1000})
         print('Central Chromium: tabs, revisioned identity POST, typed approval/drill/shift/floorplan editors, private overlay refresh, speaker row, five-second warning and mobile width passed.',flush=True)
 
+    def test_coordination_removal_marks_editor_dirty_and_protects_navigation(self):
+        page = self.page
+        page.goto(self.browser_url + '/config.php?display=slsmassnotifyserver_enterprise')
+        if page.locator('#sls-labs-danger[open]').count():
+            page.wait_for_function('!document.getElementById("sls-labs-danger-agree").disabled')
+            page.locator('#sls-labs-danger-agree').check()
+            page.locator('#sls-labs-danger-accept').click()
+        page.locator('[data-labs-tab="operations"]').click()
+        plans = page.locator('[data-operation-list="floorplans"] .sls-ent-row')
+        self.assertEqual(plans.count(), 1)
+        try:
+            plans.get_by_role('button', name='Remove', exact=True).click()
+            self.assertEqual(plans.count(), 0)
+            self.assertEqual(page.locator('#sls-enterprise').get_attribute('data-save-state'), 'editor')
+            protected = page.evaluate('''() => {
+                const event = new Event('beforeunload', {cancelable:true});
+                window.dispatchEvent(event);
+                return event.defaultPrevented;
+            }''')
+            self.assertTrue(protected, 'Unsaved coordination removal did not protect navigation')
+        finally:
+            # Discard this private editor change without persisting settings.
+            page.evaluate("window.SlsSaveState.set(document.getElementById('sls-enterprise'), 'saved')")
+            page.reload()
+        self.assertEqual(plans.count(), 1, 'Removing in the editor unexpectedly persisted settings')
+
+    def test_cluster_field_accessible_names_keep_help_as_description(self):
+        page=self.page
+        page.goto(self.browser_url+'/config.php?display=slsmassnotifyserver_enterprise')
+        if page.locator('#sls-labs-danger[open]').count():
+            page.wait_for_function('!document.getElementById("sls-labs-danger-agree").disabled')
+            page.locator('#sls-labs-danger-agree').check()
+            page.locator('#sls-labs-danger-accept').click()
+        page.locator('#sls-enterprise').wait_for()
+        form=page.locator('#sls-cluster-config')
+        for name,label,role in [('cluster_id','Cluster ID','textbox'),
+                                ('node_id','Local node ID','textbox'),
+                                ('lease_seconds','Witness lease seconds','spinbutton')]:
+            if name=='lease_seconds':
+                form.locator('details').filter(has=page.locator('input[name="lease_seconds"]')).evaluate('(element)=>element.open=true')
+            control=form.get_by_role(role,name=label,exact=True)
+            self.assertEqual(control.count(),1,'Field help became part of the accessible name: '+name)
+            description=control.get_attribute('aria-describedby')
+            self.assertTrue(description,'Missing separately associated field help: '+name)
+            help_text=form.locator('#'+description)
+            self.assertEqual(help_text.count(),1)
+            self.assertGreater(len(help_text.inner_text()),20)
+            control.focus()
+            self.assertTrue(control.evaluate('(element)=>element===document.activeElement'))
+
+    def test_lite_blocks_enterprise_controls_and_explains_upgrade(self):
+        path=self.root/'active.config';before=path.read_bytes();page=self.context.new_page();errors=[]
+        page.on('pageerror',lambda error:errors.append(str(error)))
+        try:
+            code='require '+json.dumps(str(MODULE/'ConfigCrypto.php'))+';$p=$argv[1];$s=\\FreePBX\\modules\\SlsConfigCrypto::readFile($p);$s["deployment_profile"]="lite";$s["enterprise_labs"]=["enabled"=>true];file_put_contents($p,\\FreePBX\\modules\\SlsConfigCrypto::encode($s));'
+            subprocess.run(['php','-r',code,str(path)],check=True,capture_output=True)
+            page.goto(self.browser_url+'/config.php?display=slsmassnotifyserver_enterprise')
+            warning=page.locator('#sls-enterprise-lite');warning.wait_for()
+            self.assertIn('unavailable in Lite',warning.inner_text())
+            self.assertIn('enterprise SSO',warning.inner_text())
+            self.assertIn('--standard',warning.inner_text())
+            self.assertEqual(page.locator('#sls-labs-master, #sls-labs-feature-save').count(),0)
+            self.assertIn('slsmassnotifyserver_other',warning.get_by_role('link').get_attribute('href'))
+            for width in (1440,MOBILE_WIDTH):
+                page.set_viewport_size({'width':width,'height':900})
+                self.assertTrue(warning.is_visible())
+                self.assertTrue(page.locator('body').evaluate('(body)=>body.scrollWidth<=innerWidth'))
+            self.assertEqual(errors,[])
+        finally:path.write_bytes(before);page.close()
+
     def test_disabled_labs_badge(self):
         path=self.root/'active.config';before=path.read_bytes();page=self.context.new_page()
         try:
@@ -553,6 +633,12 @@ if($path==='/mass-notify/'){require __DIR__.'/mass-notify/index.php';return;}htt
 
     def test_health_and_update_controls(self):
         page=self.context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
+        prompts=[];dialog_decisions=[]
+        def handle_prompt(dialog):
+            prompts.append(dialog.message)
+            if dialog_decisions and not dialog_decisions.pop(0):dialog.dismiss()
+            else:dialog.accept()
+        page.on('dialog',handle_prompt)
         try:
             page.goto(self.browser_url+'/diagnostics.php')
             self.assertEqual(page.locator('.sls-help-endpoint-table tbody tr').count(),1,page.content()[:2800]+(self.root/'server.log').read_text()[-1800:])
@@ -562,9 +648,24 @@ if($path==='/mass-notify/'){require __DIR__.'/mass-notify/index.php';return;}htt
             desktops=page.locator('.panel').filter(has=page.locator('h4',has_text='Desktop Clients')).locator('.sls-help-scroll-table')
             self.assertTrue(desktops.evaluate('(n)=>n.scrollHeight>n.clientHeight && getComputedStyle(n).overflowY==="auto"'))
             if os.environ.get('SLS_REVIEW_SCREENSHOTS')=='1':print('SLS_UI_SCREENSHOT '+json.dumps({'name':'help-contacts','data':base64.b64encode(page.screenshot(full_page=True)).decode()}),flush=True)
+            post_record=self.root/'general-post.json'
+            for action,decisions in [('check_updates',[False]),('manual_update',[True,False])]:
+                page.goto(self.browser_url+'/diagnostics.php?settings=1&fixture_action='+action+'#settings-maintenance')
+                page.locator('[data-settings-section="maintenance"]').wait_for(state='visible')
+                page.locator('[name="updates[channel]"]').select_option('stable')
+                self.assertEqual(page.locator('#sls-general-settings').get_attribute('data-save-state'),'unsaved')
+                post_record.unlink(missing_ok=True);dialog_decisions.extend(decisions)
+                button=page.locator('[value="'+action+'"]')
+                button.click();page.wait_for_timeout(150)
+                self.assertEqual(dialog_decisions,[])
+                self.assertFalse(post_record.exists(),'A cancelled update action reached the server fixture.')
+                self.assertFalse(button.is_disabled(),'A cancelled update action left its control disabled.')
+                self.assertEqual(page.locator('#sls-general-settings').get_attribute('data-save-state'),'unsaved')
             for action in ['check_updates','manual_update']:
                 page.goto(self.browser_url+'/diagnostics.php?settings=1&fixture_action='+action+'#settings-maintenance')
                 page.locator('[data-settings-section="maintenance"]').wait_for(state='visible')
+                prompt_start=len(prompts)
+                self.assertEqual(unnamed_editable_controls(page),[])
                 self.assertEqual(page.locator('#sls-automatic-updates').input_value(),'0')
                 page.locator('[name="updates[channel]"]').select_option('stable')
                 if action=='check_updates' and os.environ.get('SLS_REVIEW_SCREENSHOTS')=='1':print('SLS_UI_SCREENSHOT '+json.dumps({'name':'updates','data':base64.b64encode(page.screenshot(full_page=True)).decode()}),flush=True)
@@ -573,6 +674,10 @@ if($path==='/mass-notify/'){require __DIR__.'/mass-notify/index.php';return;}htt
                 posted=json.loads((self.root/'general-post.json').read_text())
                 self.assertEqual(posted['slsmassnotifyserver_action'],action)
                 self.assertEqual(posted['slsmassnotifyserver_csrf'],'fixture-csrf')
+                current=prompts[prompt_start:]
+                self.assertIn('Discard unsaved General Settings and continue?',current)
+                if action=='manual_update':self.assertIn('Install the selected signed release now? FreePBX services and dialplan may reload during installation.',current)
+                else:self.assertEqual(len(current),1)
             self.assertEqual(errors,[])
         finally:page.close()
 
@@ -792,6 +897,22 @@ if($path==='/mass-notify/'){require __DIR__.'/mass-notify/index.php';return;}htt
         self.assertEqual(self.errors,[]);page.set_viewport_size({'width':1440,'height':1000})
         print('Incident language Chromium: paginated preference edit/save, immutable cohort receipts, explicit reviewed update and mobile dialog width passed.',flush=True)
 
+    def test_incident_editor_draft_requires_explicit_discard(self):
+        page=self.context.new_page()
+        try:
+            page.goto(self.browser_url+'/config.php?display=slsmassnotifyserver_incidents')
+            page.get_by_role('button',name='New template',exact=True).click()
+            dialog=page.locator('#sls-inc-modal');name=dialog.get_by_label('Template name',exact=True);name.fill('Unsubmitted incident draft')
+            prompts=[]
+            page.once('dialog',lambda prompt:(prompts.append(prompt.message),prompt.dismiss()))
+            dialog.locator('.sls-inc-cancel').click()
+            self.assertEqual(prompts,['Discard the changes in this incident editor?'])
+            self.assertFalse(dialog.is_hidden());self.assertEqual(name.input_value(),'Unsubmitted incident draft')
+            page.once('dialog',lambda prompt:prompt.accept())
+            dialog.press('Escape')
+            self.assertTrue(dialog.is_hidden())
+        finally:page.close()
+
     def test_portal_approval_drill_review_and_private_overlay(self):
         page=self.page;helper_instance=helper.PortalHttpTests()
         cookie=helper_instance.login();name,value=cookie.split('=',1)
@@ -892,6 +1013,27 @@ if($path==='/mass-notify/'){require __DIR__.'/mass-notify/index.php';return;}htt
                     page.evaluate('document.documentElement.style.zoom="1"');page.set_viewport_size({'width':width,'height':1000})
                     print('SLS_UI_SCREENSHOT '+json.dumps({'name':name,'data':base64.b64encode(page.screenshot(full_page=True)).decode()}),flush=True)
         finally:page.close()
+
+    def test_door_actuation_requires_contextual_confirmation(self):
+        page=self.context.new_page();path=self.root/'active.config';before=path.read_bytes();actions=self.root/'central-actions.jsonl';action_before=actions.read_bytes() if actions.exists() else b''
+        try:
+            integration={'enabled':'1','access_control':{'enabled':'1','doors':[{'id':'door_'+'d'*24,'name':'South vestibule','token':'1','allow_read':True,'allow_lock':True,'allow_unlock':True,'allow_access':True,'maximum_access_seconds':12}]}}
+            code='require '+json.dumps(str(MODULE/'ConfigCrypto.php'))+';$p=$argv[1];$s=\\FreePBX\\modules\\SlsConfigCrypto::readFile($p);$s["enterprise_labs"]=["enabled"=>true];$s["enterprise_integrations"]=json_decode($argv[2],true,32,JSON_THROW_ON_ERROR);file_put_contents($p,\\FreePBX\\modules\\SlsConfigCrypto::encode($s));'
+            subprocess.run(['php','-r',code,str(path),json.dumps(integration)],check=True,capture_output=True)
+            page.goto(self.browser_url+'/config.php?display=slsmassnotifyserver_enterprise#labs-integrations')
+            page.locator('[data-labs-tab="integrations"]').click()
+            page.locator('#sls-provider-operations > summary').click()
+            access=page.locator('#sls-integration-door-actions').get_by_role('button',name='Access',exact=True)
+            access.wait_for();self.assertTrue(access.is_enabled())
+            prompts=[]
+            page.once('dialog',lambda dialog:(prompts.append(dialog.message),dialog.dismiss()))
+            access.click()
+            self.assertEqual(len(prompts),1)
+            self.assertIn('South vestibule',prompts[0]);self.assertIn('12 seconds',prompts[0]);self.assertIn('access',prompts[0])
+            self.assertTrue(access.is_enabled(),'Cancelling door confirmation disabled the control')
+            self.assertEqual(actions.read_bytes() if actions.exists() else b'',action_before,'Cancelled door action reached the server')
+        finally:
+            page.close();path.write_bytes(before)
 
     def test_browser_display_images_keep_credentials_on_exact_origin_and_route(self):
         page=self.context.new_page()

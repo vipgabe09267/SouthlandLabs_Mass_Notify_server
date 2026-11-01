@@ -8,7 +8,7 @@ $styleRevision = substr(hash_file('sha256', __DIR__ . '/beta_notice.css'), 0, 16
 <link rel="stylesheet" href="modules/slsmassnotifyserver/views/beta_notice.css?v=<?= $escape($styleRevision) ?>">
 <template id="sls-beta-notice-template" data-csrf="<?= $escape((string)$csrf_token) ?>">
     <dialog class="sls-beta-notice" aria-labelledby="sls-beta-notice-title" aria-describedby="sls-beta-notice-body">
-        <div class="sls-beta-notice-brand">SLS Mass Notifications · Beta</div>
+        <div class="sls-beta-notice-brand">SLL Mass Notify Server · Beta</div>
         <h2 id="sls-beta-notice-title"><?= $escape(BetaNotice::TITLE) ?></h2>
         <p id="sls-beta-notice-body"><strong><?= $escape(BetaNotice::BODY) ?></strong></p>
         <p><em>This is a one time nag!</em></p>

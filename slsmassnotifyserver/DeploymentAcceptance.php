@@ -10,7 +10,7 @@ trait SlsDeploymentAcceptance
     {
         $principal = $this->currentOperator();
         if (($principal['operator_role'] ?? '') !== 'administrator') {
-            throw new \DomainException('Only an SLS administrator can record installation test observations.');
+            throw new \DomainException('Only an SLL administrator can record installation test observations.');
         }
         return $principal;
     }
@@ -51,7 +51,7 @@ trait SlsDeploymentAcceptance
     public function deviceAcceptanceState(): array
     {
         try { $this->requireDeviceAcceptanceAdministrator(); }
-        catch (\Throwable $error) { return ['success' => false, 'error_code' => 'permission_denied', 'message' => 'Sign in as an SLS administrator to record or review device-test observations.']; }
+        catch (\Throwable $error) { return ['success' => false, 'error_code' => 'permission_denied', 'message' => 'Sign in as an SLL administrator to record or review device-test observations.']; }
         try {
             $stored = $this->deviceAcceptanceConfiguration(self::SETTINGS_JSON);
             $settings = $this->getActiveSettings(); $catalog = $this->deviceAcceptanceCatalog($settings);
@@ -69,7 +69,7 @@ trait SlsDeploymentAcceptance
     public function recordDeviceAcceptance(array $input): array
     {
         try { $principal = $this->requireDeviceAcceptanceAdministrator(); }
-        catch (\Throwable $error) { return ['success' => false, 'error_code' => 'permission_denied', 'message' => 'Only an SLS administrator can record a device-test observation.']; }
+        catch (\Throwable $error) { return ['success' => false, 'error_code' => 'permission_denied', 'message' => 'Only an SLL administrator can record a device-test observation.']; }
         $lock = null;
         try {
             $revision = $input['revision'] ?? null; unset($input['revision']);
@@ -89,7 +89,7 @@ trait SlsDeploymentAcceptance
                 return ['success' => false, 'error_code' => 'configuration_changed', 'message' => 'Settings changed while the device-test record was being confirmed. Reload before recording this observation.'];
             }
             if (!hash_equals(self::deviceAcceptanceRevision($stored['sha256'], $catalog), $revision)) {
-                return ['success' => false, 'error_code' => 'configuration_changed', 'message' => 'Another request changed SLS settings. Reload before recording this observation.'];
+                return ['success' => false, 'error_code' => 'configuration_changed', 'message' => 'Another request changed SLL settings. Reload before recording this observation.'];
             }
             $target = array_values(array_filter($catalog, static fn($row) => $row['type'] === $observation['target_type'] && $row['id'] === $observation['target_id']));
             if (count($target) !== 1) { throw new \DomainException('That destination is no longer configured. Reload the form and select its current saved identity.'); }

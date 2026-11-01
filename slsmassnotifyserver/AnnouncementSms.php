@@ -148,7 +148,8 @@ trait SlsAnnouncementSms
                 if (!$allowed) { $row['detail']='Weather source, quiet-hours policy or original SMS permission no longer allows submission.'; }
             }
             if (isset($request['api_credential_id'])) {
-                $principal=\SLS\MassNotify\ApiSecurity::currentCredential($settings,$request['api_credential_id']);
+                $principal=\SLS\MassNotify\ApiSecurity::currentCredential($settings,$request['api_credential_id'],
+                    $request['api_credential_revision']??null);
                 $allowed=$allowed && $principal && \SLS\MassNotify\ApiSecurity::permits($principal,'send')
                     && (($principal['audience']['unrestricted']??false)===true || in_array($id,\SLS\MassNotify\ApiSecurity::allowedAudience($principal,$settings)['sms_recipient_ids']??[],true));
             }
@@ -176,7 +177,8 @@ trait SlsAnnouncementSms
                     }
                     $receipts[$index]=\SLS\MassNotify\EnterpriseClusterIntegration::effect($settings,$clusterRequest,'sms',(string)$id,
                         fn()=>$service->send($settings,$request['sms_targets'][$id],$request['delivery_id'],
-                            $request['sms_attempt_id']??'',min($request['sms_expires_at'],$deadline??PHP_INT_MAX),time(),$request['sms_media']['data']??''));
+                            $request['sms_attempt_id']??'',min($request['sms_expires_at'],$deadline??PHP_INT_MAX),time(),$request['sms_media']['data']??'',
+                            fn()=>$this->announcementSmsSubmissionPermitted($request,(string)$id,$started)));
                 } catch (\DomainException $error) {
                     $row['state']='failed'; $row['detail']='SMS was not submitted: '.$error->getMessage().'. Review SMS settings, recipient consent and limits.';
                     $receipts[$index]=$row;
@@ -187,6 +189,37 @@ trait SlsAnnouncementSms
                 $progress($receipts,'Recorded SMS destination outcome.');
             } else { $receipts[]=$row; $progress($receipts,'Recorded SMS destination exclusion.'); }
         }
+    }
+    private function announcementSmsSubmissionPermitted(array $request,string $id,int $started): bool|array
+    {
+        if (!empty($request['weather_context'])) {
+            $weather=$this->weatherChannelAuthorization($request['weather_context']);
+            if (($weather['status']??'')!=='eligible' || !in_array($id,$weather['sms_recipient_ids']??[],true)) { return false; }
+        }
+        if (!empty($request['automation_context']) && !$this->automationContextPermitted($request['automation_context'])) { return false; }
+        // Source readers can wait on their own helpers. Refresh sender policy
+        // after those checks, immediately beside the provider handoff.
+        $settings=$this->getActiveSettings();
+        if (!\SLS\MassNotify\RuntimeState::running($settings)) { return false; }
+        if (isset($request['api_credential_id'])) {
+            $principal=\SLS\MassNotify\ApiSecurity::currentCredential($settings,$request['api_credential_id'],
+                $request['api_credential_revision']??null);
+            if (!$principal || !\SLS\MassNotify\ApiSecurity::permits($principal,'send')
+                || (($principal['audience']['unrestricted']??false)!==true
+                    && !in_array($id,\SLS\MassNotify\ApiSecurity::allowedAudience($principal,$settings)['sms_recipient_ids']??[],true))) { return false; }
+        }
+        $deadline=$this->scheduledAnnouncementDeadline($request);
+        $validUntil=$request['sms_expires_at']??0;
+        if (!is_int($validUntil) || $validUntil<1) { return false; }
+        foreach ([$deadline,$principal['expires_at']??0,$request['automation_context']['expires_at']??0,
+            $request['weather_context']['deadline_at']??0,$request['weather_context']['source_validity']['expires_at']??0] as $bound) {
+            if (is_int($bound) && $bound>0) { $validUntil=min($validUntil,$bound); }
+        }
+        $monotonicUntil=$started+78000000000;
+        if (time()>=$validUntil || hrtime(true)>=$monotonicUntil) { return false; }
+        // Carry these immutable time bounds across the later consent-store
+        // read without starting another potentially slow policy lookup.
+        return ['allowed'=>true,'valid_until'=>$validUntil,'monotonic_until'=>$monotonicUntil];
     }
     private function refreshAnnouncementSmsReceipts(array $result): array
     {

@@ -10,6 +10,10 @@
     var metrics = root.querySelector('dl');
     var errors = root.querySelector('[data-capacity-errors]');
     var timer, request, generation = 0;
+    function maximum(input) {
+        var value = Number(input.max);
+        return Number.isInteger(value) && value >= 1 && value <= 1000 ? value : 1000;
+    }
     function text(selector, value) { root.querySelector(selector).textContent = value; }
     function gib(bytes) { return (Number(bytes) / 1073741824).toFixed(2) + ' GiB'; }
     function metric(selector, value, check) {
@@ -37,8 +41,13 @@
         clearTimeout(timer);
         metrics.hidden = true; errors.hidden = true; errors.replaceChildren();
         text('[data-capacity-hardware]', '');
-        if (![phone, desktop].every(function (input) { return /^[0-9]{1,4}$/.test(input.value) && Number(input.value) >= 1 && Number(input.value) <= 1000; })) {
-            status.textContent = 'Enter phone and desktop capacities from 1 through 1000.';
+        if (![phone, desktop].every(function (input) {
+            return /^[0-9]{1,4}$/.test(input.value)
+                && Number(input.value) >= 1
+                && Number(input.value) <= maximum(input);
+        })) {
+            var limit = Math.min(maximum(phone), maximum(desktop));
+            status.textContent = 'Enter phone and desktop capacities from 1 through ' + limit + '.';
             root.setAttribute('aria-busy', 'false'); return;
         }
         root.setAttribute('aria-busy', 'true');

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Southland Servers Mass Notifications Server by the Southland Servers Group
+# SLL Mass Notify Server by the Southland Labs
 
 usage() {
   printf '%s\n' 'Usage: sls_mass_notify_test.sh [trigger-id [trigger-name]]'
@@ -30,8 +30,8 @@ case "${2:-}" in
     ;;
 esac
 
-SLS_CALLERID_NAME="SLS Mass Notification System"
-SLS_CALLERID_NUM="SLS"
+SLS_CALLERID_NAME="SLL Mass Notify Server"
+SLS_CALLERID_NUM="SLL"
 SLS_AUDIO_CONTEXT="sls-alert-audio"
 NWS_ALERT_RECIPIENTS=()
 NWS_DESKTOP_CLIENTS=()
@@ -72,12 +72,12 @@ ASTERISK_CLI_BIN="${ASTERISK_CLI_BIN:-$(command -v asterisk 2>/dev/null || true)
 [ -n "$ASTERISK_CLI_BIN" ] || ASTERISK_CLI_BIN="/usr/sbin/asterisk"
 MAIL_TO=""
 DISCORD_WEBHOOK_URL=""
-MAIL_FROM_NAME="SLS Mass Notification System"
+MAIL_FROM_NAME="SLL Mass Notify Server"
 MAIL_FROM_ADDR="no-reply@localhost.localdomain"
 EMAIL_HTML_ENABLED="1"
 SENDMAIL_BIN="/usr/sbin/sendmail"
 SOURCE_EXTENSION=""
-SOURCE_NAME="SLS Mass Notification System"
+SOURCE_NAME="SLL Mass Notify Server"
 DELIVERY_TARGETS=""
 DESKTOP_DELIVERY_TARGETS=""
 TEST_AUDIO_LABEL="None"
@@ -86,7 +86,7 @@ API_TEST_REMOVED_RECIPIENTS=0
 TRIGGER_EXTENSION="${1:-unknown}"
 TRIGGER_NAME="${2:-Unknown Caller}"
 NWS_ALERTS_DRY_RUN="${NWS_ALERTS_DRY_RUN:-0}"
-TEST_EMAIL_SUBJECT="Southland Servers Mass Notifications Server: NWS test triggered"
+TEST_EMAIL_SUBJECT="SLL Mass Notify Server: NWS test triggered"
 TEST_EMAIL_BODY="An NWS test was triggered.
 
 Source Name: {{source_name}}
@@ -105,7 +105,7 @@ require_direct_test_authority() {
   if /usr/bin/timeout --kill-after=1 5 /usr/bin/python3 -I "$CLUSTER_GUARD" --check-legacy "$CONFIG_JSON_FILE" >> "$LOG" 2>&1; then
     return 0
   fi
-  local message="Direct Weather testing was blocked by SLS runtime or cluster policy. Check slsconsole status; HA/edge deployments must use a queued witness-authorized test. No additional channel was submitted."
+  local message="Direct Weather testing was blocked by SLL runtime or cluster policy. Check slsconsole status; HA/edge deployments must use a queued witness-authorized test. No additional channel was submitted."
   printf 'ERROR: %s\n' "$message" >&2
   report_fault "cluster_authority" "$message"
   return 1
@@ -367,7 +367,7 @@ generate_test_tts_audio() {
   chown asterisk:asterisk "$SLS_TTS_DIR" 2>/dev/null || true
   chmod 755 "$SLS_TTS_DIR" 2>/dev/null || true
 
-  text="This is a test of the Southland Servers Mass Notification weather alert system. No action is required."
+  text="This is a test of the SLL Mass Notify Server weather alert system. No action is required."
   base_name="test_piper_tts_$(date +%Y%m%d%H%M%S)_$$"
   tmp_file="$(mktemp /tmp/sls_test_tts_XXXXXX.wav)"
   output_file="${SLS_TTS_DIR}/${base_name}.wav"

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Run only fixed SLS cron jobs and retain bounded private diagnostics.
+"""Run only fixed SLL cron jobs and retain bounded private diagnostics.
 
 Cron entries also redirect this runner's output to /dev/null: interpreter and
 logging failures must not create a second, uncontrolled email producer.
@@ -149,7 +149,7 @@ def emergency(job, category):
     # Fixed metadata only. Do not leak captured child output to system logs.
     try:
         syslog.openlog('sls-cron', syslog.LOG_PID, syslog.LOG_DAEMON)
-        syslog.syslog(syslog.LOG_ERR, 'SLS cron ' + job + ': ' + category + '; review private cron diagnostics and directory permissions.')
+        syslog.syslog(syslog.LOG_ERR, 'SLL cron ' + job + ': ' + category + '; review private cron diagnostics and directory permissions.')
     except Exception:
         pass
 

@@ -101,7 +101,10 @@ class ApiStateStorageTests(unittest.TestCase):
         return (result.stdout if raw else json.loads(result.stdout)), result.stderr
 
     def rate(self, kind):
-        return ("desktop_auth_attempt_allowed('192.0.2.1','alice',true,1800000000)" if kind == 'desktop'
+        # Generic state-storage checks exercise the durable failed-password
+        # registry. Successful authenticated traffic intentionally uses a
+        # separate, non-durable availability shard.
+        return ("desktop_auth_attempt_allowed('192.0.2.1','alice',false,1800000000)" if kind == 'desktop'
                 else "control_rate_allowed(['rate_limit_enabled'=>1,'rate_limit_per_minute'=>2],'192.0.2.1')")
 
     def test_ack_reader_does_not_reopen_checked_path_with_unbounded_read(self):
@@ -268,7 +271,7 @@ class ApiStateStorageTests(unittest.TestCase):
     def test_successful_partial_writes_are_completed(self):
         result, _ = self.fixture('desktop', '$GLOBALS["short_write"]=true; echo json_encode(["allowed"=>'
             + self.rate('desktop') + ',"data"=>json_decode(file_get_contents(DESKTOP_AUTH_RATE_FILE),true)]);')
-        self.assertTrue(result['allowed']); self.assertEqual(len(result['data']), 1)
+        self.assertTrue(result['allowed']); self.assertEqual(len(result['data']), 2)
 
     def test_symlinks_hardlinks_fifo_and_substitution_preserve_victims(self):
         for kind in ('desktop', 'control'):
@@ -327,10 +330,13 @@ class ApiStateStorageTests(unittest.TestCase):
             $blocked=desktop_auth_failure_budget_available('192.0.2.1','alice',1800000000);
             $preserved=file_get_contents(DESKTOP_AUTH_RATE_FILE)===$before;
             $next=desktop_auth_attempt_allowed('192.0.2.1','alice',true,1800000060);
+            $shard=DESKTOP_AUTH_RATE_FILE.'.ok-'.substr(hash('sha256','authenticated:alice'),0,2).'.json';
             echo json_encode(['blocked'=>$blocked,'preserved'=>$preserved,'next'=>$next,
-                'keys'=>array_keys(json_decode(file_get_contents(DESKTOP_AUTH_RATE_FILE),true))]);
+                'base_preserved'=>file_get_contents(DESKTOP_AUTH_RATE_FILE)===$before,
+                'keys'=>array_keys(json_decode(file_get_contents($shard),true))]);
         ''')
         self.assertFalse(result['blocked']); self.assertTrue(result['preserved']); self.assertTrue(result['next'])
+        self.assertTrue(result['base_preserved'])
         self.assertTrue(result['keys'][0].startswith('ok:'))
 
     def test_presence_is_advisory_preserves_receipt_fields_and_prunes_revoked_clients(self):

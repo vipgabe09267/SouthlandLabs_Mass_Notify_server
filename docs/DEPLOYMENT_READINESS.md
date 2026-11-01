@@ -51,7 +51,7 @@ are included, so treat downloaded reports as confidential operational informatio
 
 The **Device acceptance** card carries a Labs badge. **Record device test** saves
 your observation of a test already performed; it never sends an alert, runs a
-script or changes delivery settings. Only an SLS administrator may read or add
+script or changes delivery settings. Only an SLL administrator may read or add
 records. Select a currently saved phone, desktop, external voice recipient,
 email/SMS recipient, webhook, paging group or trigger action. Record the actual
 test time, result, behavior checked, model, known firmware/app version and useful
@@ -87,7 +87,7 @@ failure, non-200 status, an invalid or stale report timestamp, or
 `operational_ready: false`. A valid report with a warning still returns HTTP 200;
 HTTP 503 means the report itself could not be generated. Existing API request
 limits and `Retry-After` apply. A monitor on the PBX alone cannot detect the PBX's
-total outage. SLS does not configure the external monitor automatically.
+total outage. SLL does not configure the external monitor automatically.
 
 The packaged `bin/sls_mass_notify/sls_external_monitor.py` is a standalone Python 3
 client for that separate machine. It performs one verified HTTPS GET, follows no

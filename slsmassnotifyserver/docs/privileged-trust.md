@@ -6,11 +6,11 @@ signature. The working web tree and prior local signatures cannot enroll trust.
 
 ## Installer bootstrap for older releases
 
-The installer prepares approvals in a retained root-private workspace before changing runtime, trust pointers or maintenance. Missing stock inventories are derived from exact-version FreePBX packages authenticated by the bundled public key and pinned full fingerprint. Previous SLS files and overlays must match a publisher-verified release. Framework mapping, installer-only omissions, the supported menu insertion and spinner alias are explicit; unknown live differences produce a review report without enrolling trust. Existing independently reviewed inventories preserve local branding and security fixes.
+The installer prepares approvals in a retained root-private workspace before changing runtime, trust pointers or maintenance. Missing stock inventories are derived from exact-version FreePBX packages authenticated by the bundled public key and pinned full fingerprint. Previous SLL files and overlays must match a publisher-verified release. Framework mapping, installer-only omissions, the supported menu insertion and spinner alias are explicit; unknown live differences produce a review report without enrolling trust. Existing independently reviewed inventories preserve local branding and security fixes.
 
 Use `SLS_MASS_NOTIFY_INVENTORY_ONLY=1` for preparation without activation. Offline package paths and previous-release inputs are described in [Installation](../INSTALL.md#authenticated-installation-and-recovery). Reviewed overrides use `SLS_MASS_NOTIFY_DASHBOARD_INVENTORY` / `SLS_MASS_NOTIFY_FRAMEWORK_INVENTORY` plus each matching `_SHA256` variable. Store inventories beneath root-owned, non-writable parents and independently verify their provenance and contents. Never generate an approval merely by hashing the current web tree.
 
-Recovery captures the approved previous root runtime and canonical maintenance entries before mutation. Static restoration initially disables SLS root jobs. Only verified recovered module/Framework/Dashboard bytes and runtime permit reinstating the approved previous jobs. Failed postconditions retain recovery locations and leave maintenance disabled. Configuration and delivery history are not rewound.
+Recovery captures the approved previous root runtime and canonical maintenance entries before mutation. Static restoration initially disables SLL root jobs. Only verified recovered module/Framework/Dashboard bytes and runtime permit reinstating the approved previous jobs. Failed postconditions retain recovery locations and leave maintenance disabled. Configuration and delivery history are not rewound.
 
 ## Publisher generation
 
@@ -57,7 +57,7 @@ An inventory has this shape (hashes below are placeholders):
       "target": "admin/modules/framework/module.xml"
     },
     "amp_conf/htdocs/admin/views/menu_items.php": {
-      "sha256": "<exact approved menu including SLS insertion>",
+      "sha256": "<exact approved menu including SLL insertion>",
       "target": "admin/views/menu_items.php"
     }
   },
@@ -79,7 +79,7 @@ additions/removals in the module directory and exact bytes of all declared mappe
 files. It does not claim a complete inventory of all other FreePBX modules or
 undocumented extra files throughout the shared web root.
 
-For Dashboard, `uninstall.remove` may name only its two SLS widget files; no other
+For Dashboard, `uninstall.remove` may name only its two SLL widget files; no other
 file can be removed from signing coverage by uninstall mode. Framework's uninstall
 replacement may name only the exact menu file. This mode consumes previously
 approved expected hashes, not cleaned live bytes.
@@ -93,7 +93,7 @@ Store the reviewed inventory under root-protected parents, then import it:
 ```
 
 Each upstream upgrade and changed approved overlay requires a new reviewed
-inventory. The installer must use the widgets from its verified SLS generation,
+inventory. The installer must use the widgets from its verified SLL generation,
 not whatever widget files happen to be installed. Inventories and release trust
 are installation security state, not portable user configuration.
 
@@ -160,7 +160,7 @@ Behavioral fixtures cover the phase boundaries, activation failures, rollback,
 and complete uninstall. Every deployment and upstream module update still needs
 an approved baseline; test success does not approve an unknown host's files.
 Interrupted upgrade and full recovery qualification require a separate disposable
-PBX. A publisher check on SLS does not authorize executing mutable FreePBX modules
+PBX. A publisher check on SLL does not authorize executing mutable FreePBX modules
 as root. The current publisher verifier still has a single pinned key; overlapping
 publisher trust and emergency key rotation remain separate release-security work.
 
@@ -184,7 +184,7 @@ processes close the lifetime pipe so detached children cannot retain the guard.
 
 FreePBX 17's Dashboard discovers sections from its own `sections` directory and
 loads each matching class from that same directory. Its hook index does not
-provide an arbitrary module-local class path. SLS therefore retains its two
+provide an arbitrary module-local class path. SLL therefore retains its two
 independently approved Dashboard files. Removing them without changing the
 upstream loader would remove the dashboard announcement panel.
 

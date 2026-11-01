@@ -129,12 +129,12 @@ class CollaborationWebhooks(unittest.TestCase):
         self.assertEqual([r['status'] for r in results], ['accepted', 'accepted'])
         slack = self.calls[0][0][2]
         self.assertEqual(slack['blocks'][-1], {'type': 'context', 'elements': [{'type': 'mrkdwn',
-            'text': '<' + url.replace('&', '&amp;') + '|Open incident in SLS>', 'verbatim': True}]})
+            'text': '<' + url.replace('&', '&amp;') + '|Open incident in SLL>', 'verbatim': True}]})
         self.assertTrue(all(b['text']['type'] == 'plain_text' for b in slack['blocks'][:-1]))
         self.assertIn('<https://evil.invalid|here>', slack['blocks'][0]['text']['text'])
         self.assertIn(incident_id, slack['blocks'][0]['text']['text'])
         card = self.calls[1][0][2]['attachments'][0]['content']
-        self.assertEqual(card['actions'], [{'type': 'Action.OpenUrl', 'title': 'Open incident in SLS', 'url': url}])
+        self.assertEqual(card['actions'], [{'type': 'Action.OpenUrl', 'title': 'Open incident in SLL', 'url': url}])
         self.assertNotIn('Action.Submit', json.dumps(card))
         self.assertFalse(slack['unfurl_links'])
 

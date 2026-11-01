@@ -70,13 +70,33 @@ class Doctor(unittest.TestCase):
                         return
                     self.send_response(status)
                     if status==302:self.send_header('Location','https://provider.example.test/secret')
-                    self.end_headers();self.wfile.write(json.dumps(payload).encode())
+                    self.end_headers();self.wfile.write(payload if isinstance(payload,bytes) else json.dumps(payload).encode())
                 except OSError:pass
             def log_message(self,*args):pass
         server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
         return [('http','127.0.0.1',server.server_port,'pbx.example.test')]
+    def test_freepbx_http_200_loader_error_is_not_readiness(self):
+        body=b'#!/usr/bin/env php\nScript error: the <b>ionCube</b> Loader for PHP needs to be installed. private-error-marker'
+        value=DOCTOR.freepbx_gui_probe(self.php_server(body))
+        self.assertFalse(value['ok']);self.assertTrue(value['available'])
+        self.assertEqual(value['failure_code'],'freepbx_vendor_loader_unavailable')
+        self.assertNotIn('private-error-marker',json.dumps(value))
+    def test_freepbx_gui_probe_checks_body_bounds_status_and_keeps_redirects_local(self):
+        valid=b'<!doctype html><html><body><form id="loginform"></form></body></html>'
+        self.assertTrue(DOCTOR.freepbx_gui_probe(self.php_server(valid))['ok'])
+        for body,status in [(b'',200),(b'not an HTML page',200),(b'<html>error</html>',500),(valid+b'x'*1048576,200)]:
+            with self.subTest(status=status,bytes=len(body)):
+                self.assertFalse(DOCTOR.freepbx_gui_probe(self.php_server(body,status))['ok'])
+        for status in (302,401,403):
+            value=DOCTOR.freepbx_gui_probe(self.php_server(valid,status))
+            self.assertTrue(value['available']);self.assertTrue(value['access_limited']);self.assertFalse(value['authenticated'])
+        with patch.object(DOCTOR.http.client,'HTTPConnection',side_effect=AssertionError('External connection attempted')):
+            self.assertFalse(DOCTOR.freepbx_gui_probe([('http','192.0.2.1',80,'pbx.example.test')])['available'])
+    def test_freepbx_gui_probe_has_an_absolute_slow_header_deadline(self):
+        started=time.monotonic();value=DOCTOR.freepbx_gui_probe(self.php_server({},slow=True),.15)
+        self.assertFalse(value['ok']);self.assertLess(time.monotonic()-started,.6)
     def test_diagnostics_never_start_services_install_packages_or_load_php(self):
         commands=[]
         def command(args,timeout=5):
@@ -99,6 +119,30 @@ class Doctor(unittest.TestCase):
     def test_invalid_capacity_rejected_without_probes(self):
         result=subprocess.run(['python3','-I',str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_install_doctor.py'),'--desktop-limit','1001'],capture_output=True,text=True,timeout=5)
         self.assertEqual(result.returncode,2)
+    def test_resource_probe_uses_active_or_explicit_deployment_profile(self):
+        payload={'schema':1,'deployment_profile':'lite','requested_limit':25,
+                 'requested_phone_limit':25,'eligible_limit':25,'eligible_phone_limit':25,
+                 'requirements':{},'resource_checks':{}}
+        with patch.object(DOCTOR,'protected',return_value=True), \
+             patch.object(DOCTOR,'command',return_value=(0,json.dumps(payload))) as command:
+            result=DOCTOR.resource_probe(25,25,'lite')
+        self.assertTrue(result['ok']);self.assertEqual(result['allocation']['deployment_profile'],'lite')
+        self.assertEqual(command.call_args.args[0][-2:],['--profile','lite'])
+    def test_root_resource_probe_uses_the_pbx_account_for_storage_traversal(self):
+        payload={'schema':1,'deployment_profile':'lite','resource_checks':{}}
+        with patch.object(DOCTOR,'protected',return_value=True), \
+             patch.object(DOCTOR.os,'geteuid',return_value=0), \
+             patch.object(DOCTOR,'command',return_value=(0,json.dumps(payload))) as command:
+            self.assertTrue(DOCTOR.resource_probe(25,25,'lite')['ok'])
+        self.assertEqual(command.call_args.args[0][:6],
+                         ['/usr/sbin/runuser','-u','asterisk','--','/usr/bin/python3','-I'])
+    def test_unprivileged_resource_probe_keeps_its_existing_account(self):
+        payload={'schema':1,'deployment_profile':'lite','resource_checks':{}}
+        with patch.object(DOCTOR,'protected',return_value=True), \
+             patch.object(DOCTOR.os,'geteuid',return_value=1000), \
+             patch.object(DOCTOR,'command',return_value=(0,json.dumps(payload))) as command:
+            self.assertTrue(DOCTOR.resource_probe(25,25,'lite')['ok'])
+        self.assertEqual(command.call_args.args[0][:2],['/usr/bin/python3','-I'])
     def test_served_runtime_uses_local_wire_evidence_and_redacts_extra_fields(self):
         value=DOCTOR.served_php_probe(self.php_server(self.php_payload()))
         self.assertTrue(value['ok']);self.assertEqual(value['php_version'],'8.2.35');self.assertEqual(value['php_sapi'],'fpm-fcgi')
@@ -233,9 +277,22 @@ class Doctor(unittest.TestCase):
                 row=json.loads(path.read_text());row['stage']='must-not-appear';path.write_text(json.dumps(row))
                 self.assertTrue(DOCTOR.installation_state()['unsafe_evidence'])
     def test_vm_requires_explicit_disposable_opt_in_before_loading_any_image(self):
-        result=subprocess.run(['python3','-I',str(ROOT/'tools/qualify_installer_vm.py'),'--image','/nonexistent','--image-sha256','a'*64,'--bundle','/nonexistent','--baseline','fresh','--report','/nonexistent'],capture_output=True,text=True,timeout=5)
-        self.assertEqual(result.returncode,2)
-        self.assertIn('--allow-disposable-vm',result.stderr)
+        for baseline in ('fresh', '0.1.8-beta'):
+            with self.subTest(baseline=baseline):
+                result=subprocess.run(['python3','-I',str(ROOT/'tools/qualify_installer_vm.py'),'--image','/nonexistent','--image-sha256','a'*64,'--bundle','/nonexistent','--baseline',baseline,'--report','/nonexistent'],capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,2)
+                self.assertIn('Explicit --allow-disposable-vm is required',result.stderr)
+
+    def test_module_identity_rejects_multibyte_document_types(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'module.xml'
+            for encoding in ('utf-8', 'utf-16', 'utf-16-le', 'utf-16-be'):
+                xml_encoding={'utf-16-le':'UTF-16LE', 'utf-16-be':'UTF-16BE'}.get(encoding,encoding)
+                for declaration in ('', '<!DOCTYPE module [<!ENTITY version "0.1.8-beta">]>'):
+                    with self.subTest(encoding=encoding, declaration=bool(declaration)):
+                        version='&version;' if declaration else '0.1.8-beta'
+                        path.write_bytes(('<?xml version="1.0" encoding="'+xml_encoding+'"?>'+declaration+'<module><rawname>slsmassnotifyserver</rawname><version>'+version+'</version></module>').encode(encoding))
+                        self.assertEqual(DOCTOR.module_version(path,'slsmassnotifyserver'),None if declaration else '0.1.8-beta')
 
 
 class DisposableVmScenarios(unittest.TestCase):
@@ -250,7 +307,7 @@ class DisposableVmScenarios(unittest.TestCase):
                 return subprocess.CompletedProcess(command,0,stdout=output,stderr='')
         with tempfile.TemporaryDirectory() as temporary:
             bundle=Path(temporary)
-            (bundle/'slsmassnotifyserver-0.1.8-beta.tgz').touch()
+            (bundle/'slsmassnotifyserver-0.1.9-beta.tgz').touch()
             for name in ('uninstall','purge'):
                 with self.subTest(scenario=name):
                     guest=Guest()
@@ -260,6 +317,9 @@ class DisposableVmScenarios(unittest.TestCase):
                     expected='bash /usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh'
                     if name=='purge': expected='SLS_MASS_NOTIFY_PURGE_CONFIG=1 '+expected
                     self.assertEqual(commands,[expected])
+                    reloads = [row for row in guest.commands if 'fwconsole' in row]
+                    self.assertEqual(reloads, ['/usr/sbin/runuser -u asterisk -- /usr/sbin/fwconsole reload'] * 2,
+                        'Disposable qualification must run the same unprivileged native reload as the installer')
 
 
 class OfflineBundle(unittest.TestCase):

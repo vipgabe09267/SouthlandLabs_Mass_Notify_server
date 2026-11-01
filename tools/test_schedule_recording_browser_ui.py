@@ -21,6 +21,16 @@ if not driver or not browser or not Path(browser).is_file():
 sys.path.insert(0,driver)
 from playwright.sync_api import sync_playwright
 
+def unnamed_editable_controls(page):
+    return page.locator('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]),select,textarea').evaluate_all('''nodes=>nodes.filter(node=>{
+        if(!node.getClientRects().length||node.disabled||node.getAttribute('aria-hidden')==='true')return false;
+        if(node.closest('label'))return false;
+        if(node.id&&document.querySelector('label[for="'+CSS.escape(node.id)+'"]'))return false;
+        if((node.getAttribute('aria-label')||'').trim())return false;
+        const ids=(node.getAttribute('aria-labelledby')||'').trim().split(/\\s+/).filter(Boolean);
+        return !ids.some(id=>{const label=document.getElementById(id);return label&&(label.textContent||'').trim();});
+    }).map(node=>({tag:node.tagName.toLowerCase(),id:node.id,name:node.name,html:node.outerHTML.slice(0,240)}))''')
+
 class CalendarRecordingBrowser(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -58,7 +68,10 @@ function schedulingPage(){
  $settings=['announcement_webhooks'=>[]];$hero_image='';$csrf_token=str_repeat('b',64);$pbx_timezone='America/Chicago';
  $scheduled_announcements=[['id'=>'sched_fixture','name'=>'Browser-only fixture','enabled'=>true,
   'targets'=>['browser_recipient_ids'=>['sub_'.str_repeat('a',24)],'connector_ids'=>['conn_'.str_repeat('b',24)],'webhook_ids'=>['webhook_fixture']],
-  'occurrences'=>[['run_at_utc'=>'2099-06-03T09:00:00+00:00']],'delivery'=>['audio_mode'=>'none']]];
+  'occurrences'=>[['run_at_utc'=>'2099-06-03T09:00:00+00:00']],'delivery'=>['audio_mode'=>'none']],
+  ['id'=>'sched_disabled','name'=>'Disabled browser fixture','enabled'=>false,'max_lateness_minutes'=>7,
+  'targets'=>['browser_recipient_ids'=>['sub_'.str_repeat('a',24)]],
+  'occurrences'=>[['run_at_utc'=>'2099-06-04T09:00:00+00:00']],'delivery'=>['audio_mode'=>'none']]];
  ?><style>.modal{display:none}.modal[aria-hidden=false]{display:block}</style><script>
  window.jQuery=function(selector){return {modal:function(){document.querySelector(selector).setAttribute('aria-hidden','false');}};};
  </script><?php include MODULE.'/views/scheduling.php';
@@ -144,6 +157,16 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         self.assertEqual(values['nws_zones[0][site_id]'],'loc_'+'e'*24)
         self.assertEqual(values['nws_zones[0][voice_recipient_ids][]'],'voice_'+'c'*24)
         self.assertEqual(values['nws_zones[0][sms_recipient_ids][]'],'sms_'+'d'*24)
+        self.assertEqual(unnamed_editable_controls(self.page),[])
+        prompts=[]
+        self.page.once('dialog',lambda dialog:(prompts.append(dialog.message),dialog.dismiss()))
+        editor.locator('[data-zone-remove]').click()
+        self.assertEqual(editor.count(),1,'Cancelling Weather removal discarded the zone')
+        self.assertIn('Fixture zone',prompts[0])
+        self.page.once('dialog',lambda dialog:dialog.accept())
+        editor.locator('[data-zone-remove]').click()
+        self.assertEqual(editor.count(),0)
+        self.assertEqual(self.page.locator('#sls-weather-settings').get_attribute('data-save-state'),'unsaved')
         self.assertEqual(self.errors,[])
 
     def test_weather_imported_tones_remain_selected(self):
@@ -167,6 +190,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         period.select_option('10')
         self.page.locator('#sls-lightning-provider').select_option('xweather')
         self.assertEqual(period.input_value(),'4')
+        self.assertEqual(unnamed_editable_controls(self.page),[])
         self.assertEqual(self.errors,[])
 
     def test_setup_polling_choices_match_the_selected_provider(self):
@@ -184,7 +208,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         row=self.page.locator('[data-schedule-id="sched_fixture"]').filter(has=self.page.locator('td')).first
         self.assertIn('1 browser subscriber(s)',row.inner_text())
         self.assertIn('1 connector(s)',row.inner_text())
-        self.page.locator('.sls-schedule-edit').click()
+        self.page.locator('.sls-schedule-edit[data-schedule-id="sched_fixture"]').click()
         selector=self.page.locator('#sls-schedule-webhook-ids')
         self.assertEqual(selector.locator('input[type=checkbox]:checked').count(),1)
         self.assertEqual(selector.locator('[data-webhook-selected]').inner_text(),'1 selected')
@@ -194,6 +218,18 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         self.assertEqual(selector.locator('input[type=checkbox]:checked').count(),0)
         self.assertEqual(selector.locator('[data-webhook-selected]').inner_text(),'0 selected')
         self.assertEqual(self.errors,[])
+    def test_schedule_activation_requires_contextual_confirmation(self):
+        self.page.goto(self.url+'/?scheduling=1')
+        enable=self.page.get_by_role('button',name='Enable schedule: Disabled browser fixture',exact=True)
+        prompts=[]
+        self.page.once('dialog',lambda dialog:(prompts.append(dialog.message),dialog.dismiss()))
+        enable.click()
+        self.assertEqual(len(prompts),1)
+        self.assertIn('Disabled browser fixture',prompts[0])
+        self.assertIn('1 browser subscriber(s)',prompts[0])
+        self.assertIn('7 minutes',prompts[0])
+        self.assertTrue(enable.is_enabled())
+        self.assertFalse((self.root/'action.json').exists(),'Cancelled schedule activation reached the server')
     def tearDown(self):self.context.close()
     def bounds(self):
         self.assertLessEqual(self.page.evaluate('document.documentElement.scrollWidth'),self.page.viewport_size['width'])
@@ -249,10 +285,11 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
     def test_save_state_cancel_preserves_earlier_unsaved_changes_and_contrast(self):
         page=self.page
         source=(ROOT/'slsmassnotifyserver/views/save_state.js').read_text()
-        page.evaluate('()=>{const n=document.createElement("section");n.id="save-state-fixture";n.innerHTML="<h2>Save state</h2><form><label>Field<input></label></form>";document.body.append(n);}')
+        page.evaluate('()=>{const n=document.createElement("section");n.id="save-state-fixture";n.innerHTML="<h2>Save state</h2><form id=save-state-main><div class=form-group><label>Field</label><input></div></form><form id=save-state-action><button>Action</button></form>";document.body.append(n);}')
         page.add_script_tag(content=source)
-        page.evaluate('()=>window.SlsSaveState.attach(document.getElementById("save-state-fixture"),{mode:"immediate"})')
+        page.evaluate('()=>window.SlsSaveState.attach(document.getElementById("save-state-fixture"),{mode:"immediate",submit:"#save-state-main"})')
         root=page.locator('#save-state-fixture')
+        self.assertEqual(root.get_by_label('Field',exact=True).count(),1)
         root.dispatch_event('sls:editor-opened')
         root.locator('input').fill('temporary')
         self.assertEqual(root.get_attribute('data-save-state'),'unsaved')
@@ -264,6 +301,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         root.dispatch_event('sls:editor-closed')
         self.assertEqual(root.get_attribute('data-save-state'),'unsaved')
         root.evaluate('(n)=>n.dispatchEvent(new CustomEvent("sls:save-state",{detail:"active"}))')
+        root.locator('input').fill('navigation guard')
+        unrelated_guard=page.evaluate('''async()=>{document.querySelector('#save-state-action').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));await new Promise(resolve=>queueMicrotask(resolve));const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;}''')
+        self.assertTrue(unrelated_guard,'An unrelated action form suppressed the unsaved-change warning')
         colors=root.locator('.label').evaluate('(n)=>({fg:getComputedStyle(n).color,bg:getComputedStyle(n).backgroundColor})')
         def luminance(rgb):
             values=[int(v)/255 for v in re.findall(r"[0-9]+",rgb)[:3]]

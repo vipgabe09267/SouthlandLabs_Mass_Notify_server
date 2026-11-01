@@ -74,6 +74,14 @@ class Lifecycle(unittest.TestCase):
         status['nws_groups'] = {'county': {'last_poll_status': 'ok', 'last_poll_ok_at': stamp(NOW)}}
         self.assertEqual(self.project(status)['last_fault_at'], '')
 
+    def test_only_newer_successful_dependency_check_resolves_dependency_fault(self):
+        status = {'last_fault_at': stamp(NOW-60), 'last_fault_stage': 'dependencies',
+                  'last_fault_source': 'module', 'last_dependency_check_status': 'ok',
+                  'last_dependency_check_at': stamp(NOW-61)}
+        self.assertTrue(self.project(status)['last_fault_at'])
+        status['last_dependency_check_at'] = stamp(NOW)
+        self.assertEqual(self.project(status)['last_fault_at'], '')
+
     def test_external_uncertainty_is_not_resolved_by_local_success_or_age(self):
         status = {'last_fault_at': stamp(NOW-3600), 'last_fault_source': 'nws', 'last_fault_stage': 'external',
                   'last_delivery_at': stamp(NOW), 'last_delivery_status': 'queued'}

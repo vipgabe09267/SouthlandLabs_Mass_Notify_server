@@ -7,7 +7,7 @@ require_once __DIR__.'/OperatorLoginRate.php';
 if (!class_exists('SlsAtomicJson', false)) { require_once __DIR__.'/bin/sls_mass_notify/sls_atomic_json.php'; }
 require_once __DIR__.'/bin/sls_mass_notify/sls_live_paging.php';
 
-/** Separate web sessions, operator passwords, TOTP, and current SLS permissions. */
+/** Separate web sessions, operator passwords, TOTP, and current SLL permissions. */
 final class OperatorPortal
 {
     public const COOKIE = 'SLSOPS';
@@ -179,7 +179,7 @@ final class OperatorPortal
                 if (is_string($logo) && preg_match('#^/(?!/)(?!.*\.\.)[A-Za-z0-9_./-]+\.(?:png|svg|jpe?g)$#Di',$logo)) { $mark='<img class="portal-logo" src="'.$e($logo).'" alt="">'; }
             }
         } catch (\Throwable $ignored) { }
-        $body='<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>SLS Mass Notify · '.($authenticated?'Operations':'Sign in').'</title><link rel="stylesheet" href="/admin/assets/css/font-awesome.min-4.7.0.css"><style>'.$css.'</style>'.$branding.'</head><body><header class="portal-header"><a class="portal-brand" href="'.self::BASE.'">'.$mark.'<span>SLS Mass Notify<small>Operator portal</small></span></a>'.$navigation.'</header><main class="portal-main">'.$content.'</main><footer class="portal-footer">Southland Servers · Mass Notifications</footer></body></html>';
+        $body='<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>SLL Mass Notify Server · '.($authenticated?'Operations':'Sign in').'</title><link rel="stylesheet" href="/admin/assets/css/font-awesome.min-4.7.0.css"><style>'.$css.'</style>'.$branding.'</head><body><header class="portal-header"><a class="portal-brand" href="'.self::BASE.'">'.$mark.'<span>SLL Mass Notify Server<small>Operator portal</small></span></a>'.$navigation.'</header><main class="portal-main">'.$content.'</main><footer class="portal-footer">Southland Labs · Mass Notifications</footer></body></html>';
         $document=preg_replace_callback('/<(script|style)(?=[\s>])([^>]*)>/i', static function (array $tag) use ($e,$nonce): string {
             $attributes=preg_replace('/\s+nonce(?=\s|=|$)(?:\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s]+))?/i','',$tag[2]);
             return '<'.$tag[1].' nonce="'.$e($nonce).'"'.$attributes.'>';

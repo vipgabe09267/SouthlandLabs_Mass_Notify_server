@@ -108,6 +108,8 @@ discord_payload = destinations.build_discord_payload(
     timestamp="2026-08-15T12:00:00Z",
 )
 discord_embed = discord_payload["embeds"][0]
+assert discord_payload['username'] == 'SLL Mass Notify Server'
+assert discord_embed['author']['name'] == 'Southland Labs • SLL Mass Notify Server'
 assert discord_payload["avatar_url"] == "https://private-pbx.invalid" + destinations.DISCORD_EMBED_IMAGE_PATH
 assert "icon_url" not in discord_embed["author"]
 assert discord_embed["footer"]["icon_url"] == discord_payload["avatar_url"]
@@ -121,7 +123,7 @@ assert destinations.public_logo_url({}) == ""
 for invalid in ('http://pbx.example.org/api/sls-mass-notify', 'https://other.example.org/api/sls-mass-notify',
                 'https://pbx.example.org:0/api/sls-mass-notify', 'https://pbx.example.org:65536/api/sls-mass-notify'):
     assert destinations.public_logo_url({'public_pbx_host':'pbx.example.org','control_api':{'base_url':invalid}}) == ''
-assert hashlib.sha256((Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/assets/webhook-builder.png').read_bytes()).hexdigest() == 'b9e17309980e87e8fc10330d40af07f7bcc6a947508fb306ccb192ac99e4dd07'
+assert hashlib.sha256((Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/assets/webhook-builder.png').read_bytes()).hexdigest() == '983d96d18168cbd44bc2d7b2db2ff2a6809a00605728d0d8259ff912be273a14'
 
 
 announcement_payload = destinations.build_announcement_discord_payload(
@@ -134,7 +136,7 @@ announcement_payload = destinations.build_announcement_discord_payload(
 )
 announcement_embed = announcement_payload["embeds"][0]
 assert announcement_embed["color"] == 0x123456
-assert announcement_embed["footer"]["text"] == "DASHBOARD ANNOUNCEMENT • SLS Mass Notification System"
+assert announcement_embed["footer"]["text"] == "DASHBOARD ANNOUNCEMENT • SLL Mass Notify Server"
 assert announcement_payload["avatar_url"] == "https://pbx.example.org:8443" + destinations.DISCORD_EMBED_IMAGE_PATH
 assert "icon_url" not in announcement_embed["author"]
 assert announcement_embed["footer"]["icon_url"] == announcement_payload["avatar_url"]

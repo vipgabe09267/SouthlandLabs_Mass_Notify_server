@@ -201,7 +201,7 @@ def parse_manifest(body: bytes) -> dict:
                 or not isinstance(uninstall['remove'], list) or not isinstance(uninstall['replace'], dict)
                 or any(not isinstance(name, str) or name not in allowed_remove or name not in data['files'] for name in uninstall['remove'])
                 or any(name not in allowed_replace or name not in data['files'] or not isinstance(value, str) or not DIGEST.fullmatch(value) for name, value in uninstall['replace'].items())):
-            raise TrustError('uninstall inventory may change only the exact approved SLS integration files')
+            raise TrustError('uninstall inventory may change only the exact approved SLL integration files')
     return data
 
 
@@ -607,5 +607,5 @@ if __name__ == '__main__':
     try:
         raise SystemExit(main())
     except (TrustError, OSError, ValueError, KeyError, RecursionError, ET.ParseError, subprocess.SubprocessError, tarfile.TarError) as error:
-        print('SLS module trust: ' + str(error), file=sys.stderr)
+        print('SLL module trust: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

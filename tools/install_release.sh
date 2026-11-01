@@ -1,5 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# Read-only bootstrap recovery may use only these independently pinned bytes.
+CONFIG_CRYPTO_BOOTSTRAP_SHA256="e944ceec47e3db62ae2071aac6d4368f40447764976d554ba4662c620b46a215"
 
 umask 027
 
@@ -9,10 +15,21 @@ if ! command -v readlink >/dev/null 2>&1; then
 fi
 INSTALLER_SOURCE_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
 REQUESTED_RECOVERY=""
+REQUESTED_HISTORY_EVIDENCE=""
+REQUESTED_DEPLOYMENT_PROFILE=""
+case "${1:-}" in
+  --lite) REQUESTED_DEPLOYMENT_PROFILE=lite; shift ;;
+  --standard) REQUESTED_DEPLOYMENT_PROFILE=standard; shift ;;
+esac
 if [ "${1:-}" = '--recover' ]; then
   REQUESTED_RECOVERY="${2:-}"
   [ -n "$REQUESTED_RECOVERY" ] || { printf 'Usage: %s --recover /var/lib/sls-mass-notify-installer/transaction-ID\n' "$0" >&2; exit 2; }
   shift 2
+  if [ "${1:-}" = '--history-evidence' ]; then
+    REQUESTED_HISTORY_EVIDENCE="${2:-}"
+    [ -n "$REQUESTED_HISTORY_EVIDENCE" ] || { printf 'Recovery --history-evidence requires a root-private pre-upgrade phone ledger path.\n' >&2; exit 2; }
+    shift 2
+  fi
 fi
 if [ "${1:-}" = '--inspect' ]; then
   SLS_MASS_NOTIFY_INVENTORY_ONLY=1
@@ -28,14 +45,18 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     printf 'Use either --recover TRANSACTION or --inspect [TGZ_URL], not both.\n' >&2
     exit 2
   fi
+  if [ -n "$REQUESTED_RECOVERY" ] && [ -n "$REQUESTED_DEPLOYMENT_PROFILE" ]; then
+    printf 'Recovery restores the original profile. Run --lite or --standard only after recovery completes.\n' >&2
+    exit 2
+  fi
   if [ -n "$REQUESTED_RECOVERY" ]; then
     [ "$#" -eq 0 ] || {
-      printf 'Usage: %s --recover /var/lib/sls-mass-notify-installer/transaction-ID\n' "$0" >&2
+      printf 'Usage: %s --recover /var/lib/sls-mass-notify-installer/transaction-ID [--history-evidence /root/pre-upgrade-phone-admission.json]\n' "$0" >&2
       exit 2
     }
   else
     [ "$#" -le 1 ] || {
-      printf 'Usage: %s [--inspect] [SIGNED_GITHUB_TGZ_URL]\n' "$0" >&2
+      printf 'Usage: %s [--lite|--standard] [--inspect] [SIGNED_GITHUB_TGZ_URL]\n' "$0" >&2
       exit 2
     }
     case "${1:-}" in
@@ -55,18 +76,21 @@ if [ -n "${SLS_MASS_NOTIFY_MODULE:-}" ] \
     "SLS_MASS_NOTIFY_MODULE is fixed to the FreePBX raw module name '$MODULE'; refusing an alternate value." >&2
   exit 2
 fi
-TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.8-beta.tgz}"
+TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.9-beta.tgz}"
 URL="${SLS_MASS_NOTIFY_TGZ_URL:-${1:-}}"
 SHA256="${SLS_MASS_NOTIFY_SHA256:-}"
 TOKEN="${SLS_MASS_NOTIFY_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 LOG_FILE="${SLS_MASS_NOTIFY_INSTALL_LOG:-/tmp/slsmassnotifyserver-install.log}"
-EXPECTED_TGZ_SHA256="8d12bc26168a5a7e51ac1366ff6bbfba7afcfebdb9e2cb8a5ebf3e70b0fdecf6"
+EXPECTED_TGZ_SHA256="dd28f6455e713dfa228ab1e107401404be4f2032995d289ab31a2fcd686738b6"
 DATA_DIR="/var/lib/asterisk/SLS_Mass_Notifications_Plugin"
 CONFIG_FILE="$DATA_DIR/mass-notifications.config"
 CONFIG_SNAPSHOT=""
 CONFIG_HASH_BEFORE=""
+CONFIG_HASH_EXPECTED=""
+CONFIG_EXPECTED_SNAPSHOT=""
 FRESH_CONFIG_INITIALIZED=0
 FRESH_PHONE_CAPACITY=25
+FRESH_DEPLOYMENT_PROFILE="${REQUESTED_DEPLOYMENT_PROFILE:-standard}"
 PENDING_CONFIG_STATE=""
 PENDING_CONFIG_PATH=""
 PENDING_CONFIG_SNAPSHOT=""
@@ -120,6 +144,8 @@ INSTALL_TRANSACTION_ROOT="/var/lib/sls-mass-notify-installer"
 INSTALL_TRANSACTION_DIR=""
 TRANSACTION_TOOL=""
 RECOVERY_REQUEST_MODE=0
+RECOVERY_PROGRAM_DIR=""
+RECOVERY_HISTORY_EVIDENCE=""
 SERVED_PHP_PROFILES=""
 
 # A successful child exit does not turn an interrupted shell into a successful
@@ -194,6 +220,25 @@ def finite_float(text):
     return value
 def invalid_constant(text):
     raise RuntimeError('Nonfinite transaction metadata number')
+def legacy_sequence(parent):
+    item = os.open('transaction-sequence', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        before = os.fstat(item)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) not in (0o600, 0o640, 0o644) or not 1 <= before.st_size <= 20):
+            raise RuntimeError('Unsafe legacy installer sequence metadata; preserve it for review')
+        raw = os.read(item, 21)
+        after = os.fstat(item)
+        named = os.stat('transaction-sequence', dir_fd=parent, follow_symlinks=False)
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                    value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if (identity(before) != identity(after) or identity(after) != identity(named)
+                or len(raw) != before.st_size or not re.fullmatch(rb'(?:0|[1-9][0-9]{0,18})\n?', raw)
+                or int(raw) > 2 ** 63 - 1):
+            raise RuntimeError('Invalid legacy installer sequence metadata; preserve it for review')
+    finally:
+        os.close(item)
 if not root.exists() and not root.is_symlink(): raise SystemExit(0)
 fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
 try:
@@ -206,6 +251,9 @@ try:
     names = os.listdir(fd)
     if len(names) > 100: raise RuntimeError('Installer evidence needs administrator archival')
     for name in names:
+        if name == 'transaction-sequence':
+            legacy_sequence(fd)
+            continue
         if not re.fullmatch(r'transaction-[a-f0-9]{24}', name): raise RuntimeError('Unknown installer evidence directory')
         child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
         try:
@@ -257,9 +305,9 @@ try:
                 finally:
                     try:os.unlink(temporary,dir_fd=child)
                     except FileNotFoundError:pass
-                print('Archived incomplete preparation; no SLS mutation had started. Evidence: '+str(root/name))
+                print('Archived incomplete preparation; no SLL mutation had started. Evidence: '+str(root/name))
             if value.get('phase') not in ('committed', 'rolled_back', 'abandoned'):
-                print('An interrupted SLS installation requires recovery before retrying. Evidence: ' + str(root / name), file=sys.stderr)
+                print('An interrupted SLL installation requires recovery before retrying. Evidence: ' + str(root / name), file=sys.stderr)
                 print('Run the publisher-authenticated installer with --recover ' + str(root / name) + '; preserve this directory.', file=sys.stderr)
                 raise SystemExit(3)
         finally: os.close(child)
@@ -322,8 +370,61 @@ begin_install_transaction() {
 }
 
 retain_configuration_snapshots() {
-  if [ -n "$CONFIG_SNAPSHOT" ]; then mv -- "$CONFIG_SNAPSHOT" "$INSTALL_TRANSACTION_DIR/config.snapshot" || return 1; CONFIG_SNAPSHOT="$INSTALL_TRANSACTION_DIR/config.snapshot"; fi
-  if [ -n "$PENDING_CONFIG_SNAPSHOT" ]; then mv -- "$PENDING_CONFIG_SNAPSHOT" "$INSTALL_TRANSACTION_DIR/pending.snapshot" || return 1; PENDING_CONFIG_SNAPSHOT="$INSTALL_TRANSACTION_DIR/pending.snapshot"; fi
+  local original_config="$CONFIG_SNAPSHOT" original_pending="$PENDING_CONFIG_SNAPSHOT"
+  if [ -n "$CONFIG_SNAPSHOT" ] && [ "$CONFIG_SNAPSHOT" != "$INSTALL_TRANSACTION_DIR/config.snapshot" ]; then
+    copy_private_release_asset "$CONFIG_SNAPSHOT" "$INSTALL_TRANSACTION_DIR/config.snapshot" 16777216 || return 1
+    CONFIG_SNAPSHOT="$INSTALL_TRANSACTION_DIR/config.snapshot"
+  fi
+  if [ -n "$PENDING_CONFIG_SNAPSHOT" ] && [ "$PENDING_CONFIG_SNAPSHOT" != "$INSTALL_TRANSACTION_DIR/pending.snapshot" ]; then
+    copy_private_release_asset "$PENDING_CONFIG_SNAPSHOT" "$INSTALL_TRANSACTION_DIR/pending.snapshot" 16777216 || return 1
+    PENDING_CONFIG_SNAPSHOT="$INSTALL_TRANSACTION_DIR/pending.snapshot"
+  fi
+  seal_install_recovery_inputs || return 1
+  # Keep the original, already-flushed temporary until both retained contents
+  # and their directory entries have reached durable storage.
+  if [ -n "$original_config" ] && [ "$original_config" != "$CONFIG_SNAPSHOT" ]; then rm -- "$original_config" || return 1; fi
+  if [ -n "$original_pending" ] && [ "$original_pending" != "$PENDING_CONFIG_SNAPSHOT" ]; then rm -- "$original_pending" || return 1; fi
+}
+
+seal_install_recovery_inputs() {
+  /usr/bin/python3 -I - "$TRANSACTION_TOOL" "$INSTALL_TRANSACTION_DIR" "$RECOVERY_DIR" \
+      "$CONFIG_SNAPSHOT" "$PENDING_CONFIG_SNAPSHOT" <<'PYSYNCRECOVERY'
+import pathlib, sys, types
+path = pathlib.Path(sys.argv[1]); journal = types.ModuleType('durable_recovery_inputs'); journal.__file__ = str(path)
+exec(compile(path.read_bytes(), str(path), 'exec'), journal.__dict__)
+journal.sync_recovery_inputs(*sys.argv[2:])
+PYSYNCRECOVERY
+}
+
+prepare_recovery_carrier() {
+  local requested="$1" carrier
+  local DOWNLOAD_DIR="" STAGING_DIR="" INSTALL_BOOTSTRAP_DIR="" TGZ="$TGZ"
+  # A corrected signed installer may repair earlier recovery logic. Authenticate its
+  # own package and installer before loading helpers; retain both generations
+  # separately so the original approval evidence never changes authority.
+  download_tgz || return 1
+  verify_tgz || return 1
+  STAGING_DIR="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-recovery-stage.XXXXXX")" || return 1
+  chmod 0700 "$STAGING_DIR" || return 1
+  tar -xzf "$TGZ" -C "$STAGING_DIR" || return 1
+  prepare_installer_bootstrap || return 1
+  carrier="$(mktemp -d "$requested/recovery-carrier.XXXXXX")" || return 1
+  chmod 0700 "$carrier" || return 1
+  copy_private_release_asset "$INSTALLER_SOURCE_PATH" "$carrier/installer.sh" 2097152 || return 1
+  copy_private_release_asset "$TGZ" "$carrier/package.tgz" 54525952 || return 1
+  copy_private_release_asset "$DOWNLOAD_DIR/release-manifest.json" "$carrier/release-manifest.json" 16384 || return 1
+  copy_private_release_asset "$DOWNLOAD_DIR/release-manifest.sig" "$carrier/release-manifest.sig" 64 || return 1
+  mv -- "$INSTALL_BOOTSTRAP_DIR" "$carrier/bootstrap" || return 1
+  /usr/bin/python3 -I - "$carrier" <<'PYCARRIER' || return 1
+import os, sys
+for path in (sys.argv[1] + '/bootstrap', sys.argv[1]):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+PYCARRIER
+  RECOVERY_PROGRAM_DIR="$carrier/bootstrap"
+  rm -rf -- "$STAGING_DIR" "$DOWNLOAD_DIR" || return 1
+  log "Authenticated recovery carrier retained: $carrier"
 }
 
 recover_interrupted_installation() {
@@ -378,12 +479,14 @@ if (not isinstance(transaction, dict) or transaction.get('schema') != 1
     raise RuntimeError('Only an unfinished installation can supply operational recovery settings; completed evidence cannot be recovered again')
 print('Recovery programs authenticated. No live hashes were approved.')
 PYRECOVERYAUTH
-  if [ "$INSTALLER_SOURCE_PATH" != "$requested/installer.sh" ]; then
-    exec /usr/bin/bash "$requested/installer.sh" --recover "$requested"
+  if ! cmp -s -- "$INSTALLER_SOURCE_PATH" "$requested/installer.sh"; then
+    prepare_recovery_carrier "$requested" || return 1
+  else
+    RECOVERY_PROGRAM_DIR="$requested/bootstrap"
   fi
   INSTALL_TRANSACTION_DIR="$requested"
   RECOVERY_REQUEST_MODE=1
-  TRANSACTION_TOOL="$requested/bootstrap/sls_install_transaction.py"
+  TRANSACTION_TOOL="$RECOVERY_PROGRAM_DIR/sls_install_transaction.py"
   local -a fields=(RECOVERY_DIR INSTALL_BOOTSTRAP_DIR UPGRADE_TRUST_DIR CONFIG_SNAPSHOT CONFIG_HASH_BEFORE PENDING_CONFIG_STATE PENDING_CONFIG_PATH PENDING_CONFIG_SNAPSHOT PENDING_CONFIG_HASH MODULE_BACKUP_DIR STAGING_DIR HAD_EXISTING_MODULE MODULE_WAS_ENABLED MODULE_ACTIVATED STATIC_MUTATION_STARTED ORIGINAL_SYSTEM_TIMEZONE SYSTEM_TIMEZONE_CHANGED)
   local -a values=()
   local recovered_values
@@ -391,9 +494,11 @@ PYRECOVERYAUTH
   mapfile -t values <<<"$recovered_values"
   [ "${#values[@]}" -eq "${#fields[@]}" ] || { log 'The recovery settings are incomplete; evidence remains protected.'; return 1; }
   for i in "${!fields[@]}"; do printf -v "${fields[$i]}" '%s' "${values[$i]}"; done
-  RECOVERY_TOOL="$INSTALL_BOOTSTRAP_DIR/sls_installer_recovery.py"; IDLE_TOOL="$INSTALL_BOOTSTRAP_DIR/sls_install_idle.py"
-  WORKER_GUARD_TOOL="$INSTALL_BOOTSTRAP_DIR/sls_install_guard.py"
-  LEGACY_PERMISSION_TOOL="$INSTALL_BOOTSTRAP_DIR/sls_legacy_permissions.py"
+  RECOVERY_TOOL="$RECOVERY_PROGRAM_DIR/sls_installer_recovery.py"; IDLE_TOOL="$RECOVERY_PROGRAM_DIR/sls_install_idle.py"
+  WORKER_GUARD_TOOL="$RECOVERY_PROGRAM_DIR/sls_install_guard.py"
+  LEGACY_PERMISSION_TOOL="$RECOVERY_PROGRAM_DIR/sls_legacy_permissions.py"
+  PRIVILEGED_INSTALL_BOOTSTRAP="$RECOVERY_PROGRAM_DIR/sls_privileged_install.py"
+  TRUST_TOOL="$RECOVERY_PROGRAM_DIR/sls_module_trust.py"
   INSTALL_LOG_FD=""; open_root_owned_file INSTALL_LOG_FD "$LOG_FILE" log || return 1
   INSTALL_LOG_OUTPUT="/proc/${BASHPID}/fd/$INSTALL_LOG_FD"
   # Signed recovery programs and their retained approvals were authenticated
@@ -403,6 +508,14 @@ PYRECOVERYAUTH
     --approval "$UPGRADE_TRUST_DIR/previous-root-approval.json" repair || return 1
   acquire_worker_coordination || return 1
   acquire_settings_coordination || { release_worker_coordination; return 1; }
+  if [ -n "$REQUESTED_HISTORY_EVIDENCE" ]; then
+    /usr/bin/python3 -I "$IDLE_TOOL" retain-history-evidence \
+      --baseline "$RECOVERY_DIR/idle-before.json" --history-evidence "$REQUESTED_HISTORY_EVIDENCE" \
+      --retained-history-evidence "$RECOVERY_DIR/history-evidence.json" || { release_worker_coordination; return 1; }
+  fi
+  if [ -e "$RECOVERY_DIR/history-evidence.json" ] || [ -L "$RECOVERY_DIR/history-evidence.json" ]; then
+    RECOVERY_HISTORY_EVIDENCE="$RECOVERY_DIR/history-evidence.json"
+  fi
   set_install_stage 'interrupted installation recovery' 'Preserve persistent transaction evidence and correct the specific failed restoration check before retrying recovery.'
   trap guard_config_on_exit EXIT
   trap 'handle_install_signal TERM 143' TERM
@@ -521,7 +634,7 @@ for module in ('dashboard', 'framework'):
             observed = trust.digest(trust.read(web / entry['target'], trust.MAX_ARCHIVE))
             previous = prior.get(module, {}).get('files', {}).get(name, {}).get('sha256')
             if observed not in {entry['sha256'], previous}:
-                raise SystemExit('Existing SLS Dashboard overlay lacks prior approval: ' + name)
+                raise SystemExit('Existing SLL Dashboard overlay lacks prior approval: ' + name)
             continue
         if 'link_target' in entry:
             path = web / entry['target']
@@ -579,6 +692,12 @@ repair_authenticated_legacy_permissions() {
 
 protect_freepbx_chown_permissions() {
   [ "$AUTHENTICATED_INSTALLER_APPROVED" -eq 1 ] && [ "${SLS_MASS_NOTIFY_INVENTORY_ONLY:-0}" != 1 ] || return 1
+  # This fixed installer-private area remains protected across reboot and
+  # runtime rollback. Snapshot the runtime exclusion only after that permanent
+  # infrastructure protection exists, so restoring it cannot expose backups.
+  run_logged /usr/bin/python3 -I "$LEGACY_PERMISSION_TOOL" --data "$DATA_DIR" \
+    --approval "$UPGRADE_TRUST_DIR/previous-root-approval.json" \
+    --chown-config "$FREEPBX_CHOWN_CONFIG" --snapshot "$UPGRADE_TRUST_DIR/freepbx-module-recovery-chown.snapshot" protect-recovery-chown || return 1
   run_logged /usr/bin/python3 -I "$LEGACY_PERMISSION_TOOL" --data "$DATA_DIR" \
     --approval "$UPGRADE_TRUST_DIR/previous-root-approval.json" \
     --chown-config "$FREEPBX_CHOWN_CONFIG" --snapshot "$UPGRADE_TRUST_DIR/freepbx-chown.snapshot" protect-chown
@@ -866,7 +985,7 @@ try:
         metadata = os.fstat(parent_fd)
         sticky_root = metadata.st_uid == 0 and bool(metadata.st_mode & stat.S_ISVTX)
         if metadata.st_uid not in owners or metadata.st_gid not in groups or (metadata.st_mode & 0o022 and not sticky_root):
-            raise RuntimeError('The SLS data directory has an unreviewed parent; no ownership was changed')
+            raise RuntimeError('The SLL data directory has an unreviewed parent; no ownership was changed')
     try:
         directory_fd = os.open(parts[-1], flags, dir_fd=parent_fd)
     except FileNotFoundError:
@@ -878,7 +997,7 @@ try:
         if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in owners
                 or metadata.st_gid not in groups or stat.S_IMODE(metadata.st_mode) not in (0o700, 0o750, 0o755)
                 or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)):
-            raise RuntimeError('The existing SLS data directory has unreviewed ownership or permissions; preserve it for review')
+            raise RuntimeError('The existing SLL data directory has unreviewed ownership or permissions; preserve it for review')
         os.fchmod(directory_fd, 0o750)
         os.fchown(directory_fd, account.pw_uid, account.pw_gid)
     finally:
@@ -899,7 +1018,7 @@ $payload = [
     "version" => 1,
     "failed_at" => gmdate("c"),
     "stage" => substr(preg_replace("/[^A-Za-z0-9 ._\/-]/", "", (string)$argv[1]), 0, 80),
-    "message" => "SLS Mass Notify installation did not complete.",
+    "message" => "SLL Mass Notify Server installation did not complete.",
     "solution" => substr(preg_replace("/[[:cntrl:]]/", " ", (string)$argv[2]), 0, 400),
     "log" => substr(preg_replace("/[[:cntrl:]]/", "", (string)$argv[6]), 0, 500),
     "error_category" => preg_match("/^[a-z][a-z0-9_]{0,63}$/", $argv[4]) ? $argv[4] : "install_command_failed",
@@ -925,7 +1044,7 @@ $detail = "Stage: " . $argv[1] . ". " . $argv[2] . " Installer log: " . htmlspec
 \FreePBX::Notifications()->add_error(
     "slsmassnotifyserver",
     "INSTALLFAILED",
-    "SLS Mass Notify installation failed",
+    "SLL Mass Notify Server installation failed",
     $detail,
     "",
     true,
@@ -1135,18 +1254,54 @@ prepare_install_recovery() {
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" preflight-services || return 1
   /usr/bin/python3 -I "$IDLE_TOOL" --data "$DATA_DIR" inspect --repair-collector >"$RECOVERY_DIR/idle-before.json" || return 1
   chmod 0600 "$RECOVERY_DIR/idle-before.json" || return 1
-  # Preserve only the module row, eight managed recording identities and
-  # this module enrollment in existing backup jobs. Operational state remains live.
-  php -r '
+  # Preserve only module-owned registration, the configured/legacy AMI names,
+  # eight recording identities and enrollment in existing backup jobs.
+  # Operational ledgers remain live and are never part of this restoration.
+  local ami_names
+  ami_names="$(/usr/bin/python3 -I - "$INSTALL_BOOTSTRAP_DIR/sls_config_crypto.py" "$CONFIG_FILE" <<'PYAMINAMES'
+import json, pathlib, re, sys, types
+path = pathlib.Path(sys.argv[1]); crypto = types.ModuleType('snapshot_config_crypto'); crypto.__file__ = str(path)
+exec(compile(path.read_bytes(), str(path), 'exec'), crypto.__dict__)
+config = pathlib.Path(sys.argv[2])
+name = crypto.read_config(config).get('ami', {}).get('username') if config.exists() else 'slsmassnotify'
+if isinstance(name, str): name = name.strip(" \t\r\n\x00\x0b")
+if not isinstance(name, str) or not re.fullmatch(r'[a-z0-9_.-]{1,64}', name):
+    raise SystemExit('The configured AMI identity cannot be snapshotted safely')
+print(json.dumps(list(dict.fromkeys((name, 'sls_mass_notify')))))
+PYAMINAMES
+)" || return 1
+  SLS_RECOVERY_AMI_NAMES="$ami_names" php -r '
 require "/etc/freepbx.conf";
 $stmt = \FreePBX::Database()->prepare("SELECT * FROM modules WHERE modulename = ?");
 $stmt->execute(["slsmassnotifyserver"]);
 $row = $stmt->fetch(\PDO::FETCH_ASSOC);
+$amiNames = json_decode((string)getenv("SLS_RECOVERY_AMI_NAMES"), true, 8, JSON_THROW_ON_ERROR);
+if (!is_array($amiNames) || !array_is_list($amiNames) || count($amiNames) < 1 || count($amiNames) > 2
+    || count(array_unique($amiNames)) !== count($amiNames) || !in_array("sls_mass_notify", $amiNames, true)) {
+    throw new \RuntimeException("Invalid scoped AMI snapshot identities");
+}
+foreach ($amiNames as $name) { if (!is_string($name) || !preg_match("/^[a-z0-9_.-]{1,64}$/D", $name)) { throw new \RuntimeException("Invalid AMI snapshot identity"); } }
+$amiTable = \FreePBX::Database()->prepare("SHOW TABLES LIKE ?"); $amiTable->execute(["manager"]);
+$amiTablePresent = $amiTable->fetchColumn() !== false;
+$amiRows = [];
+$amiLookup = $amiTablePresent ? \FreePBX::Database()->prepare("SELECT * FROM manager WHERE name = ?") : null;
+$amiColumns = ["manager_id", "name", "secret", "deny", "permit", "read", "write", "writetimeout"];
+foreach ($amiNames as $name) {
+    $rows = [];
+    if ($amiLookup) { $amiLookup->execute([$name]); $rows = $amiLookup->fetchAll(\PDO::FETCH_ASSOC); }
+    if (count($rows) > 1) { throw new \RuntimeException("The scoped AMI account is ambiguous"); }
+    foreach ($rows as $entry) {
+        if (count($entry) !== count($amiColumns) || array_diff(array_keys($entry), $amiColumns)
+            || ($entry["name"] ?? null) !== $name) { throw new \RuntimeException("Unsupported native Manager schema; no SLL integration was changed"); }
+        foreach ($entry as $value) { if (!(is_string($value) || is_int($value) || $value === null) || is_string($value) && strlen($value) > 4096) { throw new \RuntimeException("Invalid native Manager recovery value"); } }
+    }
+    $amiRows[$name] = $rows;
+}
 $filenames = ["custom/SLS_Mass_Notify_Paging_Tone_Opening", "custom/SLS_Mass_Notify_Paging_Tone_Closing", "custom/SLS_Mass_Notify_NWS_Alert", "custom/SLS_Mass_Notify_Lightning_Alert", "custom/Paging_Tone_Opening", "custom/Paging_Tone_Closing", "custom/NWS_alert", "custom/Lightning_alert"];
 $recordings = [];
 $exists = \FreePBX::Database()->prepare("SHOW TABLES LIKE ?"); $exists->execute(["recordings"]);
 $lookup = $exists->fetchColumn() !== false ? \FreePBX::Database()->prepare("SELECT * FROM recordings WHERE filename = ? ORDER BY id") : null;
-foreach ($filenames as $filename) { $recordings[$filename] = []; if ($lookup) { $lookup->execute([$filename]); $recordings[$filename] = $lookup->fetchAll(\PDO::FETCH_ASSOC); } if (count($recordings[$filename]) > 100) { throw new \RuntimeException("Too many rows use a reserved SLS recording name"); } }
+foreach ($filenames as $filename) { $recordings[$filename] = []; if ($lookup) { $lookup->execute([$filename]); $recordings[$filename] = $lookup->fetchAll(\PDO::FETCH_ASSOC); } if (count($recordings[$filename]) > 100) { throw new \RuntimeException("Too many rows use a reserved SLL recording name"); } }
 $backupStatus = \FreePBX::Database()->prepare("SELECT enabled FROM modules WHERE modulename = ?"); $backupStatus->execute(["backup"]);
 $backup = $backupStatus->fetchColumn() ? \FreePBX::Create()->Backup : null;
 $enrollment = [];
@@ -1158,12 +1313,64 @@ foreach (array_keys($backup ? (array)$backup->getAll("backupList") : []) as $job
     if (!array_filter($selected, $enabled) || $enabled($selected["slsmassnotifyserver"] ?? false)) { continue; }
     $enrollment[] = ["job" => $job, "present" => array_key_exists("slsmassnotifyserver", $selected), "value" => $selected["slsmassnotifyserver"] ?? null];
 }
-$encoded = json_encode(["schema" => 2, "row" => $row ?: null, "recordings" => $recordings, "backup_enrollment" => $enrollment], JSON_THROW_ON_ERROR);
-if (strlen($encoded) > 1048576) { throw new \RuntimeException("Scoped installation recovery metadata exceeds 1 MiB; no integration was changed"); }
+$encoded = json_encode(["schema" => 3, "row" => $row ?: null, "recordings" => $recordings, "backup_enrollment" => $enrollment,
+    "ami_names" => $amiNames, "ami_rows" => $amiRows, "ami_table_present" => $amiTablePresent], JSON_THROW_ON_ERROR);
+if (strlen($encoded) > 1044480) { throw new \RuntimeException("Scoped installation recovery metadata exceeds its bounded private snapshot; no integration was changed"); }
 echo $encoded;
+exit(0);
 ' >"$RECOVERY_DIR/module-registration.json" || return 1
   chmod 0600 "$RECOVERY_DIR/module-registration.json" || return 1
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" --approval "$UPGRADE_TRUST_DIR/previous-root-approval.json" snapshot || return 1
+  seal_install_recovery_inputs || return 1
+}
+
+prepare_module_ami_intent() {
+  /usr/bin/python3 -I - "$INSTALL_BOOTSTRAP_DIR/sls_config_crypto.py" "$TRANSACTION_TOOL" "$CONFIG_FILE" "$RECOVERY_DIR" <<'PYAMIINTENT'
+import hashlib, pathlib, re, sys, types
+def helper(path, name):
+    path = pathlib.Path(path); module = types.ModuleType(name); module.__file__ = str(path)
+    exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
+    return module
+crypto = helper(sys.argv[1], 'intent_config_crypto')
+journal = helper(sys.argv[2], 'intent_transaction')
+root = pathlib.Path(sys.argv[4])
+saved = journal.decode_json(journal.read(root / 'module-registration.json', 1048576))
+settings = crypto.read_config(pathlib.Path(sys.argv[3]))
+ami = settings.get('ami', {})
+name, secret = ami.get('username'), ami.get('password')
+if isinstance(name, str): name = name.strip(" \t\r\n\x00\x0b")
+if isinstance(secret, str): secret = secret.strip(" \t\r\n\x00\x0b")
+if (saved.get('schema') != 3 or not isinstance(name, str) or not re.fullmatch(r'[a-z0-9_.-]{1,64}', name)
+        or name not in saved.get('ami_names', []) or not isinstance(secret, str)
+        or not re.fullmatch(r'[\x21-\x7e]{1,128}', secret)):
+    raise SystemExit('AMI registration intent does not match the protected snapshot and configuration')
+value = {'schema': 1, 'username': name, 'secret_sha256': hashlib.sha256(secret.encode()).hexdigest()}
+path = root / 'module-ami-intent.json'
+try: previous = journal.decode_json(journal.read(path))
+except FileNotFoundError: previous = None
+if previous is not None and previous != value:
+    raise SystemExit('The protected AMI registration intent already contains different evidence')
+if previous is None: journal.atomic(path, value)
+print('Protected AMI registration intent retained; no credential was logged.')
+PYAMIINTENT
+}
+
+registration_recovery_input() {
+  /usr/bin/python3 -I - "$TRANSACTION_TOOL" "$RECOVERY_DIR" <<'PYREGISTRATION'
+import json, pathlib, sys, types
+path = pathlib.Path(sys.argv[1]); journal = types.ModuleType('registration_transaction'); journal.__file__ = str(path)
+exec(compile(path.read_bytes(), str(path), 'exec'), journal.__dict__)
+root = pathlib.Path(sys.argv[2])
+value = journal.decode_json(journal.read(root / 'module-registration.json', 1048576))
+if value.get('schema') == 3:
+    try: intent = journal.decode_json(journal.read(root / 'module-ami-intent.json'))
+    except FileNotFoundError: intent = None
+    value['ami_intent'] = intent
+body = json.dumps(value, separators=(',', ':'), allow_nan=False)
+if len(body.encode()) > 1048576:
+    raise SystemExit('Scoped recovery input exceeds its private bound')
+print(body)
+PYREGISTRATION
 }
 
 verify_install_idle_history() {
@@ -1171,9 +1378,18 @@ verify_install_idle_history() {
     log 'The installer worker guard exited unexpectedly; preserve recovery evidence.'
     return 1
   }
+  local attempt maximum=10
   local -a inspection=(--data "$DATA_DIR" inspect --baseline "$RECOVERY_DIR/idle-before.json")
-  if [ "$ROLLBACK_ATTEMPTED" -eq 1 ]; then inspection+=(--repair-collector); fi
-  /usr/bin/python3 -I "$IDLE_TOOL" "${inspection[@]}" >/dev/null
+  if [ -n "$RECOVERY_HISTORY_EVIDENCE" ]; then inspection+=(--history-evidence "$RECOVERY_HISTORY_EVIDENCE"); fi
+  # Repair inspection is for the pre-install baseline only. A completed
+  # installation or rollback must have its ledger and a fresh collector
+  # heartbeat. Cron can briefly launch a worker which exits at the held guard;
+  # require the complete strict check after that process has exited as well.
+  for ((attempt=1; attempt<=maximum; attempt++)); do
+    if /usr/bin/python3 -I "$IDLE_TOOL" "${inspection[@]}" >/dev/null; then return 0; fi
+    if [ "$attempt" -lt "$maximum" ]; then sleep 1; fi
+  done
+  return 1
 }
 
 restore_module_registration() {
@@ -1185,7 +1401,7 @@ require "/etc/freepbx.conf";
 $raw = stream_get_contents(STDIN, 1048577);
 if (strlen($raw) > 1048576) { throw new \RuntimeException("Oversized registration snapshot"); }
 $data = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
-if (($data["schema"] ?? null) !== 2 || !array_key_exists("row", $data)) { throw new \RuntimeException("Invalid registration snapshot"); }
+if (!in_array($data["schema"] ?? null, [2, 3], true) || !array_key_exists("row", $data)) { throw new \RuntimeException("Invalid registration snapshot"); }
 $row = $data["row"];
 if ($row !== null && (!is_array($row) || ($row["modulename"] ?? "") !== "slsmassnotifyserver")) { throw new \RuntimeException("Invalid module registration identity"); }
 foreach (($row ?? []) as $column => $value) {
@@ -1206,9 +1422,120 @@ foreach ($data["recordings"] as $filename => $rows) {
 foreach ($data["backup_enrollment"] as $entry) {
     if (!is_array($entry) || !is_string($entry["job"] ?? null) || $entry["job"] === "" || strlen($entry["job"]) > 128 || preg_match("/[\x00-\x1f\x7f]/", $entry["job"]) || !is_bool($entry["present"] ?? null) || !(is_scalar($entry["value"] ?? null) || ($entry["value"] ?? null) === null)) { throw new \RuntimeException("Invalid backup enrollment recovery entry"); }
 }
+$amiNames = []; $amiRows = []; $amiIntent = null; $amiRender = false;
+$amiColumns = ["manager_id", "name", "secret", "deny", "permit", "read", "write", "writetimeout"];
+$validateAmiRow = static function ($entry, $name) use ($amiColumns) {
+    if (!is_array($entry) || count($entry) !== count($amiColumns) || array_diff(array_keys($entry), $amiColumns)
+        || ($entry["name"] ?? null) !== $name || !preg_match("/^[1-9][0-9]{0,19}$/D", (string)($entry["manager_id"] ?? ""))) {
+        throw new \RuntimeException("Invalid scoped native AMI recovery row");
+    }
+    foreach ($entry as $value) {
+        if (!(is_string($value) || is_int($value) || $value === null) || is_string($value) && strlen($value) > 4096) {
+            throw new \RuntimeException("Invalid native AMI recovery value");
+        }
+    }
+};
+$ownedAmiRow = static function ($entry, $name, $secretHash, $canonical) {
+    if (($entry["name"] ?? null) !== $name || !is_string($entry["secret"] ?? null) || $entry["secret"] === ""
+        || !hash_equals($secretHash, hash("sha256", $entry["secret"]))
+        || !in_array($entry["writetimeout"] ?? null, [1000, "1000"], true)
+        || !is_string($entry["read"] ?? null) || ($entry["write"] ?? null) !== $entry["read"]
+        || !in_array($entry["read"], ["system,call,originate", "system,call,originate,reporting"], true)
+        || !is_string($entry["permit"] ?? null) || !is_string($entry["deny"] ?? null)) { return false; }
+    if ($canonical) {
+        return $entry["read"] === "system,call,originate,reporting"
+            && $entry["permit"] === "127.0.0.1/255.255.255.255&::1/128"
+            && $entry["deny"] === "0.0.0.0/0.0.0.0&::/0";
+    }
+    $permit = explode("&", $entry["permit"]); $deny = explode("&", $entry["deny"]);
+    return $permit !== [] && !array_diff($permit, ["127.0.0.1/255.255.255.255", "127.0.0.1/32", "::1/128"])
+        && (in_array("0.0.0.0/0.0.0.0", $deny, true) || in_array("0.0.0.0/0", $deny, true))
+        && (!in_array("::1/128", $permit, true) || in_array("::/0", $deny, true));
+};
+if ($data["schema"] === 3) {
+    $amiNames = $data["ami_names"] ?? null; $amiRows = $data["ami_rows"] ?? null;
+    if (!is_array($amiNames) || !array_is_list($amiNames) || count($amiNames) < 1 || count($amiNames) > 2
+        || count(array_unique($amiNames)) !== count($amiNames) || !in_array("sls_mass_notify", $amiNames, true)
+        || !is_array($amiRows) || count($amiRows) !== count($amiNames) || array_diff(array_keys($amiRows), $amiNames)
+        || !is_bool($data["ami_table_present"] ?? null)) { throw new \RuntimeException("Invalid scoped AMI recovery snapshot"); }
+    $priorIds = [];
+    foreach ($amiNames as $name) {
+        if (!is_string($name) || !preg_match("/^[a-z0-9_.-]{1,64}$/D", $name)
+            || !is_array($amiRows[$name]) || !array_is_list($amiRows[$name]) || count($amiRows[$name]) > 1
+            || !$data["ami_table_present"] && $amiRows[$name]) { throw new \RuntimeException("Invalid scoped AMI recovery identity"); }
+        foreach ($amiRows[$name] as $entry) {
+            $validateAmiRow($entry, $name);
+            $id = (string)$entry["manager_id"];
+            if (isset($priorIds[$id])) { throw new \RuntimeException("Ambiguous prior AMI account identifier"); }
+            $priorIds[$id] = true;
+        }
+    }
+    $amiIntent = $data["ami_intent"] ?? null;
+    if ($amiIntent !== null) {
+        if (!is_array($amiIntent) || count($amiIntent) !== 3 || ($amiIntent["schema"] ?? null) !== 1
+            || !is_string($amiIntent["username"] ?? null) || !in_array($amiIntent["username"], $amiNames, true)
+            || !is_string($amiIntent["secret_sha256"] ?? null) || !preg_match("/^[a-f0-9]{64}$/D", $amiIntent["secret_sha256"])) {
+            throw new \RuntimeException("Invalid protected AMI registration intent");
+        }
+        $expectedNames = array_values(array_unique([$amiIntent["username"], "sls_mass_notify"]));
+        if (count($expectedNames) !== count($amiNames) || array_diff($amiNames, $expectedNames)) {
+            throw new \RuntimeException("AMI snapshot identities differ from the protected registration intent");
+        }
+    }
+}
 $db = \FreePBX::Database();
 $db->beginTransaction();
 try {
+    $amiPlan = [];
+    if ($data["schema"] === 3) {
+        $table = $db->prepare("SHOW TABLES LIKE ?"); $table->execute(["manager"]);
+        $tablePresent = $table->fetchColumn() !== false;
+        if (!$tablePresent && $data["ami_table_present"]) { throw new \RuntimeException("The prior native Manager table is missing; preserve recovery evidence"); }
+        $lookup = $tablePresent ? $db->prepare("SELECT * FROM manager WHERE name = ? FOR UPDATE") : null;
+        foreach ($amiNames as $name) {
+            $current = [];
+            if ($lookup) { $lookup->execute([$name]); $current = $lookup->fetchAll(\PDO::FETCH_ASSOC); }
+            if (count($current) > 1) { throw new \RuntimeException("The current scoped AMI account is ambiguous"); }
+            foreach ($current as $entry) { $validateAmiRow($entry, $name); }
+            $before = $amiRows[$name];
+            if ($current === $before) { continue; }
+            if ($amiIntent === null
+                || $before && !$ownedAmiRow($before[0], $name, $amiIntent["secret_sha256"], false)
+                || $current && !$ownedAmiRow($current[0], $name, $amiIntent["secret_sha256"], true)) {
+                throw new \RuntimeException("Native AMI account changed independently; it was not overwritten");
+            }
+            $amiPlan[$name] = ["before" => $before, "current" => $current];
+        }
+        $willDelete = [];
+        foreach ($amiPlan as $name => $plan) { if ($plan["current"]) { $willDelete[(string)$plan["current"][0]["manager_id"]] = $name; } }
+        foreach ($amiPlan as $name => $plan) {
+            if (!$plan["before"]) { continue; }
+            $id = (string)$plan["before"][0]["manager_id"];
+            $collision = $db->prepare("SELECT * FROM manager WHERE manager_id = ? FOR UPDATE"); $collision->execute([$id]);
+            foreach ($collision->fetchAll(\PDO::FETCH_ASSOC) as $entry) {
+                if (!isset($willDelete[$id]) || ($entry["name"] ?? null) !== $willDelete[$id]) {
+                    throw new \RuntimeException("A prior AMI identifier is now owned by another account; it was not overwritten");
+                }
+            }
+        }
+        // Delete only the exact candidate-owned row inspected above. This also
+        // detects a concurrent native Manager edit before a scoped replacement.
+        foreach ($amiPlan as $plan) {
+            if (!$plan["current"]) { continue; }
+            $entry = $plan["current"][0];
+            $delete = $db->prepare("DELETE FROM manager WHERE manager_id = ? AND name = ? AND secret = ? AND deny = ? AND permit = ? AND `read` = ? AND `write` = ? AND writetimeout = ?");
+            $delete->execute(array_map(static function ($key) use ($entry) { return $entry[$key]; }, $amiColumns));
+            if ($delete->rowCount() !== 1) { throw new \RuntimeException("The scoped AMI account changed during restoration"); }
+        }
+        foreach ($amiPlan as $plan) {
+            foreach ($plan["before"] as $entry) {
+                $columns = implode(",", array_map(static function ($value) { return "`" . $value . "`"; }, array_keys($entry)));
+                $marks = implode(",", array_fill(0, count($entry), "?"));
+                $db->prepare("INSERT INTO manager (" . $columns . ") VALUES (" . $marks . ")")->execute(array_values($entry));
+            }
+        }
+        $amiRender = $tablePresent && $amiIntent !== null;
+    }
     $db->prepare("DELETE FROM modules WHERE modulename = ?")->execute(["slsmassnotifyserver"]);
     if ($row !== null) {
         $columns = implode(",", array_map(static function ($value) { return "`" . $value . "`"; }, array_keys($row)));
@@ -1226,13 +1553,33 @@ try {
         $lookup->execute([$filename]);
         $current = $lookup->fetchAll(\PDO::FETCH_ASSOC);
         if ($current === $rows) { continue; }
-        // New-release registration only adds reserved SLS rows and removes
+        // New-release registration only adds reserved SLL rows and removes
         // legacy rows proven owned by this module. Refuse unrelated changes.
-        if ($current && $rows) { throw new \RuntimeException("System Recording changed independently during installation: " . $filename); }
+        if ($current && $rows) {
+            // A rebrand changes only exact publisher labels and retains every
+            // recording ID/reference. Any other changed column is independent.
+            $rebranded = $rows;
+            foreach ($rebranded as &$recording) {
+                if (strpos($filename, "custom/SLS_Mass_Notify_") !== 0
+                    || strpos((string)($recording["displayname"] ?? ""), "SLS Mass Notify - ") !== 0
+                    || strpos((string)($recording["description"] ?? ""), "Default Southland Servers ") !== 0) {
+                    throw new \RuntimeException("System Recording changed independently during installation: " . $filename);
+                }
+                $recording["displayname"] = str_replace("SLS Mass Notify - ", "SLL Mass Notify Server - ", $recording["displayname"]);
+                $recording["description"] = str_replace("Default Southland Servers ", "Default Southland Labs ", $recording["description"]);
+            }
+            unset($recording);
+            if ($current !== $rebranded) { throw new \RuntimeException("System Recording changed independently during installation: " . $filename); }
+            $delete->execute([$filename]);
+        }
         if (!$rows && $current) {
             if (strpos($filename, "custom/SLS_Mass_Notify_") !== 0) { throw new \RuntimeException("Unexpected new legacy System Recording"); }
             foreach ($current as $recording) {
-                if (strpos((string)($recording["displayname"] ?? ""), "SLS Mass Notify - ") !== 0 || strpos((string)($recording["description"] ?? ""), "Default Southland Servers ") !== 0) { throw new \RuntimeException("New System Recording is not owned by this installation"); }
+                $currentBrand = strpos((string)($recording["displayname"] ?? ""), "SLL Mass Notify Server - ") === 0
+                    && strpos((string)($recording["description"] ?? ""), "Default Southland Labs ") === 0;
+                $legacyBrand = strpos((string)($recording["displayname"] ?? ""), "SLS Mass Notify - ") === 0
+                    && strpos((string)($recording["description"] ?? ""), "Default Southland Servers ") === 0;
+                if (!$currentBrand && !$legacyBrand) { throw new \RuntimeException("New System Recording is not owned by this installation"); }
             }
             $delete->execute([$filename]);
         }
@@ -1244,66 +1591,41 @@ try {
     }
     $db->commit();
 } catch (\Throwable $error) { if ($db->inTransaction()) { $db->rollBack(); } throw $error; }
-if (!$data["backup_enrollment"]) { exit(0); }
-$backup = \FreePBX::Create()->Backup;
-$jobs = (array)$backup->getAll("backupList");
-foreach ($data["backup_enrollment"] as $entry) {
-    $job = $entry["job"];
-    if (!array_key_exists($job, $jobs)) { continue; } // Never recreate a removed job.
-    $selected = (array)$backup->getAll("modules_" . $job);
-    if (($selected["slsmassnotifyserver"] ?? null) !== true) { continue; } // Preserve independent administrator edits.
-    if ($entry["present"]) { $backup->setConfig("slsmassnotifyserver", $entry["value"], "modules_" . $job); }
-    else { $backup->delConfig("slsmassnotifyserver", "modules_" . $job); }
+if ($amiRender) {
+    // Render only native Manager configuration from its recovered database.
+    // Retry this even when a previous attempt committed rows but file output
+    // failed. No SLL install/uninstall or general reload hooks are invoked.
+    $manager = \FreePBX::Manager();
+    $configuration = $manager->genConfig();
+    if (!is_array($configuration) || !is_array($configuration["manager_additional.conf"] ?? null)) {
+        throw new \RuntimeException("Native Manager configuration generation failed during recovery");
+    }
+    $manager->writeConfig(["manager_additional.conf" => $configuration["manager_additional.conf"]]);
+}
+if ($data["backup_enrollment"]) {
+    $backup = \FreePBX::Create()->Backup;
+    $jobs = (array)$backup->getAll("backupList");
+    foreach ($data["backup_enrollment"] as $entry) {
+        $job = $entry["job"];
+        if (!array_key_exists($job, $jobs)) { continue; } // Never recreate a removed job.
+        $selected = (array)$backup->getAll("modules_" . $job);
+        if (($selected["slsmassnotifyserver"] ?? null) !== true) { continue; } // Preserve independent administrator edits.
+        if ($entry["present"]) { $backup->setConfig("slsmassnotifyserver", $entry["value"], "modules_" . $job); }
+        else { $backup->delConfig("slsmassnotifyserver", "modules_" . $job); }
+    }
 }
 require_once "/var/www/html/admin/modules/dashboard/classes/DashboardHooks.class.php";
 $dashboard = \FreePBX::Dashboard();
 $order = $dashboard->getConfig("visualorder");
 $dashboard->setConfig("allhooks", \DashboardHooks::genHooks(is_array($order) ? $order : []));
-' <"$RECOVERY_DIR/module-registration.json" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
+exit(0);
+' < <(registration_recovery_input) >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
 }
 
 restore_previous_module_tree() {
-  /usr/bin/python3 -I - "$MODULE_BACKUP_DIR" "$HAD_EXISTING_MODULE" <<'PY'
-import os, stat, sys
-flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-
-def directory(path):
-    fd = os.open('/', flags)
-    try:
-        for part in path.split('/'):
-            if not part: continue
-            if part in ('.', '..'): raise RuntimeError('invalid recovery directory')
-            child = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
-backup = directory(sys.argv[1])
-web = directory('/var/www/html/admin/modules')
-try:
-    info = os.fstat(backup)
-    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
-        raise RuntimeError('unsafe module recovery directory')
-    try:
-        os.stat('failed-module', dir_fd=backup, follow_symlinks=False)
-    except FileNotFoundError: pass
-    else: raise RuntimeError('failed module recovery location already exists')
-    try: os.rename('slsmassnotifyserver', 'failed-module', src_dir_fd=web, dst_dir_fd=backup)
-    except FileNotFoundError: pass
-    try: previous = os.stat('slsmassnotifyserver', dir_fd=backup, follow_symlinks=False)
-    except FileNotFoundError:
-        if sys.argv[2] == '1': raise RuntimeError('previous module backup is missing')
-    else:
-        if not stat.S_ISDIR(previous.st_mode): raise RuntimeError('previous module backup is unsafe')
-        os.rename('slsmassnotifyserver', 'slsmassnotifyserver', src_dir_fd=backup, dst_dir_fd=web)
-    os.fsync(web)
-    os.fsync(backup)
-finally:
-    os.close(web)
-    os.close(backup)
-PY
+  /usr/bin/python3 -I "${RECOVERY_PROGRAM_DIR:-$INSTALL_BOOTSTRAP_DIR}/sls_upgrade_trust.py" \
+    --workspace "$UPGRADE_TRUST_DIR" --restore-previous-module \
+    --module-backup "$MODULE_BACKUP_DIR" --had-existing-module "$HAD_EXISTING_MODULE"
 }
 
 rollback_module_install() {
@@ -1313,16 +1635,20 @@ rollback_module_install() {
     rollback_failure "the authenticated recovery helper or snapshot is unavailable"
     return 1
   fi
-  if [ "$MODULE_ACTIVATED" -eq 1 ] || { [ -n "$MODULE_BACKUP_DIR" ] && { [ -f "$MODULE_BACKUP_DIR/module-swap-complete" ] || [ -d "$MODULE_BACKUP_DIR/$MODULE" ] || { [ -n "$STAGING_DIR" ] && [ ! -d "$STAGING_DIR/$MODULE" ]; }; }; }; then
+  # A power loss can occur after the fresh candidate rename but before its
+  # completion marker. The staged source is copied and may still be present.
+  # Idempotent restoration verifies either the prior tree or prior absence, so
+  # every recorded private backup must be inspected, even without that marker.
+  if [ "$MODULE_ACTIVATED" -eq 1 ] || [ -n "$MODULE_BACKUP_DIR" ]; then
     restore_previous_module_tree || rollback_failure "the previous module directory could not be restored"
   fi
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" restore >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
     || rollback_failure "the static integration snapshot could not be fully restored"
+  restore_module_registration || rollback_failure "the original module/AMI registration and Dashboard hook index could not be restored"
   sls_as_asterisk /usr/sbin/asterisk -rx "manager reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || rollback_failure "restored Asterisk manager configuration did not reload"
   sls_as_asterisk /usr/sbin/asterisk -rx "dialplan reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || rollback_failure "restored Asterisk dialplan did not reload"
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" restore-services >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
     || rollback_failure "the prior collector/Apache process state could not be restored safely"
-  restore_module_registration || rollback_failure "the original module registration and Dashboard hook index could not be restored"
   refresh_served_php_workers || rollback_failure "the restored PHP-FPM serving processes could not be refreshed safely"
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" verify >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
     || rollback_failure "restored static integration differs from its preserved snapshot"
@@ -1334,7 +1660,7 @@ rollback_module_install() {
   fi
   verify_install_idle_history || rollback_failure "recovered notification idleness or retained phone history could not be verified"
   if [ "$ROLLBACK_FAILED" -eq 0 ]; then
-    /usr/bin/python3 -I "$INSTALL_BOOTSTRAP_DIR/sls_upgrade_trust.py" --workspace "$UPGRADE_TRUST_DIR" --verify-previous >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
+    /usr/bin/python3 -I "${RECOVERY_PROGRAM_DIR:-$INSTALL_BOOTSTRAP_DIR}/sls_upgrade_trust.py" --workspace "$UPGRADE_TRUST_DIR" --verify-previous >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
       || rollback_failure "the recovered SLS, Dashboard or Framework files differ from their pre-install authenticated approvals"
   fi
   if [ "$ROLLBACK_FAILED" -eq 0 ]; then
@@ -1350,6 +1676,25 @@ rollback_module_install() {
 }
 
 
+verify_recovery_configuration() {
+  [ -n "$CONFIG_HASH_BEFORE" ] || [ -n "$PENDING_CONFIG_STATE" ] || return 0
+  local current_hash=absent pending_hash=absent
+  if [ -n "$CONFIG_HASH_BEFORE" ] && { [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; }; then
+    current_hash="$(safe_config_hash "$CONFIG_FILE")" || return 1
+  fi
+  if [ -n "$PENDING_CONFIG_STATE" ] && { [ -e "$PENDING_CONFIG_PATH" ] || [ -L "$PENDING_CONFIG_PATH" ]; }; then
+    pending_hash="$(safe_config_hash "$PENDING_CONFIG_PATH")" || return 1
+  fi
+  /usr/bin/python3 -I - "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" "$current_hash" \
+      "$PENDING_CONFIG_STATE" "$PENDING_CONFIG_HASH" "$pending_hash" <<'PYCONFIGRECOVERY'
+import pathlib, sys, types
+helper = pathlib.Path(sys.argv[1])
+module = types.ModuleType('sll_configuration_recovery'); module.__file__ = str(helper)
+exec(compile(helper.read_bytes(), str(helper), 'exec'), module.__dict__)
+module.assert_configuration_recoverable(*sys.argv[2:])
+PYCONFIGRECOVERY
+}
+
 guard_config_on_exit() {
   local status=$? current_hash
   INSTALL_EXIT_CODE="$status"
@@ -1357,6 +1702,16 @@ guard_config_on_exit() {
   # A failed recovery command must not interrupt later config restoration or
   # delete the only recovery copy. Preserve the original install exit status.
   set +e
+  if [ "$RECOVERY_REQUEST_MODE" -eq 1 ] && ! verify_recovery_configuration; then
+    log 'CRITICAL: recovery preserved independently changed active or pending settings. No previous configuration or runtime was restored; preserve the live settings and protected transaction evidence for review.'
+    persist_install_transaction recovery_failed || true
+    INSTALL_EXIT_CODE=1
+    INSTALL_ERROR_CATEGORY="install_recovery_config_conflict"
+    INSTALL_SOLUTION="Preserve the current active/pending settings and original protected snapshots. Review their differences before retrying authenticated recovery; recovery will not overwrite an unrecognized administrator edit."
+    record_install_failure
+    release_worker_coordination
+    exit 1
+  fi
   # EXIT status alone is not a commit marker. A premature successful exit or
   # a signal observed after a successful child must still restore changed state.
   if { [ "$STATIC_MUTATION_STARTED" -eq 1 ] || [ -n "$INSTALL_TRANSACTION_DIR" ]; } \
@@ -1376,7 +1731,12 @@ guard_config_on_exit() {
 
   if [ -n "$CONFIG_SNAPSHOT" ] && [ -f "$CONFIG_SNAPSHOT" ]; then
     current_hash="$(safe_config_hash "$CONFIG_FILE" 2>/dev/null || true)"
-    if [ "$current_hash" != "$CONFIG_HASH_BEFORE" ]; then
+    if [ "$INSTALL_COMMITTED" -eq 1 ]; then
+      if [ "$current_hash" != "${CONFIG_HASH_EXPECTED:-$CONFIG_HASH_BEFORE}" ]; then
+        log 'CRITICAL: the protected central config changed after post-install verification. Preserve the installer log and configuration backups for review.'
+        [ "$status" -ne 0 ] || status=1
+      fi
+    elif [ "$current_hash" != "$CONFIG_HASH_BEFORE" ]; then
       if ensure_data_directory 2>/dev/null && safe_config_restore "$CONFIG_SNAPSHOT" "$CONFIG_FILE" 2>/dev/null; then
         log "The installer restored the original central config after an interrupted or failed install."
         [ "$status" -ne 0 ] || status=1
@@ -1434,6 +1794,10 @@ guard_config_on_exit() {
       rm -f "$CONFIG_SNAPSHOT"
       CONFIG_SNAPSHOT=""
     fi
+    if [ -n "$CONFIG_EXPECTED_SNAPSHOT" ] && [ -f "$CONFIG_EXPECTED_SNAPSHOT" ]; then
+      rm -f "$CONFIG_EXPECTED_SNAPSHOT"
+      CONFIG_EXPECTED_SNAPSHOT=""
+    fi
     [ -z "$PENDING_CONFIG_SNAPSHOT" ] || rm -f -- "$PENDING_CONFIG_SNAPSHOT"
     [ -z "$STAGING_DIR" ] || rm -rf -- "$STAGING_DIR"
     [ -z "$MODULE_BACKUP_DIR" ] || rm -rf -- "$MODULE_BACKUP_DIR"
@@ -1451,7 +1815,7 @@ guard_config_on_exit() {
     log "Recovery locations: module=${MODULE_BACKUP_DIR:-none}; config=${CONFIG_SNAPSHOT:-none}; pending=${PENDING_CONFIG_SNAPSHOT:-none}; stage=${STAGING_DIR:-none}; static=${RECOVERY_DIR:-none}; helper=${INSTALL_BOOTSTRAP_DIR:-none}; approvals=${UPGRADE_TRUST_DIR:-none}."
     INSTALL_ERROR_CATEGORY="install_rollback_failed"
     if [ "$ROLLBACK_ATTEMPTED" -eq 1 ]; then
-      INSTALL_SOLUTION="Recovery requires review: SLS root update/maintenance jobs remain disabled if prior authenticated execution approval or restoration could not be verified. Preserve the module, config, static-state and helper locations in the log; resolve any additional restoration failures before retrying."
+      INSTALL_SOLUTION="Recovery requires review: SLL root update/maintenance jobs remain disabled if prior authenticated execution approval or restoration could not be verified. Preserve the module, config, static-state and helper locations in the log; resolve any additional restoration failures before retrying."
     else
       INSTALL_SOLUTION="Protected preflight recovery was incomplete. Preserve the recovery locations printed in the installer log and correct the specified configuration or timezone restoration failure before retrying."
     fi
@@ -1663,7 +2027,7 @@ if ($managerHost === "") {
     $managerHost = "localhost";
 }
 if (!in_array($managerHost, ["localhost", "127.0.0.1", "::1"], true)) {
-    fwrite(STDERR, "SLS Mass Notify requires FreePBX AMI to use a loopback host; configured ASTMANAGERHOST is unsupported.\n");
+    fwrite(STDERR, "SLL Mass Notify Server requires FreePBX AMI to use a loopback host; configured ASTMANAGERHOST is unsupported.\n");
     exit(1);
 }
 if ($managerPort < 1 || $managerPort > 65535) {
@@ -1739,7 +2103,7 @@ acquire_update_coordination() {
     if [[ "$descriptor" =~ ^[0-9]+$ ]] && flock -n "$descriptor"; then return 0; fi
   done
   open_root_owned_file INSTALL_UPDATE_LOCK_FD "$lock_file" || return 1
-  flock -w 120 "$INSTALL_UPDATE_LOCK_FD" || { log 'Another SLS update is still running; no release files were changed.'; return 1; }
+  flock -w 120 "$INSTALL_UPDATE_LOCK_FD" || { log 'Another SLL update is still running; no release files were changed.'; return 1; }
 }
 
 acquire_worker_coordination() {
@@ -1867,9 +2231,9 @@ function trim(value) {
     next
   }
   key = trim(substr($0, 1, separator - 1))
-  if (tolower(key) == tolower(wanted)) {
+  if (!found && tolower(key) == tolower(wanted)) {
     print trim(substr($0, separator + 1))
-    exit
+    found = 1
   }
 }'
 }
@@ -2008,7 +2372,7 @@ wait_for_asterisk_cli() {
 repair_asterisk_provider_package() {
   local provider_module="$1"
   local provider_file package package_version package_spec utility
-  local active_channels
+  local active_channels service_owner=unmanaged
 
   [ "$REPAIR_ASTERISK_PACKAGES" -eq 1 ] || {
     log "Automatic Asterisk provider-package repair is disabled."
@@ -2024,9 +2388,9 @@ repair_asterisk_provider_package() {
     log "Asterisk is not reachable; refusing to start or alter its packages automatically."
     return 1
   fi
-  active_channels="$(asterisk -rx "core show channels count" 2>/dev/null \
-    | awk '$2 == "active" && $3 == "channels" {print $1; exit}')"
-  if ! [[ "$active_channels" =~ ^[0-9]+$ ]]; then
+  if ! active_channels="$(asterisk -rx "core show channels count" 2>/dev/null \
+    | awk '!found && $2 == "active" && $3 == "channels" {print $1; found=1}')" \
+    || ! [[ "$active_channels" =~ ^[0-9]+$ ]]; then
     log "Unable to verify that Asterisk has no active channels; automatic package repair was deferred."
     return 1
   fi
@@ -2063,6 +2427,25 @@ repair_asterisk_provider_package() {
     return 1
   }
 
+  # Repository refresh can take time on a deployed PBX. Do not rely on the
+  # earlier idle observation when the package operation is about to begin.
+  if ! active_channels="$(asterisk -rx "core show channels count" 2>/dev/null \
+    | awk '!found && $2 == "active" && $3 == "channels" {print $1; found=1}')" \
+    || ! [[ "$active_channels" =~ ^[0-9]+$ ]] || [ "$active_channels" -ne 0 ]; then
+    log 'Asterisk is no longer verifiably idle after repository refresh; provider package repair was deferred.'
+    return 1
+  fi
+  if /usr/bin/systemctl is-active --quiet freepbx.service; then
+    service_owner=freepbx
+  elif /usr/bin/systemctl is-active --quiet asterisk.service; then
+    service_owner=asterisk
+  fi
+  if [ "$service_owner" = unmanaged ]; then
+    log 'Asterisk has no recognized active service manager; automatic provider package repair was deferred before changing packages.'
+    log "Restore the missing provider from the exact installed package using the normal PBX maintenance procedure, then rerun the installer. Required package: $package_spec."
+    return 1
+  fi
+
   log "Repairing $provider_module from the exact installed Asterisk package $package_spec."
   DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall --no-install-recommends --no-remove \
     "$package_spec" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || {
@@ -2075,7 +2458,12 @@ repair_asterisk_provider_package() {
     return 1
   }
   if ! wait_for_asterisk_cli; then
-    log "Asterisk stopped during package repair; attempting its system service start without bootstrapping FreePBX as root."
+    if [ "$service_owner" != asterisk ] || /usr/bin/systemctl is-active --quiet freepbx.service; then
+      log "Asterisk did not recover under its previous $service_owner service manager after package repair."
+      log 'Restore Asterisk with the normal PBX service manager, then retry authenticated installer recovery. The installer will not start a different Asterisk service or run FreePBX module hooks as root.'
+      return 1
+    fi
+    log 'Asterisk stopped during package repair; restoring the previously active asterisk.service.'
     /usr/bin/systemctl start asterisk.service >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || {
       log "FreePBX could not start Asterisk after package repair. See $LOG_FILE."
       return 1
@@ -2441,9 +2829,9 @@ function trim(value) {
     next
   }
   key = trim(substr($0, 1, separator - 1))
-  if (tolower(key) == tolower(wanted)) {
+  if (!found && tolower(key) == tolower(wanted)) {
     print trim(substr($0, separator + 1))
-    exit
+    found = 1
   }
 }'
 }
@@ -2623,12 +3011,69 @@ mixed_endpoint_visual_route_supported() {
   return 0
 }
 
+bootstrap_cached_config_crypto_directory() {
+  /usr/bin/python3 -I - "$CONFIG_CRYPTO_BOOTSTRAP_SHA256" <<'SLS_CACHED_CRYPTO_PY'
+from pathlib import Path
+import hashlib,itertools,os,re,stat,sys
+
+root=Path("/var/lib/sls-mass-notify-trust")
+def directory(path):
+    for part in (path,*path.parents):
+        info=part.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=0
+                or info.st_mode&0o022 and not info.st_mode&stat.S_ISVTX):
+            raise ValueError('unprotected cached helper path')
+def pinned(path):
+    directory(path.parent)
+    descriptor=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        before=os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid!=0 or before.st_mode&0o022
+                or before.st_nlink!=1 or not 0<before.st_size<=262144):
+            raise ValueError('unprotected cached helper')
+        body=bytearray()
+        while len(body)<=262144:
+            block=os.read(descriptor,min(65536,262145-len(body)))
+            if not block:break
+            body.extend(block)
+        identity=lambda value:(value.st_dev,value.st_ino,value.st_mode,value.st_uid,value.st_gid,value.st_nlink,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+        if len(body)!=before.st_size or identity(before)!=identity(os.fstat(descriptor)) or identity(before)!=identity(path.lstat()):
+            raise ValueError('cached helper changed during inspection')
+        return hashlib.sha256(body).hexdigest()==sys.argv[1]
+    finally:os.close(descriptor)
+try:
+    directory(root)
+    if root.stat().st_mode&0o077:raise ValueError('cache is not root-private')
+    generations=list(itertools.islice(root.iterdir(),513))
+    if len(generations)>512:raise ValueError('cached generation inventory exceeds its bound')
+    for generation in sorted(generations):
+        if not re.fullmatch(r'slsmassnotifyserver-[a-f0-9]{64}',generation.name):continue
+        helper=generation/'module/bin/sls_mass_notify/sls_config_crypto.py'
+        if not helper.exists() and not helper.is_symlink():continue
+        if pinned(helper):print(helper.parent);break
+    else:raise ValueError('no exact pinned helper is cached')
+except (OSError,ValueError):
+    sys.exit('The retained encrypted configuration needs its protected crypto helper. No exact, safe signed-cache copy was available; preserve the configuration and encryption keys and restore the authenticated runtime before retrying.')
+SLS_CACHED_CRYPTO_PY
+}
+
 bootstrap_resource_capacity() {
   # Standalone installers need this before a release archive is available.
   # Keep this copy identical to the packaged helper; a regression checks parity.
+  local cached_crypto_directory=""
+  if { [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; } \
+    && [ ! -e /usr/local/bin/sls_mass_notify/sls_config_crypto.py ] \
+    && [ ! -L /usr/local/bin/sls_mass_notify/sls_config_crypto.py ]; then
+    cached_crypto_directory="$(bootstrap_cached_config_crypto_directory)" || return 3
+  fi
+  (
+  # The embedded reader uses its protected adjacent helper. A failed first
+  # installation can retain settings after runtime rollback; enter only the
+  # independently hash-pinned cached helper directory, without copying files.
+  [ -z "$cached_crypto_directory" ] || cd "$cached_crypto_directory" || exit 3
   /usr/bin/python3 -I - "$@" <<'SLS_RESOURCE_CAPACITY_PY'
 #!/usr/bin/env python3
-"""Read-only admission checks for provisional combined PBX/SLS resource tiers.
+"""Read-only admission checks for provisional combined PBX/SLL resource tiers.
 
 These engineering allocations do not certify delivery throughput. Desktop
 transport retains its separate stream limit and requires JSON-poll fallback.
@@ -2650,6 +3095,10 @@ import types
 GIB = 1024 ** 3
 MIB = 1024 ** 2
 TIERS = ((50, 2, 4), (100, 3, 5), (250, 4, 6), (500, 6, 8), (1000, 8, 12))
+LITE_TIERS = ((25, 2, 2),)
+DEPLOYMENT_PROFILES = ('standard', 'lite')
+LITE_MAX_DESKTOPS = 25
+LITE_MAX_PHONES = 25
 MAX_KERNEL_RESERVE = 256 * MIB
 PHONE_BASELINE = 25
 # 2026-10-02 private Asterisk: 25/50/100 PCM conference recipients used
@@ -2855,14 +3304,14 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
     except FileNotFoundError:
         return result
     if not stat.S_ISDIR(root_metadata.st_mode):
-        raise ValueError('An SLS storage root is not a real directory')
+        raise ValueError('An SLL storage root is not a real directory')
     cache = {} if cache is None else cache
     if str(root) in cache: return dict(cache[str(root)])
     seen, seen_directories, examined, pending = set(), set(), 0, [(root, False)]
     reports, children = {}, {}
     while pending:
         if time.monotonic() > deadline:
-            raise ResourceProbeError('storage_scan_timeout', 'SLS storage measurement exceeded its time limit. Reduce retained files or resolve storage latency, then retry.')
+            raise ResourceProbeError('storage_scan_timeout', 'SLL storage measurement exceeded its time limit. Reduce retained files or resolve storage latency, then retry.')
         directory, complete = pending.pop()
         key = str(directory)
         if complete:
@@ -2893,9 +3342,9 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
                 for entry in entries:
                     examined += 1
                     if examined > maximum_entries:
-                        raise ResourceProbeError('storage_scan_entry_limit', 'SLS storage measurement exceeded its ' + str(maximum_entries) + '-entry limit. Review retained files before retrying.')
+                        raise ResourceProbeError('storage_scan_entry_limit', 'SLL storage measurement exceeded its ' + str(maximum_entries) + '-entry limit. Review retained files before retrying.')
                     if time.monotonic() > deadline:
-                        raise ResourceProbeError('storage_scan_timeout', 'SLS storage measurement exceeded its time limit. Resolve storage latency or reduce retained files before retrying.')
+                        raise ResourceProbeError('storage_scan_timeout', 'SLL storage measurement exceeded its time limit. Resolve storage latency or reduce retained files before retrying.')
                     try:
                         metadata = entry.stat(follow_symlinks=False)
                     except FileNotFoundError:
@@ -2919,10 +3368,10 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
             if re.fullmatch(r'[A-Za-z0-9_./-]{1,120}', relative) and relative != '.':
                 detail += '/' + relative
             raise ResourceProbeError('storage_directory_unreadable',
-                'The PBX account cannot read SLS storage at ' + detail +
+                'The PBX account cannot read SLL storage at ' + detail +
                 '. Run Repair Installation to restore directory traversal/read permissions, then retry the resource check.') from error
         except OSError as error:
-            raise ValueError('Unable to measure an SLS storage directory safely') from error
+            raise ValueError('Unable to measure an SLL storage directory safely') from error
     return dict(cache.get(str(root), result))
 
 
@@ -3128,6 +3577,43 @@ def trusted_temporary_directory(path):
         return False
 
 
+def probe_runtime_speech_scratch(profile, saved):
+    """Installer scratch fallback does not move the runtime's /tmp audio files."""
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid deployment profile')
+    slots = saved.get('speech_synthesis_limit', 1)
+    reserve = saved.get('generated_media_min_free_mib', 128)
+    if type(slots) is not int or not 1 <= slots <= 4 or type(reserve) is not int or not 64 <= reserve <= 4096:
+        raise ValueError('Invalid speech workspace settings')
+    if profile == 'lite':
+        if saved.get('deployment_profile', 'standard') == 'lite' and slots > 1:
+            raise ValueError('Invalid Lite speech concurrency')
+        slots = 1
+    if not trusted_temporary_directory('/tmp'):
+        raise ResourceProbeError('runtime_speech_workspace_unsafe',
+            'Runtime audio requires the standard root-owned /tmp directory with safe sticky permissions. Restore its ownership and permissions before installing.')
+    if os.geteuid() == 0:
+        try:
+            access = subprocess.run(['/usr/sbin/runuser', '-u', 'asterisk', '--', '/usr/bin/test',
+                                     '-w', '/tmp', '-a', '-x', '/tmp'], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            access = False
+    else:
+        access = os.access('/tmp', os.W_OK | os.X_OK)
+    if not access:
+        raise ResourceProbeError('runtime_speech_workspace_unsafe',
+            'The PBX account cannot write and traverse /tmp for runtime audio. Restore that directory access before installing.')
+    usage = os.statvfs('/tmp')
+    # Match Admission.bytes at the supported 600-second bound and preserve
+    # its configured free-space floor; this is a prerequisite, not a quota.
+    required = reserve * MIB + slots * (600 * (48000 * 2 + 8000 * 2 * 4) + MIB)
+    return {'path': '/tmp', 'available_bytes': usage.f_bavail * usage.f_frsize,
+            'required_free_bytes': required, 'synthesis_workers': slots,
+            'read_only': bool(getattr(usage, 'f_flag', 0) & os.ST_RDONLY),
+            'inodes_exhausted': getattr(usage, 'f_files', 0) > 0 and getattr(usage, 'f_favail', None) == 0}
+
+
 def probe_storage_filesystems(storage, temporary_directory=None):
     """Use persistent scratch space when a small /tmp cannot hold the install.
 
@@ -3261,17 +3747,28 @@ def configured_limits(path):
         raise ValueError('Invalid notification capacity')
     optional=value.get('speech_optional_voice_packs',[])
     if not isinstance(optional,list) or len(optional)>2 or any(not isinstance(pack,str) or pack not in REGIONAL_VOICE_BYTES for pack in optional) or len(set(optional))!=len(optional):raise ValueError('Invalid optional speech packs')
+    profile=value.get('deployment_profile','standard')
+    if not isinstance(profile,str) or profile not in DEPLOYMENT_PROFILES:raise ValueError('Invalid deployment profile')
+    capacities['deployment_profile']=profile
     if optional:capacities['speech_optional_voice_packs']=optional
+    for key, minimum, maximum in (('speech_synthesis_limit', 1, 4), ('generated_media_min_free_mib', 64, 4096)):
+        if key in value:
+            field=value[key]
+            if type(field) is not int or not minimum <= field <= maximum:raise ValueError('Invalid speech workspace settings')
+            capacities[key]=field
     return capacities
 
 
-def rounded_phone_capacity(count):
+def rounded_phone_capacity(count, profile='standard'):
     """Retain 25 for small installations, then round up in blocks of 50."""
     if type(count) is not int or count < 0:
         raise ValueError('Invalid detected phone count')
-    if count > 1000:
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid deployment profile')
+    maximum = LITE_MAX_PHONES if profile == 'lite' else 1000
+    if count > maximum:
         raise ResourceProbeError('phone_inventory_exceeds_limit',
-            'More than 1000 internal phone contacts were detected. SLS supports at most 1000 simultaneous contacts; review the device inventory before installation.')
+            f'{count} internal phone contacts were detected, but SLL {profile.title()} mode supports at most {maximum}. Use Standard mode with sufficient resources or reduce the configured phone inventory before installation.')
     return PHONE_BASELINE if count <= PHONE_BASELINE else rounded(count, 50)
 
 
@@ -3341,20 +3838,29 @@ def detect_internal_phones():
             'The internal phone inventory could not be verified. Confirm Asterisk is running and its DEVICE database and PJSIP contact commands are available, then retry installation. No phone capacity was guessed.') from error
 
 
-def capacity_requirements(requested, phone_requested):
+def capacity_requirements(requested, phone_requested, profile='standard'):
     if type(requested) is not int or not 1 <= requested <= 1000:
         raise ValueError('Desktop capacity must be between 1 and 1000')
     if type(phone_requested) is not int or not 1 <= phone_requested <= 1000:
         raise ValueError('Phone capacity must be between 1 and 1000')
-    tier_limit, desktop_cpu, desktop_memory = next(tier for tier in TIERS if requested <= tier[0])
-    extra_contacts = max(0, phone_requested - PHONE_RESOURCE_BASELINE)
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid deployment profile')
+    if profile == 'lite' and (requested > LITE_MAX_DESKTOPS or phone_requested > LITE_MAX_PHONES):
+        raise ResourceProbeError('lite_capacity_exceeded',
+            f'Lite mode supports at most {LITE_MAX_DESKTOPS} desktops and {LITE_MAX_PHONES} phone contacts. Lower both capacities or install in Standard mode on a host that meets the Standard resource requirements.')
+    tiers = LITE_TIERS if profile == 'lite' else TIERS
+    tier_limit, desktop_cpu, desktop_memory = next(tier for tier in tiers if requested <= tier[0])
+    phone_resource_baseline = LITE_MAX_PHONES if profile == 'lite' else PHONE_RESOURCE_BASELINE
+    extra_contacts = max(0, phone_requested - phone_resource_baseline)
     phone_cpu = (extra_contacts + PHONE_CONTACTS_PER_CPU - 1) // PHONE_CONTACTS_PER_CPU
     phone_memory = rounded(extra_contacts * PHONE_MEMORY_PER_CONTACT, PHONE_MEMORY_ROUNDING)
     return desktop_cpu + phone_cpu, desktop_memory * GIB + phone_memory, {
-        'combined_baseline': {'cpu_count': 2, 'memory_bytes': 4 * GIB,
-                              'desktop_clients': 50, 'phone_contacts': PHONE_RESOURCE_BASELINE},
+        'combined_baseline': {'cpu_count': 2, 'memory_bytes': (2 if profile == 'lite' else 4) * GIB,
+                              'desktop_clients': LITE_MAX_DESKTOPS if profile == 'lite' else 50,
+                              'phone_contacts': phone_resource_baseline,
+                              'deployment_profile': profile},
         'desktop_growth': {'tier_limit': tier_limit, 'cpu_count': desktop_cpu - 2,
-                           'memory_bytes': (desktop_memory - 4) * GIB},
+                           'memory_bytes': (desktop_memory - (2 if profile == 'lite' else 4)) * GIB},
         'phone_growth': {'contacts_over_baseline': extra_contacts, 'cpu_count': phone_cpu,
                          'memory_bytes': phone_memory},
     }
@@ -3379,8 +3885,8 @@ def probe_memory_limit():
     return min(limits) if limits else None
 
 
-def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
-    cpu, memory_bytes, components = capacity_requirements(requested, phone_requested)
+def evaluate(hardware, requested, phone_requested=PHONE_BASELINE, profile='standard'):
+    cpu, memory_bytes, components = capacity_requirements(requested, phone_requested, profile)
     required_memory = minimum_reported_memory(hardware, memory_bytes)
     errors = []
     storage = hardware.get('storage', storage_requirements())
@@ -3396,12 +3902,23 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
     require('cpu_insufficient',
             f'{cpu} effective CPU cores are required for {requested} desktops and {phone_requested} phone contacts; {hardware["effective_cpu_count"]:g} are allocated. Add CPU allocation or lower Desktop Capacity or Phone Capacity.',
             hardware['effective_cpu_count'], cpu)
-    advice = ('This is the minimum combined PBX/SLS tier; reducing device capacities will not lower its RAM baseline.'
-              if memory_bytes == 4 * GIB else 'Add RAM or lower Desktop Capacity or Phone Capacity.')
+    advice = ('This is the minimum combined PBX/SLL tier for the selected deployment profile; reducing device capacities will not lower its RAM baseline.'
+              if memory_bytes == (2 if profile == 'lite' else 4) * GIB else 'Add RAM or lower Desktop Capacity or Phone Capacity.')
     require('memory_insufficient',
             f'{memory_bytes / GIB:g} GiB nominal RAM is required for {requested} desktops and {phone_requested} phone contacts; {hardware["effective_memory_bytes"] / GIB:.2f} GiB is usable and {required_memory / GIB:.2f} GiB is required after kernel reservations and scratch space. {advice}',
             hardware['effective_memory_bytes'], required_memory)
     disks_ok = True
+    runtime_scratch = hardware.get('runtime_speech_scratch')
+    if runtime_scratch is not None:
+        before = len(errors)
+        if runtime_scratch.get('read_only') or runtime_scratch.get('inodes_exhausted'):
+            errors.append({'code':'runtime_speech_workspace_unavailable',
+                'message':'Runtime audio requires writable /tmp storage with free file entries. Restore that filesystem before installing.',
+                'actual':None,'required':None})
+        require('runtime_speech_workspace_insufficient',
+                f'Runtime speech requires {runtime_scratch["required_free_bytes"] / MIB:.2f} MiB free in /tmp, including its protected reserve; {runtime_scratch["available_bytes"] / MIB:.2f} MiB is available. Increase or free /tmp before installing. Installer fallback to /var/tmp does not move runtime audio workspace.',
+                runtime_scratch['available_bytes'],runtime_scratch['required_free_bytes'])
+        disks_ok = len(errors) == before
     for item in hardware['filesystems']:
         before = len(errors)
         destinations = [path for path in item['paths'] if storage['free_budgets_bytes'].get(path, 0)] or item['paths']
@@ -3417,25 +3934,31 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
         if volatile:
             errors.append({'code': 'storage_not_persistent', 'message': 'The filesystem containing ' + location + ' is volatile. Configuration, delivery history and installed runtime require persistent storage.', 'actual': None, 'required': None})
         require('free_space_insufficient',
-                f'{item["required_free_bytes"] / MIB:.2f} MiB of additional SLS free space is required on the filesystem containing {location}; {item["available_bytes"] / MIB:.2f} MiB is available. Free space or expand this filesystem.',
+                f'{item["required_free_bytes"] / MIB:.2f} MiB of additional SLL free space is required on the filesystem containing {location}; {item["available_bytes"] / MIB:.2f} MiB is available. Free space or expand this filesystem.',
                 item['available_bytes'], item['required_free_bytes'])
         disks_ok = disks_ok and len(errors) == before
     eligible = 0
     eligible_phone = 0
     if disks_ok:
-        for maximum, _, _ in TIERS:
-            tier_cpu, tier_memory, _ = capacity_requirements(maximum, phone_requested)
+        tiers = LITE_TIERS if profile == 'lite' else TIERS
+        maximum_phone = LITE_MAX_PHONES if profile == 'lite' else 1000
+        for maximum, _, _ in tiers:
+            tier_cpu, tier_memory, _ = capacity_requirements(maximum, phone_requested, profile)
             if hardware['effective_cpu_count'] >= tier_cpu and hardware['effective_memory_bytes'] >= minimum_reported_memory(hardware, tier_memory) + scratch_memory:
                 eligible = maximum
         # Phone capacity is a continuous integer policy, not the desktop tiers.
-        for phone_limit in range(1, 1001):
-            phone_cpu, phone_memory, _ = capacity_requirements(requested, phone_limit)
+        for phone_limit in range(1, maximum_phone + 1):
+            phone_cpu, phone_memory, _ = capacity_requirements(requested, phone_limit, profile)
             if hardware['effective_cpu_count'] >= phone_cpu and hardware['effective_memory_bytes'] >= minimum_reported_memory(hardware, phone_memory) + scratch_memory:
                 eligible_phone = phone_limit
     checks = {'cpu': {'ok': hardware['effective_cpu_count'] >= cpu,
                       'actual': hardware['effective_cpu_count'], 'required': cpu},
               'memory': {'ok': hardware['effective_memory_bytes'] >= required_memory,
                          'actual': hardware['effective_memory_bytes'], 'required': required_memory}}
+    if runtime_scratch is not None:
+        checks['runtime_temporary'] = {**runtime_scratch,
+            'ok': runtime_scratch['available_bytes'] >= runtime_scratch['required_free_bytes']
+                  and not runtime_scratch.get('read_only') and not runtime_scratch.get('inodes_exhausted')}
     temporary = storage.get('temporary_directory', '/tmp')
     for name, paths in (('storage', set(storage['free_budgets_bytes']) - {temporary}), ('temporary', {temporary})):
         filesystems = [item for item in hardware['filesystems'] if paths.intersection(item['paths'])]
@@ -3447,13 +3970,21 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
                        if paths <= covered else None,
                        'filesystems': [{'paths': item['paths'], 'actual': item['available_bytes'],
                                         'required': item['required_free_bytes']} for item in filesystems]}
+    if runtime_scratch is not None:
+        checks['temporary']['ok'] = checks['temporary']['ok'] is True and checks['runtime_temporary']['ok']
+    displayed_temporary = storage['temporary_free_bytes']
+    if runtime_scratch is not None and storage.get('mode') == 'runtime':
+        displayed_temporary = max(displayed_temporary, runtime_scratch['required_free_bytes'])
     return {
-        'schema': 1, 'requested_limit': requested, 'eligible_limit': eligible, 'hardware': hardware,
+        'schema': 1, 'deployment_profile': profile, 'requested_limit': requested, 'eligible_limit': eligible, 'hardware': hardware,
+        'profile_selection': {
+            'standard_memory_eligible': hardware['effective_memory_bytes'] >= minimum_reported_memory(hardware, 4 * GIB),
+            'lite_memory_eligible': minimum_reported_memory(hardware, 2 * GIB) <= hardware['effective_memory_bytes'] < minimum_reported_memory(hardware, 4 * GIB)},
         'requested_phone_limit': phone_requested, 'eligible_phone_limit': eligible_phone,
         'requirements': {'cpu_count': cpu, 'memory_bytes': memory_bytes,
                          'minimum_reported_memory_bytes': required_memory,
                          'components': components, 'disk_policy': 'additional_sls_free_headroom',
-                         'sls_persistent_free_bytes': storage['sls_persistent_free_bytes'], 'temporary_free_bytes': storage['temporary_free_bytes'],
+                         'sls_persistent_free_bytes': storage['sls_persistent_free_bytes'], 'temporary_free_bytes': displayed_temporary,
                          'free_budgets_bytes': storage['free_budgets_bytes'], 'storage': storage,
                          'reporting_allowance_percent': (memory_bytes - minimum_reported_memory(hardware, memory_bytes)) * 100 / memory_bytes,
                          'kernel_reserve_bytes': memory_bytes - minimum_reported_memory(hardware, memory_bytes),
@@ -3461,14 +3992,17 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
         'assumptions': {'load_certified': False, 'phone_baseline_contacts': PHONE_BASELINE,
                         'additional_phone_contacts_per_cpu_core': PHONE_CONTACTS_PER_CPU,
                         'additional_phone_memory_bytes_per_contact': PHONE_MEMORY_PER_CONTACT,
-                        'phone_memory_rounding_bytes': PHONE_MEMORY_ROUNDING, 'desktop_sse_limit': 32,
-                        'included_phone_contacts': PHONE_RESOURCE_BASELINE,
-                        'synthesis_concurrency_limited_by_this_check': False,
+                        'phone_memory_rounding_bytes': PHONE_MEMORY_ROUNDING,
+                        'included_phone_contacts': LITE_MAX_PHONES if profile == 'lite' else PHONE_RESOURCE_BASELINE,
+                        'synthesis_concurrency_limited_by_this_check': profile == 'lite',
+                        'maximum_synthesis_workers': 1 if profile == 'lite' else 4,
+                        'maximum_speech_queue': 2 if profile == 'lite' else 32,
+                        'desktop_sse_limit': 4 if profile == 'lite' else 32,
                         'whole_volume_size_is_enforced': False},
         'errors': errors,
         'resource_checks': checks,
-        'warnings': ['Provisional combined PBX/SLS allocation; not load-certified. Phone growth reserves capacity for registered contacts and Local/Page overhead, not measured phones-per-core throughput. Runtime speech admission separately enforces its configured concurrency and media budget.',
-                     f'SLS measured fixed files occupy {storage["measured_fixed_allocation_bytes"] / MIB:.1f} MiB. Additional {storage.get("mode", "install")} workspace requires {storage["additional_free_bytes"] / MIB:.1f} MiB across the listed filesystems, including {storage["steady_state_reserve_bytes"] / MIB:.1f} MiB for bounded writes/compaction. Retention and concurrent speech require additional measured provisioning; these are not storage quotas or a guarantee for an arbitrary workload.',
+        'warnings': [f'Provisional combined PBX/SLL {profile.title()} allocation; not load-certified. Phone growth reserves capacity for registered contacts and Local/Page overhead, not measured phones-per-core throughput. Runtime speech admission separately enforces its configured concurrency and media budget.',
+                     f'SLL measured fixed files occupy {storage["measured_fixed_allocation_bytes"] / MIB:.1f} MiB. Additional {storage.get("mode", "install")} workspace requires {storage["additional_free_bytes"] / MIB:.1f} MiB across the listed filesystems, including {storage["steady_state_reserve_bytes"] / MIB:.1f} MiB for bounded writes/compaction. Retention and concurrent speech require additional measured provisioning; these are not storage quotas or a guarantee for an arbitrary workload.',
                      'Desktop clients above the stream limit require cursor-aware JSON polling. Existing PBX calls, codecs, recording, voicemail, backups, and long retention need separate resource budgets.'],
     }
 
@@ -3478,6 +4012,7 @@ def main(argv=None):
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--config', type=Path)
     parser.add_argument('--desktop-limit', type=int)
+    parser.add_argument('--profile', choices=DEPLOYMENT_PROFILES)
     parser.add_argument('--temporary-directory', choices=('/tmp', '/var/tmp'))
     parser.add_argument('--mode', choices=('runtime', 'prepare', 'install'), default='runtime')
     parser.add_argument('--candidate-source', type=Path, help='Authenticated root-private candidate payload for installation budgets')
@@ -3492,6 +4027,7 @@ def main(argv=None):
     selection = None
     try:
         saved = configured_limits(options.config) if options.config else {}
+        profile = options.profile or saved.get('deployment_profile', 'standard')
         if requested is None:
             requested = saved.get('desktop_client_limit', 25)
         if phone_requested is None:
@@ -3499,24 +4035,27 @@ def main(argv=None):
         if options.auto_phone_limit and not saved:
             stage = 'internal phone inventory'
             selection = detect_internal_phones()
-            phone_requested = rounded_phone_capacity(selection['detected_phone_contacts'])
+            phone_requested = rounded_phone_capacity(selection['detected_phone_contacts'], profile)
             selection.update({'source': 'internal_pjsip_inventory', 'rounded_phone_capacity': phone_requested})
         stage = 'CPU and memory'
         cpu, memory = probe_compute()
-        stage = 'SLS storage'
+        stage = 'SLL storage'
         payloads = measure_release_payloads(options.candidate_source) if options.candidate_source else None
         storage = probe_storage(options.mode,payloads,optional_packs=saved['speech_optional_voice_packs']) if saved.get('speech_optional_voice_packs') else probe_storage(options.mode,payloads)
         stage = 'filesystem free space'
         storage, filesystems = probe_storage_filesystems(storage, options.temporary_directory)
+        stage = 'runtime audio temporary workspace'
+        runtime_scratch = probe_runtime_speech_scratch(profile, saved)
         result = evaluate({'effective_cpu_count': cpu, 'effective_memory_bytes': memory,
-                           'memory_limit_bytes': probe_memory_limit(), 'filesystems': filesystems, 'storage': storage}, requested, phone_requested)
+                           'memory_limit_bytes': probe_memory_limit(), 'filesystems': filesystems, 'storage': storage,
+                           'runtime_speech_scratch':runtime_scratch}, requested, phone_requested, profile)
         if selection is not None:
             result['auto_phone_selection'] = selection
     except (OSError, ValueError, ZeroDivisionError, StopIteration) as error:
         code = error.code if isinstance(error, ResourceProbeError) else 'resource_probe_failed'
         message = str(error) if isinstance(error, ResourceProbeError) else (
             'The ' + stage + ' resource check could not be completed. Check the protected configuration and storage permissions, then run Repair Installation before increasing capacity.')
-        result = {'schema': 1, 'requested_limit': requested, 'eligible_limit': 0, 'hardware': {}, 'requirements': {},
+        result = {'schema': 1, 'deployment_profile': locals().get('profile', options.profile or 'standard'), 'requested_limit': requested, 'eligible_limit': 0, 'hardware': {}, 'requirements': {},
                   'requested_phone_limit': phone_requested, 'eligible_phone_limit': 0,
                   'errors': [{'code': code, 'message': message, 'actual': None, 'required': None}], 'warnings': []}
         print(json.dumps(result, sort_keys=True))
@@ -3528,24 +4067,92 @@ def main(argv=None):
 if __name__ == '__main__':
     sys.exit(main())
 SLS_RESOURCE_CAPACITY_PY
+  )
+}
+
+installer_profile_memory_state() {
+  /usr/bin/python3 -I -c '
+import json, sys
+try:
+    value = json.loads(sys.argv[1]); selection = value["profile_selection"]
+    profile = value["deployment_profile"]
+    assert profile in ("standard", "lite")
+    assert type(selection["standard_memory_eligible"]) is bool
+    assert type(selection["lite_memory_eligible"]) is bool
+    print(profile + ":" + str(int(selection["standard_memory_eligible"])) + ":" + str(int(selection["lite_memory_eligible"])))
+except (ValueError, KeyError, TypeError, AssertionError):
+    raise SystemExit(1)
+' "$1"
+}
+
+show_lite_install_limits() {
+  log 'Lite mode limitations: at most 25 desktops and 25 phone contacts; one speech renderer and at most two waiting speech jobs.'
+  log 'Lite allows four desktop SSE streams (one per username), with authenticated polling available; one Weather/Lightning delivery worker and two Weather.gov fetch workers.'
+  log 'Enterprise Labs and enterprise SSO are unavailable in Lite. Saved configuration is retained; core notifications, authentication, encryption and rollback checks remain enabled.'
+  log 'Lite requires two effective CPU cores, nominal 2 GiB RAM and the full storage checks. This is a low-volume beta profile, not load certification.'
+}
+
+validate_installer_memory_profile() {
+  local state
+  state="$(installer_profile_memory_state "$1")" || {
+    log 'The installer could not verify deployment-profile RAM eligibility. No profile was guessed.'
+    return 2
+  }
+  case "$state" in
+    lite:1:*)
+      log 'This PBX meets the Standard RAM baseline. Lite is only offered below that baseline; use the verified installer with --standard to convert an existing Lite installation, or remove --lite for a fresh Standard installation.'
+      return 2 ;;
+    lite:0:0)
+      log 'This PBX does not meet the Lite RAM baseline. Add RAM before installation.'
+      return 2 ;;
+  esac
 }
 
 preflight_hardware_requirements() {
-  local report status
+  local report status state lite_report answer
   local -a arguments=(--check --mode prepare --desktop-limit 25 --auto-phone-limit)
   if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
     arguments=(--check --mode prepare --config "$CONFIG_FILE")
   fi
-  if report="$(bootstrap_resource_capacity "${arguments[@]}")"; then
+  [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
+  if report="$(bootstrap_resource_capacity "${arguments[@]}")"; then status=0; else status=$?; fi
+  state="$(installer_profile_memory_state "$report" || true)"
+  if [ "$status" -ne 0 ] && [ "$state" = standard:0:1 ] && [ "$REQUESTED_DEPLOYMENT_PROFILE" != standard ]; then
+    log 'This PBX does not meet the 4 GiB Standard RAM baseline. Checking whether the bounded Lite profile can be offered.'
+    if lite_report="$(bootstrap_resource_capacity "${arguments[@]}" --profile lite)"; then
+      validate_installer_memory_profile "$lite_report" || return $?
+      show_lite_install_limits
+      if [ ! -t 0 ] || { [ ! -t 1 ] && [ ! -t 2 ]; }; then
+        log 'Lite was not selected. Run from an interactive terminal to choose it, or explicitly pass --lite to accept these limitations for an unattended installation.'
+        return 2
+      fi
+      answer=""
+      if ! read -r -t 120 -p 'Would you like to install Lite with these limitations? [y/N] ' answer; then answer=""; fi
+      case "$answer" in
+        y|Y|yes|YES|Yes)
+          REQUESTED_DEPLOYMENT_PROFILE=lite
+          FRESH_DEPLOYMENT_PROFILE=lite
+          report="$lite_report"
+          status=0
+          log 'Lite selected after explicit confirmation.' ;;
+        *) log 'Installation cancelled; Lite was not selected.'; return 2 ;;
+      esac
+    else
+      status=$?
+      report="$lite_report"
+      log 'Lite cannot be offered because its CPU, RAM, phone-capacity or storage requirements are not met.'
+    fi
+  fi
+  if [ "$status" -eq 0 ]; then
+    validate_installer_memory_profile "$report" || return $?
+    if [ "$state" = lite:0:1 ]; then show_lite_install_limits; fi
     select_install_temp_root "$report" || return 1
     if [ ! -e "$CONFIG_FILE" ]; then
       remember_fresh_phone_capacity "$report" || return 1
     fi
-    log "Combined PBX/SLS CPU/RAM and dedicated SLS free-space headroom verified (provisional allocation; not a load certification)."
+    log "Combined PBX/SLL CPU/RAM and dedicated SLL free-space headroom verified (provisional allocation; not a load certification)."
     printf '%s\n' "$report" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}"
     return 0
-  else
-    status=$?
   fi
   log "Resource admission failed before optional dependency or module changes."
   printf '%s\n' "$report" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}"
@@ -3583,19 +4190,26 @@ print(path)
 }
 
 remember_fresh_phone_capacity() {
-  local capacity
+  local capacity profile
+  profile="$FRESH_DEPLOYMENT_PROFILE"
   capacity="$(/usr/bin/python3 -I -c '
 import json, sys
-report = json.loads(sys.argv[1])
+report = json.loads(sys.argv[1]); profile = sys.argv[2]
 selection = report["auto_phone_selection"]
 count, limit = selection["detected_phone_contacts"], report["requested_phone_limit"]
 assert type(count) is int and 0 <= count <= 1000
-assert type(limit) is int and limit == (25 if count <= 25 else (count + 49) // 50 * 50)
+assert profile in ("standard", "lite") and report["deployment_profile"] == profile
+expected = 25 if profile == "lite" or count <= 25 else (count + 49) // 50 * 50
+assert type(limit) is int and limit == expected
 assert selection["rounded_phone_capacity"] == limit and not report["errors"]
 print(limit)
-' "$1")" || { log 'The detected phone capacity could not be verified; no default was guessed.'; return 1; }
+' "$1" "$profile")" || { log 'The detected phone capacity could not be verified; no default was guessed.'; return 1; }
   FRESH_PHONE_CAPACITY="$capacity"
-  log "Fresh-install phone capacity: $FRESH_PHONE_CAPACITY contacts (25 minimum, rounded up in blocks of 50; resources verified)."
+  if [ "$profile" = lite ]; then
+    log "Fresh-install profile: Lite; capacity is limited to 25 desktops and 25 phone contacts (resources verified)."
+  else
+    log "Fresh-install profile: Standard; phone capacity is $FRESH_PHONE_CAPACITY contacts (25 minimum, rounded up in blocks of 50; resources verified)."
+  fi
 }
 
 verify_staged_hardware_requirements() {
@@ -3605,11 +4219,13 @@ verify_staged_hardware_requirements() {
   if [ -e "$CONFIG_FILE" ]; then
     arguments=(--check --config "$CONFIG_FILE")
   fi
+  [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
   report="$(/usr/bin/python3 -I "$helper" "${arguments[@]}" --mode install --candidate-source "$STAGING_DIR/$MODULE" --temporary-directory "$INSTALL_TEMP_ROOT" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}")" || {
     log "$report"
-    log "This PBX does not meet the configured desktop/phone capacities or SLS free-space requirements. See $LOG_FILE."
+    log "This PBX does not meet the configured desktop/phone capacities or SLL free-space requirements. See $LOG_FILE."
     return 1
   }
+  validate_installer_memory_profile "$report" || return $?
   printf '%s\n' "$report" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}"
   if [ ! -e "$CONFIG_FILE" ]; then
     remember_fresh_phone_capacity "$report"
@@ -3648,7 +4264,7 @@ PHP
     log "Apache configuration validation failed before installation. See $LOG_FILE."
     exit 1
   }
-  log 'Apache configuration accepted. DocumentRoot warnings from other virtual hosts do not fail this check; the PBX and SLS routes are verified separately.'
+  log 'Apache configuration accepted. DocumentRoot warnings from other virtual hosts do not fail this check; the PBX and SLL routes are verified separately.'
   systemctl is-active --quiet apache2 || {
     log "Apache is not active."
     exit 1
@@ -3699,7 +4315,7 @@ PHP
 
 preflight_piper_platform() {
   [ -x /usr/bin/unshare ] && [ -x /usr/bin/mount ] || {
-    log 'Piper environment repair requires util-linux unshare and mount. Install that prerequisite before retrying; no SLS runtime was changed.'
+    log 'Piper environment repair requires util-linux unshare and mount. Install that prerequisite before retrying; no SLL runtime was changed.'
     return 1
   }
   /usr/bin/timeout 5 /usr/bin/unshare --mount --propagation private /usr/bin/mount --bind / / >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || {
@@ -3774,7 +4390,7 @@ validate_piper_wrapper_ownership() {
       /usr/local/bin/sls_mass_notify/piper/venv/bin/piper|/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/venv/bin/piper)
         if [ "$wrapper" = /usr/local/bin/piper ] \
           && [ "$(stat -c '%u:%g:%h' -- "$wrapper" 2>/dev/null || true)" != "0:0:1" ]; then
-          log "$wrapper has unsafe ownership or link metadata. SLS Mass Notify did not replace it."
+          log "$wrapper has unsafe ownership or link metadata. SLL Mass Notify Server did not replace it."
           return 1
         fi
         return 0
@@ -3786,16 +4402,16 @@ validate_piper_wrapper_ownership() {
     [[ "$wrapper_uid" =~ ^[0-9]+$ && "$wrapper_gid" =~ ^[0-9]+$ \
       && "$wrapper_links" = 1 && "$wrapper_size" =~ ^[0-9]+$ \
       && "$wrapper_size" -le 16384 && "$wrapper_mode" =~ ^[0-7]{3,4}$ ]] || {
-      log "$wrapper has unsafe ownership, link count, size, or permissions. SLS Mass Notify did not replace it."
+      log "$wrapper has unsafe ownership, link count, size, or permissions. SLL Mass Notify Server did not replace it."
       return 1
     }
     wrapper_permissions=$((8#$wrapper_mode))
     if (( (wrapper_permissions & 07022) != 0 )); then
-      log "$wrapper has unsafe permissions. SLS Mass Notify did not replace it."
+      log "$wrapper has unsafe permissions. SLL Mass Notify Server did not replace it."
       return 1
     fi
     if [ "$wrapper" = /usr/local/bin/piper ] && { [ "$wrapper_uid" -ne 0 ] || [ "$wrapper_gid" -ne 0 ]; }; then
-      log "$wrapper is not owned by root:root. SLS Mass Notify did not replace it."
+      log "$wrapper is not owned by root:root. SLL Mass Notify Server did not replace it."
       return 1
     fi
     wrapper_hash="$(/usr/bin/sha256sum -- "$wrapper" 2>/dev/null || true)"
@@ -3806,8 +4422,8 @@ validate_piper_wrapper_ownership() {
         ;;
     esac
   fi
-  log "$wrapper already belongs to another application. SLS Mass Notify did not overwrite it."
-  log "Move or rename that wrapper explicitly, then rerun the installer if SLS should own the compatibility path."
+  log "$wrapper already belongs to another application. SLL Mass Notify Server did not overwrite it."
+  log "Move or rename that wrapper explicitly, then rerun the installer if SLL should own the compatibility path."
   return 1
 }
 
@@ -3879,7 +4495,7 @@ install_dependencies() {
     [ -x /usr/sbin/logrotate ] || add_missing_package logrotate
     [ -x /usr/bin/python3 ] || add_missing_package python3
     if [ -x /usr/bin/python3 ]; then
-      /usr/bin/python3 -I -c 'import venv' >/dev/null 2>&1 || add_missing_package python3-venv
+      /usr/bin/python3 -I -c 'import ensurepip, venv; ensurepip.version()' >/dev/null 2>&1 || add_missing_package python3-venv
       /usr/bin/python3 -I -m pip --version >/dev/null 2>&1 || add_missing_package python3-pip
     else
       add_missing_package python3-venv
@@ -3948,6 +4564,10 @@ install_dependencies() {
       exit 1
     }
   fi
+  /usr/bin/python3 -I -c 'import ensurepip, venv; ensurepip.version()' >/dev/null 2>&1 || {
+    log "Python virtual-environment bootstrap support is unavailable after dependency installation. Install the matching python3-venv package, then rerun the installer; no Piper environment was replaced."
+    exit 1
+  }
   [ -x /usr/bin/php ] || {
     log "The scheduling worker requires the canonical /usr/bin/php CLI executable. Install php-cli, then rerun the installer."
     exit 1
@@ -4018,10 +4638,10 @@ bootstrap_missing_dashboard() {
   [ ! -e /var/www/html/admin/modules/dashboard ] && [ ! -L /var/www/html/admin/modules/dashboard ] || return 0
   local version="${SLS_MASS_NOTIFY_BOOTSTRAP_DASHBOARD_VERSION:-}" evidence
   if [ -z "$version" ]; then
-    version="$(php -r '$bootstrap_settings=["freepbx_auth"=>false,"skip_astman"=>true]; require "/etc/freepbx.conf"; $modules=\module_functions::create()->getonlinexml("dashboard"); echo (string)($modules["dashboard"]["version"] ?? "");')" || return 1
+    version="$(php -r '$bootstrap_settings=["freepbx_auth"=>false,"skip_astman"=>true]; require "/etc/freepbx.conf"; $modules=\module_functions::create()->getonlinexml("dashboard"); echo (string)($modules["dashboard"]["version"] ?? ""); exit(0);')" || return 1
   fi
   [[ "$version" =~ ^17\.[0-9]+(\.[0-9]+){1,3}$ ]] || {
-    log 'Dashboard is absent and its stock version could not be discovered. Supply SLS_MASS_NOTIFY_BOOTSTRAP_DASHBOARD_VERSION=17.x.x and its independently signed upstream package; no SLS maintenance was changed.'
+    log 'Dashboard is absent and its stock version could not be discovered. Supply SLS_MASS_NOTIFY_BOOTSTRAP_DASHBOARD_VERSION=17.x.x and its independently signed upstream package; no SLL maintenance was changed.'
     return 1
   }
   evidence="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-stock-bootstrap.XXXXXX")" || return 1
@@ -4029,7 +4649,7 @@ bootstrap_missing_dashboard() {
   run_logged /usr/bin/python3 -I "$INSTALL_BOOTSTRAP_DIR/sls_upgrade_trust.py" --workspace "$evidence" --bootstrap-dashboard-version "$version" || return 1
   log "Installing independently authenticated stock Dashboard $version. Stock dependency evidence: $evidence"
   fwconsole ma --no-interaction --skipchown install dashboard || {
-    log 'The authenticated stock Dashboard was staged, but FreePBX could not register it. Preserve the stock bootstrap evidence; repair Dashboard through Module Admin before retrying. Existing SLS runtime and maintenance remain unchanged.'
+    log 'The authenticated stock Dashboard was staged, but FreePBX could not register it. Preserve the stock bootstrap evidence; repair Dashboard through Module Admin before retrying. Existing SLL runtime and maintenance remain unchanged.'
     return 1
   }
   fwconsole ma --no-interaction enable dashboard || return 1
@@ -4106,7 +4726,7 @@ if any(sapi=='apache2' for unused,sapi in profiles):
     match=re.search(r'^\s*(?:export\s+)?APACHE_RUN_USER\s*=\s*([A-Za-z0-9_\-]+|\'[A-Za-z0-9_\-]+\'|"[A-Za-z0-9_\-]+")\s*(?:#.*)?$',environment,re.M)
     for name in apache_users:
         if name=='${APACHE_RUN_USER}': name=match.group(1).strip('\'"') if match else ''
-        if uid(name)!=expected_uid: raise SystemExit('Apache mod_php must run as the asterisk service account. Review the Apache User directive/envvars; SLS will not change the global web-server user.')
+        if uid(name)!=expected_uid: raise SystemExit('Apache mod_php must run as the asterisk service account. Review the Apache User directive/envvars; SLL will not change the global web-server user.')
 required_functions={'exec','proc_open','posix_geteuid','posix_getpwnam','openssl_encrypt','openssl_decrypt','sodium_crypto_pwhash','sodium_crypto_pwhash_str','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt'}
 matched={socket:[] for socket in served_sockets}
 if served_sockets:
@@ -4146,7 +4766,7 @@ if served_sockets:
         result=subprocess.run([str(binary),'-n','-v'],capture_output=True,text=True,timeout=5)
         abi=re.match(r'^PHP (\d+\.\d+)\.\d+[^\n]*\(fpm-fcgi\)',result.stdout)
         if result.returncode or not abi or abi[1]!=version: raise SystemExit('The configured PHP-FPM pool and installed binary ABI disagree: '+listen)
-        if uid(pool.get('user','').strip())!=expected_uid: raise SystemExit('The PHP-FPM pool serving '+listen+' must run as asterisk. Configure this pool explicitly; SLS will not grant other web users access to PBX secrets.')
+        if uid(pool.get('user','').strip())!=expected_uid: raise SystemExit('The PHP-FPM pool serving '+listen+' must run as asterisk. Configure this pool explicitly; SLL will not grant other web users access to PBX secrets.')
         disabled=set(re.split(r'[,\s]+',pool.get('php_admin_value[disable_functions]','')+','+pool.get('php_value[disable_functions]','')))
         blocked=sorted(disabled & required_functions)
         if blocked: raise SystemExit('The PHP-FPM pool serving '+listen+' disables required functions: '+', '.join(blocked)+'. Review this pool before activation.')
@@ -4167,14 +4787,27 @@ verify_php_security_versions_before_mutation() {
   while IFS= read -r profile; do
     [ -n "$profile" ] || continue
     version="${profile%:*}"
-    [ -x "/usr/bin/php$version" ] || { log "PHP $version CLI is missing for the served handler. Install the matching trusted vendor package before retrying. No SLS workers were paused."; return 1; }
+    [ -x "/usr/bin/php$version" ] || { log "PHP $version CLI is missing for the served handler. Install the matching trusted vendor package before retrying. No SLL workers were paused."; return 1; }
     sls_as_asterisk "/usr/bin/php$version" -n -r '
 $policy=json_decode($argv[1],true,16,JSON_THROW_ON_ERROR);$branch=PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;$floor=$policy["branches"][$branch]??null;
 if (($policy["schema"]??null)!==1 || !is_string($floor) || !preg_match("/^[0-9]+\\.[0-9]+\\.[0-9]+$/D",$floor) || version_compare(PHP_VERSION,$floor,"<") || preg_match("/(?:dev|alpha|beta|rc)/i",PHP_VERSION)) {
- fwrite(STDERR,"PHP ".PHP_VERSION." does not meet the reviewed PHP security floor ".($floor??"(unqualified branch)").". Update the matching CLI and Apache/FPM packages through the trusted operating-system repository, then retry. No SLS workers were paused.".PHP_EOL);exit(1);
+ fwrite(STDERR,"PHP ".PHP_VERSION." does not meet the reviewed PHP security floor ".($floor??"(unqualified branch)").". Update the matching CLI and Apache/FPM packages through the trusted operating-system repository, then retry. No SLL workers were paused.".PHP_EOL);exit(1);
 }
 ' "$policy" || return 1
   done <<<"$SERVED_PHP_PROFILES"
+}
+
+verify_freepbx_web_response() {
+  local checker="$STAGING_DIR/$MODULE/bin/sls_mass_notify/sls_web_readiness.py"
+  [ -f "$checker" ] && [ ! -L "$checker" ] || {
+    log 'The authenticated FreePBX web-response checker is missing from the staged package.'
+    return 1
+  }
+  if ! /usr/bin/timeout --signal=TERM --kill-after=1 5 /usr/sbin/apache2ctl -t -D DUMP_VHOSTS 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" \
+    | /usr/bin/python3 -I "$checker" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
+    log 'The local FreePBX web response could not be verified. Check the served PHP/FPM handler and native vendor ionCube loader; an HTTP 200 error page does not establish readiness. No web credentials or response body were logged.'
+    return 1
+  fi
 }
 
 verify_served_php_configuration() {
@@ -4188,7 +4821,7 @@ $missing=[]; foreach (["pdo_sqlite","curl","dom","mbstring","posix","openssl","s
 if (PHP_VERSION_ID < 80200) $missing[]="php_8_2_or_newer";
 $securityFloors=["8.2"=>"8.2.35","8.3"=>"8.3.36","8.4"=>"8.4.27","8.5"=>"8.5.12"];
 $branch=PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;
-if (!isset($securityFloors[$branch]) || version_compare(PHP_VERSION,$securityFloors[$branch],"<")) { fwrite(STDERR,"PHP ".PHP_VERSION." does not meet the reviewed security policy. Update this PHP branch using its trusted vendor packages, then retry. Unknown backports need independent vendor review; SLS does not change the PHP branch.".PHP_EOL); exit(1); }
+if (!isset($securityFloors[$branch]) || version_compare(PHP_VERSION,$securityFloors[$branch],"<")) { fwrite(STDERR,"PHP ".PHP_VERSION." does not meet the reviewed security policy. Update this PHP branch using its trusted vendor packages, then retry. Unknown backports need independent vendor review; SLL does not change the PHP branch.".PHP_EOL); exit(1); }
 foreach (["exec","proc_open","posix_geteuid","posix_getpwnam","openssl_encrypt","openssl_decrypt","sodium_crypto_pwhash","sodium_crypto_aead_xchacha20poly1305_ietf_encrypt"] as $function) { if (!function_exists($function)) $missing[]=$function."_enabled"; }
 if ($missing) { fwrite(STDERR,"Served PHP configuration missing: ".implode(", ",$missing).PHP_EOL); exit(1); }
 ' || { log "Review the named PHP $version/$sapi security or extension prerequisite; update this handler through trusted vendor packages. No module activation has started."; return 1; }
@@ -4211,7 +4844,7 @@ refresh_served_php_workers() {
   done <<<"$SERVED_PHP_PROFILES"
   for unit in "${!units[@]}"; do
     /usr/bin/timeout --signal=TERM --kill-after=5 25 /usr/bin/systemctl reload "$unit" || {
-      log "The qualified PHP-FPM service $unit could not reload. Review its service journal; old cached PHP may still be served. SLS will not restart Asterisk or change PHP settings."
+      log "The qualified PHP-FPM service $unit could not reload. Review its service journal; old cached PHP may still be served. SLL will not restart Asterisk or change PHP settings."
       return 1
     }
   done
@@ -4257,7 +4890,7 @@ class ReleaseRedirects(urllib.request.HTTPRedirectHandler):
         return redirected
 
 request = urllib.request.Request(url, headers={
-    'User-Agent': 'SLS-Mass-Notify-Installer', 'Accept': 'application/octet-stream',
+    'User-Agent': 'SLL-Mass-Notify-Installer', 'Accept': 'application/octet-stream',
     'Accept-Encoding': 'identity',
 })
 if token:
@@ -4379,8 +5012,8 @@ verify_tgz() {
       log 'The release archive does not match the explicitly trusted SLS_MASS_NOTIFY_SHA256.'
       return 1
     fi
-  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.8-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
-    log "$TGZ does not match the current slsmassnotifyserver-0.1.8-beta package."
+  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.9-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
+    log "$TGZ does not match the current slsmassnotifyserver-0.1.9-beta package."
     log "Expected SHA256: $EXPECTED_TGZ_SHA256"
     log "Actual SHA256:   $actual_sha"
     log "Remove the stale local TGZ or install with SLS_MASS_NOTIFY_TGZ_URL so the current release is downloaded."
@@ -4449,8 +5082,8 @@ with tarfile.open(archive, "r:gz") as handle:
     version = root.findall("version")
     if len(rawname) != 1 or (rawname[0].text or "").strip() != module:
         raise SystemExit("module.xml rawname does not match the requested module")
-    if len(version) != 1 or (version[0].text or "").strip() != "0.1.8-beta":
-        raise SystemExit("module.xml does not contain the expected 0.1.8-beta version")
+    if len(version) != 1 or (version[0].text or "").strip() != "0.1.9-beta":
+        raise SystemExit("module.xml does not contain the expected 0.1.9-beta version")
 PY
 }
 
@@ -4480,7 +5113,7 @@ url = os.environ['SLS_RELEASE_URL']
 match = re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/slsmassnotifyserver-([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(slsmassnotifyserver-\1\.tgz)', url)
 if url and not match:
     raise SystemExit('Use a signed GitHub release URL or a signed offline package.')
-version, package = match.groups() if match else ('0.1.8-beta', 'slsmassnotifyserver-0.1.8-beta.tgz')
+version, package = match.groups() if match else ('0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz')
 public_key = b'-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=\n-----END PUBLIC KEY-----\n'
 try:
     with tempfile.TemporaryDirectory(prefix='sls-release-verification-') as directory:
@@ -4907,14 +5540,17 @@ initialize_fresh_install_config() {
     return 1
   }
   local initialization_result
-  initialization_result="$(SLS_INIT_PHONE_CAPACITY="$FRESH_PHONE_CAPACITY" php -r '
+  initialization_result="$(SLS_INIT_PHONE_CAPACITY="$FRESH_PHONE_CAPACITY" SLS_INIT_DEPLOYMENT_PROFILE="$FRESH_DEPLOYMENT_PROFILE" php -r '
 require "/etc/freepbx.conf";
 require_once "/var/www/html/admin/modules/slsmassnotifyserver/Slsmassnotifyserver.class.php";
 $class = "\\FreePBX\\modules\\Slsmassnotifyserver";
 $obj = new $class(\FreePBX::Create());
 $capacity = getenv("SLS_INIT_PHONE_CAPACITY");
+$profile = getenv("SLS_INIT_DEPLOYMENT_PROFILE");
 if (!preg_match("/^[0-9]{1,4}$/D", (string)$capacity) || (int)$capacity < 25 || (int)$capacity > 1000) { exit(1); }
-echo $obj->initializeFreshInstallerConfiguration((int)$capacity) ? "created" : "existing";
+if (!in_array($profile, ["standard", "lite"], true)) { exit(1); }
+echo $obj->initializeFreshInstallerConfiguration((int)$capacity, $profile) ? "created" : "existing";
+exit(0);
 ')" || return 1
   case "$initialization_result" in
     created) FRESH_CONFIG_INITIALIZED=1 ;;
@@ -4941,6 +5577,145 @@ snapshot_config() {
     log "Refusing to install because the protected central configuration could not be opened safely without following symbolic links."
     exit 1
   fi
+  CONFIG_HASH_EXPECTED="$CONFIG_HASH_BEFORE"
+}
+
+apply_requested_deployment_profile() {
+  [ -n "$REQUESTED_DEPLOYMENT_PROFILE" ] || return 0
+  [ -n "$CONFIG_HASH_BEFORE" ] || return 0
+  local result account_uid account_gid
+  account_uid="$(id -u asterisk)" || return 1
+  account_gid="$(id -g asterisk)" || return 1
+  if ! result="$(/usr/bin/python3 -I - "$INSTALL_BOOTSTRAP_DIR/sls_config_crypto.py" "$CONFIG_FILE" \
+      "$REQUESTED_DEPLOYMENT_PROFILE" "$PENDING_CONFIG_STATE" "$account_uid" "$account_gid" \
+      "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" <<'PYPROFILE'
+import pathlib, sys, types
+helper, config = map(pathlib.Path, sys.argv[1:3])
+requested, pending, uid, gid = sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
+try:
+    module = types.ModuleType('sls_profile_config_crypto'); module.__file__ = str(helper)
+    exec(compile(helper.read_bytes(), str(helper), 'exec'), module.__dict__)
+    original = module._read_protected(config, module.MAX_FILE_BYTES)
+    settings = module.decode_config(original)
+    if not isinstance(settings, dict): raise ValueError('invalid settings object')
+    current = settings.get('deployment_profile', 'standard')
+    if current not in ('standard', 'lite') or requested not in ('standard', 'lite'):
+        raise ValueError('invalid deployment profile')
+    if current == requested:
+        print('unchanged:' + current)
+        raise SystemExit(0)
+    if pending == 'present':
+        raise ValueError('pending settings exist')
+    if requested == 'lite':
+        if any(isinstance(settings.get(key), dict) and settings[key].get('enabled') in (True, '1', 1)
+               for key in ('enterprise_labs', 'enterprise_identity')):
+            raise SystemExit('Disable Enterprise Labs and enterprise SSO before converting to Lite. Saved Enterprise configuration is retained; active Enterprise policy is never silently removed.')
+        desktops = settings.get('desktop_client_limit', 25)
+        phones = settings.get('phone_device_limit', 25)
+        if type(desktops) is not int or type(phones) is not int or desktops > 25 or phones > 25:
+            raise ValueError('capacities exceed Lite limits')
+        settings['speech_synthesis_limit'] = 1
+        settings['speech_queue_limit'] = min(settings.get('speech_queue_limit', 8), 2)
+    if current == 'lite' and requested == 'standard':
+        for key in ('enterprise_labs', 'enterprise_identity'):
+            if key in settings:
+                settings[key]['enabled'] = False
+    settings['deployment_profile'] = requested
+    encoded = module.encode_config(settings)
+    transaction = types.ModuleType('sll_profile_write_intent'); transaction.__file__ = sys.argv[7]
+    exec(compile(pathlib.Path(sys.argv[7]).read_bytes(), sys.argv[7], 'exec'), transaction.__dict__)
+    transaction.record_configuration_intent(sys.argv[8], sys.argv[9], original, encoded)
+    module._atomic_write(config, encoded, uid, gid)
+    if module.read_config(config) != settings:
+        raise ValueError('profile write verification failed')
+    print('changed:' + requested)
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit('The deployment profile could not be changed safely. Resolve pending settings, protected configuration damage, or capacities above the Lite limit before retrying.') from None
+PYPROFILE
+  )"; then
+    log 'The requested deployment profile could not be applied; the original configuration will be restored.'
+    return 1
+  fi
+  case "$result" in
+    "unchanged:$REQUESTED_DEPLOYMENT_PROFILE")
+      CONFIG_HASH_EXPECTED="$CONFIG_HASH_BEFORE"
+      log "Deployment profile already uses ${REQUESTED_DEPLOYMENT_PROFILE^} mode."
+      ;;
+    "changed:$REQUESTED_DEPLOYMENT_PROFILE")
+      CONFIG_EXPECTED_SNAPSHOT="$(mktemp "$INSTALL_TEMP_ROOT/slsmassnotifyserver-config-expected.XXXXXX")" || return 1
+      CONFIG_HASH_EXPECTED="$(safe_config_snapshot "$CONFIG_FILE" "$CONFIG_EXPECTED_SNAPSHOT")" || {
+        log 'The changed deployment profile could not be snapshotted safely; the original configuration will be restored.'
+        return 1
+      }
+      log "Deployment profile changed transactionally to ${REQUESTED_DEPLOYMENT_PROFILE^} mode; a failed installation will restore the original settings."
+      ;;
+    *)
+      log 'The deployment profile helper returned an invalid result; the original configuration will be restored.'
+      return 1
+      ;;
+  esac
+}
+
+apply_factory_branding_defaults() {
+  [ -n "$CONFIG_HASH_BEFORE" ] || return 0
+  if [ "$PENDING_CONFIG_STATE" = present ]; then
+    log 'Saved factory branding was preserved because staged settings exist. Review those settings before applying them.'
+    return 0
+  fi
+  local result account_uid account_gid
+  account_uid="$(id -u asterisk)" || return 1
+  account_gid="$(id -g asterisk)" || return 1
+  result="$(/usr/bin/python3 -I - "$INSTALL_BOOTSTRAP_DIR/sls_config_crypto.py" "$CONFIG_FILE" "$account_uid" "$account_gid" \
+      "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" <<'PYBRANDING'
+import pathlib, sys, types
+helper, path = map(pathlib.Path, sys.argv[1:3])
+uid, gid = map(int, sys.argv[3:5])
+module = types.ModuleType('sll_branding_config_crypto'); module.__file__ = str(helper)
+exec(compile(helper.read_bytes(), str(helper), 'exec'), module.__dict__)
+original = module._read_protected(path, module.MAX_FILE_BYTES)
+settings = module.decode_config(original)
+if not isinstance(settings, dict): raise SystemExit('Factory branding requires valid protected configuration.')
+replacements = {
+    'mail_from_name': {'SLS Mass Notification System': 'SLL Mass Notify Server',
+                       'SLS Mass Notify System': 'SLL Mass Notify Server'},
+    'alert_email_subject': {'Southland Servers Group PBX: EAS alert triggered - {{event}}':
+                            'Southland Labs PBX: EAS alert triggered - {{event}}'},
+    'test_email_subject': {'Southland Servers Mass Notifications Server: NWS test triggered':
+                           'SLL Mass Notify Server: NWS test triggered',
+                          'Southland Servers Group PBX: NWS test triggered':
+                           'Southland Labs PBX: NWS test triggered'},
+}
+changed = False
+for field, mapping in replacements.items():
+    value = settings.get(field)
+    if isinstance(value, str) and value in mapping:
+        settings[field] = mapping[value]
+        changed = True
+if not changed:
+    print('unchanged')
+else:
+    encoded = module.encode_config(settings)
+    transaction = types.ModuleType('sll_branding_write_intent'); transaction.__file__ = sys.argv[5]
+    exec(compile(pathlib.Path(sys.argv[5]).read_bytes(), sys.argv[5], 'exec'), transaction.__dict__)
+    transaction.record_configuration_intent(sys.argv[6], sys.argv[7], original, encoded)
+    module._atomic_write(path, encoded, uid, gid)
+    if module.read_config(path) != settings: raise SystemExit('Factory branding write verification failed.')
+    print('changed')
+PYBRANDING
+  )" || return 1
+  case "$result" in
+    unchanged) return 0 ;;
+    changed)
+      if [ -z "$CONFIG_EXPECTED_SNAPSHOT" ]; then
+        CONFIG_EXPECTED_SNAPSHOT="$(mktemp "$INSTALL_TEMP_ROOT/slsmassnotifyserver-config-expected.XXXXXX")" || return 1
+      fi
+      CONFIG_HASH_EXPECTED="$(safe_config_snapshot "$CONFIG_FILE" "$CONFIG_EXPECTED_SNAPSHOT")" || return 1
+      log 'Factory sender and subject labels migrated to Southland Labs transactionally; custom settings were preserved.'
+      ;;
+    *) log 'Factory branding migration returned an invalid result.'; return 1 ;;
+  esac
 }
 
 validate_preserved_config_prerequisites() {
@@ -5035,15 +5810,18 @@ PY
 
 verify_config_unchanged() {
   [ -n "$CONFIG_HASH_BEFORE" ] || return 0
+  local expected_hash expected_snapshot
+  expected_hash="${CONFIG_HASH_EXPECTED:-$CONFIG_HASH_BEFORE}"
+  expected_snapshot="${CONFIG_EXPECTED_SNAPSHOT:-$CONFIG_SNAPSHOT}"
   current_hash="$(safe_config_hash "$CONFIG_FILE" 2>/dev/null || true)"
-  if [ "$current_hash" = "$CONFIG_HASH_BEFORE" ]; then
+  if [ "$current_hash" = "$expected_hash" ]; then
     # Later postconditions can still fail. Retire this snapshot only after the
     # transaction's commit or verified rollback has been recorded durably.
     return 0
   fi
   current_snapshot="$(mktemp "$INSTALL_TEMP_ROOT/slsmassnotifyserver-config-current.XXXXXX")"
   if safe_config_snapshot "$CONFIG_FILE" "$current_snapshot" >/dev/null 2>&1; then
-    describe_config_drift "$CONFIG_SNAPSHOT" "$current_snapshot"
+    describe_config_drift "$expected_snapshot" "$current_snapshot"
   else
     log "Config drift: the live protected path became missing, non-regular, or unsafe."
   fi
@@ -5123,13 +5901,13 @@ stage_module_directory() {
     if grep -Eq "\\|[[:space:]]*${MODULE}[[:space:]]*\\|" <<<"$module_list"; then HAD_EXISTING_MODULE=1; fi
   fi
   if [ "$HAD_EXISTING_MODULE" -eq 1 ]; then
-    [ -e "$CONFIG_FILE" ] || { log "An existing SLS module is missing its protected configuration. Restore a configuration backup before upgrading."; return 1; }
+    [ -e "$CONFIG_FILE" ] || { log "An existing SLL module is missing its protected configuration. Restore a configuration backup before upgrading."; return 1; }
     if [ "${SLS_MASS_NOTIFY_INVENTORY_ONLY:-0}" != 1 ]; then
       if grep -Eq "\\|[[:space:]]*${MODULE}[[:space:]]*\\|[^|]*\\|[[:space:]]*Enabled[[:space:]]*\\|" <<<"$module_list"; then
         MODULE_WAS_ENABLED=1
       fi
     fi
-    log "Existing SLS Mass Notify module detected; preserving config and preparing a recoverable upgrade."
+    log "Existing SLL Mass Notify Server module detected; preserving config and preparing a recoverable upgrade."
   fi
   STAGING_DIR="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-mass-notify-stage.XXXXXX")"
   tar -xzf "$TGZ" -C "$STAGING_DIR"
@@ -5152,8 +5930,68 @@ stage_module_directory() {
   done < <(find "$STAGING_DIR/$MODULE" -type f -name '*.py' -print)
 }
 
+create_module_recovery_directory() {
+  /usr/bin/python3 -I - <<'PYMODULEBACKUP'
+import os, pwd, stat
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+account = pwd.getpwnam('asterisk')
+if account.pw_uid == 0: raise RuntimeError('Asterisk UID must be nonzero')
+public = '/var/www/html/admin/modules'
+parent = os.open('/', flags)
+anchor = -1
+try:
+    for part in public.split('/')[1:]:
+        child = os.open(part, flags, dir_fd=parent)
+        os.close(parent); parent = child
+    info = os.fstat(parent)
+    if (info.st_uid not in (0, account.pw_uid) or info.st_gid not in (0, account.pw_gid)
+            or info.st_mode & 0o4002):
+        raise RuntimeError('Unsafe public module directory')
+    name = '.sls-mass-notify-recovery'
+    try: os.mkdir(name, 0o700, dir_fd=parent)
+    except FileExistsError: pass
+    anchor = os.open(name, flags, dir_fd=parent)
+    opened = os.fstat(anchor)
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    def mount_id(fd):
+        with open('/proc/self/fdinfo/' + str(fd), encoding='ascii') as source:
+            for line in source:
+                if line.startswith('mnt_id:'): return int(line.split(':', 1)[1])
+        raise RuntimeError('Module backup mount identity is unavailable')
+    if ((opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or opened.st_dev != info.st_dev or mount_id(anchor) != mount_id(parent)):
+        raise RuntimeError('Unsafe module recovery anchor; preserve it for review')
+    if (opened.st_uid, opened.st_gid, stat.S_IMODE(opened.st_mode)) != (0, 0, 0o700):
+        # mkdir inherits a setgid parent. Only an empty, root-created private
+        # inode can finish that interrupted initialization; existing contents
+        # or service ownership never become trusted through normalization.
+        if (opened.st_uid != 0 or opened.st_gid not in (0, account.pw_gid)
+                or stat.S_IMODE(opened.st_mode) not in (0o700, 0o2700) or os.listdir(anchor)):
+            raise RuntimeError('Unsafe module recovery anchor; preserve it for review')
+        os.fchown(anchor, 0, 0); os.fchmod(anchor, 0o700)
+        os.fsync(anchor)
+    child_name = 'transaction.' + os.urandom(12).hex()
+    os.mkdir(child_name, 0o700, dir_fd=anchor)
+    child = os.open(child_name, flags, dir_fd=anchor)
+    try:
+        current = os.fstat(child)
+        if current.st_uid != 0 or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o700:
+            raise RuntimeError('New module recovery directory changed during creation')
+        os.fsync(child)
+    finally: os.close(child)
+    os.fsync(anchor); os.fsync(parent)
+    if (os.stat(name, dir_fd=parent, follow_symlinks=False).st_dev,
+            os.stat(name, dir_fd=parent, follow_symlinks=False).st_ino) != (opened.st_dev, opened.st_ino):
+        raise RuntimeError('Module recovery anchor changed during creation')
+    print(public + '/.sls-mass-notify-recovery/' + child_name)
+finally:
+    if anchor >= 0: os.close(anchor)
+    os.close(parent)
+PYMODULEBACKUP
+}
+
 activate_staged_module() {
-  MODULE_BACKUP_DIR="$(mktemp -d '/var/www/html/admin/modules/.sls-mass-notify-recovery.XXXXXX')" || return 1
+  MODULE_BACKUP_DIR="$(create_module_recovery_directory)" || return 1
   persist_install_transaction mutating || return 1
   # Activate by descriptor-relative renames: a replaced public pathname must
   # never redirect privileged copying or ownership changes to another tree.
@@ -5286,12 +6124,12 @@ $module = getenv("SLS_MASS_NOTIFY_MODULE") ?: "slsmassnotifyserver";
 $stmt = \FreePBX::Database()->prepare("SELECT version FROM modules WHERE modulename = ? LIMIT 1");
 $stmt->execute([$module]);
 $version = $stmt->fetchColumn();
-exit(is_string($version) && trim($version) === "0.1.8-beta" ? 0 : 1);
+exit(is_string($version) && trim($version) === "0.1.9-beta" ? 0 : 1);
 ' >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
 }
 
 refresh_module_install() {
-  log "Refreshing SLS Mass Notify runtime integration."
+  log "Refreshing SLL Mass Notify Server runtime integration."
   if ! SLS_MASS_NOTIFY_DEFER_SIGNING=1 php -r 'require "/etc/freepbx.conf"; require_once "/var/www/html/admin/modules/slsmassnotifyserver/Slsmassnotifyserver.class.php"; $class = "\\FreePBX\\modules\\Slsmassnotifyserver"; $obj = new $class(\FreePBX::Create()); $obj->install(); exit(0);' >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
     log "Direct runtime refresh failed. See $LOG_FILE."
     return 1
@@ -5449,7 +6287,7 @@ EOF
   for model in en_US-lessac-low.onnx en_US-amy-low.onnx en_US-ryan-low.onnx; do
     synthesis_file="$DATA_DIR/sounds/tts/installer-voice-check-${model%.onnx}-$$.wav"
     rm -f "$synthesis_file"
-    if ! printf '%s\n' 'SLS voice check.' | /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- /usr/bin/timeout 90 /usr/local/bin/piper \
+    if ! printf '%s\n' 'SLL voice check.' | /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- /usr/bin/timeout 90 /usr/local/bin/piper \
       --model "$voice_dir/$model" --output-file "$synthesis_file" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
       rm -f "$synthesis_file"
       log "Piper could not synthesize audio with $model. See $LOG_FILE."
@@ -5544,12 +6382,12 @@ verify_ami_with_repair() (
       fi
     fi
     cat "$probe_dir/health.err" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>/dev/null || true
-    log "SLS AMI health check attempt $attempt failed; rebuilding the loopback manager integration."
+    log "SLL AMI health check attempt $attempt failed; rebuilding the loopback manager integration."
     refresh_module_install >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
     asterisk -rx "manager reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
     sleep 2
   done
-  log "SLS AMI authentication, contact/NOTIFY discovery, or caller-ready paging authorization failed after automatic repair. See $LOG_FILE."
+  log "SLL AMI authentication, contact/NOTIFY discovery, or caller-ready paging authorization failed after automatic repair. See $LOG_FILE."
   return 1
 )
 
@@ -5566,7 +6404,7 @@ if not isinstance(result, dict) or result.get("ok") is not True:
     raise SystemExit("Phone runtime probe failed; review the collector service and local AMI permissions.")
 if kind == "ami":
     if result.get("ping") is not True or result.get("show_dialplan") is not True:
-        raise SystemExit("AMI Ping/ShowDialPlan authorization was not confirmed; the SLS account requires reporting permission.")
+        raise SystemExit("AMI Ping/ShowDialPlan authorization was not confirmed; the SLL account requires reporting permission.")
 elif kind == "health":
     age = result.get("heartbeat_age_seconds")
     if (result.get("connected") is not True or type(age) not in (int, float)
@@ -5579,18 +6417,28 @@ PY
 }
 
 verify_phone_collector() (
-  local probe_dir attempt
-  systemctl is-enabled --quiet sls-mass-notify-phone-events.service && \
-    systemctl is-active --quiet sls-mass-notify-phone-events.service || {
+  local probe_dir attempt service_ready=0
+  systemctl is-enabled --quiet sls-mass-notify-phone-events.service || {
       log "The phone outcome collector must be enabled and active. Review systemctl status sls-mass-notify-phone-events.service, then run Repair Installation."
       return 1
     }
+  # A fresh Manager::add_manager account becomes usable only after FreePBX
+  # generates manager_additional.conf. Allow the existing systemd restart
+  # delay to finish; never start a disabled unit or accept status alone.
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if systemctl is-active --quiet sls-mass-notify-phone-events.service; then service_ready=1; break; fi
+    [ "$attempt" -eq 10 ] || sleep 2
+  done
+  [ "$service_ready" -eq 1 ] || {
+    log "The phone outcome collector did not become active within its bounded startup wait. Review its service journal, then run Repair Installation."
+    return 1
+  }
   probe_dir="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-phone-collector-check.XXXXXX")" || return 1
   trap 'rm -f -- "$probe_dir/ami.json" "$probe_dir/health.json"; rmdir -- "$probe_dir" 2>/dev/null || true' EXIT
   if ! /usr/bin/timeout --kill-after=1 15 /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- /usr/bin/python3 -I \
       /usr/local/bin/sls_mass_notify/sls_phone_admission.py --probe-ami >"$probe_dir/ami.json" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" \
     || ! validate_phone_collector_probe_file ami "$probe_dir/ami.json" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
-    log "The SLS phone runtime could not confirm AMI Ping and ShowDialPlan reporting authorization. Review the local AMI connection and run Repair Installation."
+    log "The SLL phone runtime could not confirm AMI Ping and ShowDialPlan reporting authorization. Review the local AMI connection and run Repair Installation."
     return 1
   fi
   for attempt in 1 2 3; do
@@ -5649,12 +6497,12 @@ try:
     assert result.get('probe') == 'sls_served_php_v1'
     assert isinstance(result.get('missing'), list)
 except (OSError, ValueError, AssertionError):
-    raise SystemExit('The served PHP runtime probe did not reach SLS. Check the local virtual host, API route and PHP handler; CLI PHP alone is insufficient.')
+    raise SystemExit('The served PHP runtime probe did not reach SLL. Check the local virtual host, API route and PHP handler; CLI PHP alone is insufficient.')
 if result.get('ok') is not True or sys.argv[2] != '200':
     missing = [name for name in result['missing'] if name in ('pdo_sqlite','curl','dom','mbstring','posix','openssl','sodium','php_8_2_or_newer','php_security_floor','exec_enabled','proc_open_enabled','posix_geteuid_enabled','posix_getpwnam_enabled','openssl_encrypt_enabled','openssl_decrypt_enabled','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt_enabled','sodium_crypto_pwhash_str_enabled','web_runtime_must_run_as_asterisk')]
     raise SystemExit('The PHP runtime serving Apache is missing: ' + ', '.join(missing) + '. Enable these for the active Apache/FPM PHP version and retry; installing CLI extensions alone does not repair another PHP handler.')
-if result.get('module_version') != '0.1.8-beta':
-    raise SystemExit('The web PHP handler is still serving another SLS release. Review Apache/PHP-FPM reload errors and draining requests, then retry; a CLI file check cannot verify cached web code.')
+if result.get('module_version') != '0.1.9-beta':
+    raise SystemExit('The web PHP handler is still serving another SLL release. Review Apache/PHP-FPM reload errors and draining requests, then retry; a CLI file check cannot verify cached web code.')
 print('Served PHP prerequisites verified through the local API route.')
 PY
 )
@@ -5792,7 +6640,7 @@ console_source = module / "bin" / "slsconsole"
 console_target = pathlib.Path("/usr/local/bin/slsconsole")
 console_info = console_target.lstat()
 if not stat.S_ISREG(console_info.st_mode) or console_info.st_uid != 0 or console_info.st_nlink != 1 or stat.S_IMODE(console_info.st_mode) != 0o755 or not filecmp.cmp(console_source, console_target, shallow=False):
-    raise SystemExit("SLS console differs from its protected packaged source")
+    raise SystemExit("SLL console differs from its protected packaged source")
 PY
 }
 
@@ -5908,7 +6756,7 @@ exit(1);
     log "Desktop JSON polling authentication and live cursor baseline verified (stream capacity policy)."
     return 0
   fi
-  log "Desktop authenticated transport verification failed on the detected local Apache ports. Check virtual-host routing, Authorization-header forwarding, stream/polling policy, and $LOG_FILE."
+  log "Desktop authenticated transport verification failed on the detected local Apache ports. On a custom port, the configured public PBX hostname must match that virtual host's ServerName or ServerAlias. Check that binding, Authorization-header forwarding, stream/polling policy, and $LOG_FILE."
   return 1
 }
 
@@ -5988,7 +6836,7 @@ exit($lastError === "unauthorized" ? 2 : 1);
 
 verify_fresh_install_defaults() {
   [ -z "$CONFIG_HASH_BEFORE" ] || [ "$FRESH_CONFIG_INITIALIZED" -eq 1 ] || return 0
-  CONFIG_PATH="$CONFIG_FILE" SLS_INIT_PHONE_CAPACITY="$FRESH_PHONE_CAPACITY" php -r '
+  CONFIG_PATH="$CONFIG_FILE" SLS_INIT_PHONE_CAPACITY="$FRESH_PHONE_CAPACITY" SLS_INIT_DEPLOYMENT_PROFILE="$FRESH_DEPLOYMENT_PROFILE" php -r '
 require_once "/usr/local/bin/sls_mass_notify/sls_config_crypto.php";
 $settings = \FreePBX\modules\SlsConfigCrypto::decode((string)file_get_contents(getenv("CONFIG_PATH")));
 if (!is_array($settings)) {
@@ -6001,11 +6849,14 @@ $ami = is_array($settings["ami"] ?? null) ? $settings["ami"] : [];
 $checks = [
     (int)($settings["phone_device_limit"] ?? 0) === (int)getenv("SLS_INIT_PHONE_CAPACITY"),
     (int)($settings["desktop_client_limit"] ?? 0) === 25,
+    (string)($settings["deployment_profile"] ?? "") === (string)getenv("SLS_INIT_DEPLOYMENT_PROFILE"),
+    (int)($settings["speech_synthesis_limit"] ?? 0) === 1,
+    (string)getenv("SLS_INIT_DEPLOYMENT_PROFILE") !== "lite" || (int)($settings["speech_queue_limit"] ?? 0) <= 2,
     (string)($settings["enabled"] ?? "") === "0",
     (string)($setup["completed"] ?? "") === "0",
     (string)($setup["beta_accepted"] ?? "") === "0",
     (string)($lightning["enabled"] ?? "") === "0",
-    (int)($lightning["query_interval_minutes"] ?? 0) === 5,
+    (int)($lightning["query_interval_minutes"] ?? 0) === 4,
     (string)($lightning["adaptive_free_tier"] ?? "") === "1",
     (int)($lightning["adaptive_grace_minutes"] ?? 0) === 60,
     (string)($lightning["quiet_hours_enabled"] ?? "") === "0",
@@ -6118,7 +6969,7 @@ verify_install_cron() {
         *'/usr/local/bin/sls_mass_notify/'*|*'sls_mass_notify_'*'.sh'*|*'sls_mass_notify_'*'.php'*|*'sls_cron_runner.py'*|*'nws_weather_alert.sh'*|*'nwsalerts_ensure_menu_patch.sh'*)
           case "$role:$line" in
             "root:* * * * * $runner maintenance >/dev/null 2>&1"|"root:17 * * * * $runner update >/dev/null 2>&1"|"asterisk:* * * * * $runner weather >/dev/null 2>&1"|"asterisk:* * * * * $runner scheduling >/dev/null 2>&1"|"asterisk:* * * * * $runner announcement_reconcile >/dev/null 2>&1") ;;
-            *) log "A legacy, duplicate variant, or unsafe SLS cron entry remains in the $role crontab."; return 1 ;;
+            *) log "A legacy, duplicate variant, or unsafe SLL cron entry remains in the $role crontab."; return 1 ;;
           esac
           ;;
       esac
@@ -6145,7 +6996,7 @@ verify_install() {
   module_list="$(fwconsole ma list)"
   printf '%s\n' "$module_list" | grep -Ei 'slsmassnotifyserver|dashboard|framework|Module'
   grep -Eq '\|[[:space:]]*slsmassnotifyserver[[:space:]]*\|[^|]*\|[[:space:]]*Enabled[[:space:]]*\|' <<<"$module_list" || {
-    log "The SLS Mass Notify module is not enabled after installation."
+    log "The SLL Mass Notify Server module is not enabled after installation."
     exit 1
   }
   for required_module in framework dashboard backup recordings; do
@@ -6195,20 +7046,20 @@ exit(0);
   audio_dialplan="$(asterisk -rx "dialplan show 1000@sls-alert-audio" 2>&1)"
   printf '%s\n' "$audio_dialplan"
   if ! printf '%s\n' "$audio_dialplan" | /usr/bin/python3 -I -c 'import sys; text=sys.stdin.read(); prefix="Page(${SLS_DIAL},b(sls-alert-autoanswer^s^1(${EXTEN}))A(${SLS_SAFE_SOUND})inq,"; sys.exit(0 if any(prefix+str(seconds)+")" in text for seconds in range(1,6)) else 1)'; then
-    log "The SLS audio paging context is missing its multi-contact Page/ConfBridge auto-answer and audio handler."
+    log "The SLL audio paging context is missing its multi-contact Page/ConfBridge auto-answer and audio handler."
     exit 1
   fi
   if grep -Fq 'Dial(${SLS_DIAL}' <<<"$audio_dialplan"; then
-    log "The SLS audio paging context still uses first-answer Dial semantics instead of multi-contact Page semantics."
+    log "The SLL audio paging context still uses first-answer Dial semantics instead of multi-contact Page semantics."
     exit 1
   fi
   if ! grep -Fq 'AGI(/usr/local/bin/sls_mass_notify/sls_mass_notify_phone_agi.py,origin)' <<<"$audio_dialplan" \
     || grep -Fq 'Set(SLS_DIAL=${PJSIP_DIAL_CONTACTS' <<<"$audio_dialplan"; then
-    log "The SLS audio context lacks frozen-contact admission or still resolves new contacts after admission."
+    log "The SLL audio context lacks frozen-contact admission or still resolves new contacts after admission."
     exit 1
   fi
   if grep -Eq 'macro-autoanswer|b\(autoanswer\^' <<<"$audio_dialplan"; then
-    log "The SLS audio paging context still depends on a FreePBX internal auto-answer context."
+    log "The SLL audio paging context still depends on a FreePBX internal auto-answer context."
     exit 1
   fi
   autoanswer_dialplan="$(asterisk -rx "dialplan show s@sls-alert-autoanswer" 2>&1)"
@@ -6222,27 +7073,27 @@ exit(0);
     exit 1
   fi
   grep -Fq 'AGI(/usr/local/bin/sls_mass_notify/sls_mass_notify_phone_agi.py,contact)' <<<"$autoanswer_dialplan" || {
-    log "The SLS auto-answer context lacks its exact-contact admission guard."
+    log "The SLL auto-answer context lacks its exact-contact admission guard."
     exit 1
   }
   grep -Fq 'PJSIP_HEADER(add,Alert-Info)' <<<"$autoanswer_dialplan" || {
-    log "The SLS PJSIP auto-answer header context is missing."
+    log "The SLL PJSIP auto-answer header context is missing."
     exit 1
   }
   grep -Fq 'PJSIP_HEADER(add,Call-Info)' <<<"$autoanswer_dialplan" || {
-    log "The SLS PJSIP Call-Info auto-answer header is missing."
+    log "The SLL PJSIP Call-Info auto-answer header is missing."
     exit 1
   }
   grep -Fq 'Set(SLS_AUTOANSWER_CONTACT=${CHANNEL(contact)})' <<<"$autoanswer_dialplan" || {
-    log "The SLS PJSIP auto-answer context is missing per-contact user-agent discovery."
+    log "The SLL PJSIP auto-answer context is missing per-contact user-agent discovery."
     exit 1
   }
   grep -Fq 'PJSIP_AOR(${SLS_AUTOANSWER_AOR},contact)' <<<"$autoanswer_dialplan" || {
-    log "The SLS PJSIP auto-answer context is missing its extension/AOR contact fallback."
+    log "The SLL PJSIP auto-answer context is missing its extension/AOR contact fallback."
     exit 1
   }
   grep -Fq '${SLS_AUTOANSWER_UA:0:7}"="yealink"]?Set(SLS_ALERT_INFO=Intercom)' <<<"$autoanswer_dialplan" || {
-    log "The SLS PJSIP auto-answer context is missing the Yealink Intercom Alert-Info policy."
+    log "The SLL PJSIP auto-answer context is missing the Yealink Intercom Alert-Info policy."
     exit 1
   }
   command -v runuser >/dev/null 2>&1 || {
@@ -6270,7 +7121,7 @@ exit(0);
     /var/lib/asterisk/sounds/SLS_Mass_Notifications_Plugin \
     /var/lib/asterisk/sounds/en/SLS_Mass_Notifications_Plugin; do
     if [ ! -L "$sound_link" ] || [ "$(readlink -f "$sound_link" 2>/dev/null || true)" != "$expected_sound_target" ]; then
-      log "$sound_link does not resolve to the protected SLS sound directory."
+      log "$sound_link does not resolve to the protected SLL sound directory."
       exit 1
     fi
   done
@@ -6345,7 +7196,7 @@ exit(0);
     && grep -Fq '<Directory /var/www/html/api/sipnotify>' /etc/apache2/conf-available/sls-mass-notify.conf \
     && grep -Fq '<Directory /var/www/html/api/sls-mass-notify>' /etc/apache2/conf-available/sls-mass-notify.conf \
     && grep -Fq '<Directory /var/www/html/sls_mass_notify>' /etc/apache2/conf-available/sls-mass-notify.conf || {
-      log "The SLS Apache integration is missing or is not enabled."
+      log "The SLL Apache integration is missing or is not enabled."
       exit 1
     }
   notify_module_ready=0
@@ -6431,6 +7282,7 @@ exit(0);
     /usr/local/bin/sls_mass_notify/sls_release_verify.py
     /usr/local/bin/sls_mass_notify/sls_release_trust.py
     /usr/local/bin/sls_mass_notify/sls_install_doctor.py
+    /usr/local/bin/sls_mass_notify/sls_web_readiness.py
     /usr/local/bin/sls_mass_notify/sls_update_status.py
     /usr/local/bin/sls_mass_notify/sls_atomic_json.py
     /usr/local/bin/sls_mass_notify/sls_install_transaction.py
@@ -6479,7 +7331,7 @@ PY
   media_fetch="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-render-fetch.XXXXXX")"
   rm -f "$media_probe"
   if ! /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- convert -size 480x272 xc:'#991b1b' -font DejaVu-Sans-Bold \
-    -fill white -gravity center -pointsize 24 -annotate +0+0 'SLS render test' \
+    -fill white -gravity center -pointsize 24 -annotate +0+0 'SLL render test' \
     -colorspace sRGB -depth 8 -interlace none -strip "PNG24:$media_probe"; then
     rm -f "$media_probe" "$media_fetch"
     log "The asterisk service account could not render an alert image in the public media directory."
@@ -6526,7 +7378,7 @@ PY
       exit 1
       ;;
   esac
-  log "Verifying Asterisk PJSIP contact inventory and SLS AMI authentication."
+  log "Verifying Asterisk PJSIP contact inventory and SLL AMI authentication."
   verify_pjsip_contact_inventory || exit 1
   if ! verify_ami_with_repair; then
     exit 1
@@ -6535,7 +7387,7 @@ PY
   notify_capabilities="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-notify-capabilities.XXXXXX")"
   if ! /usr/bin/timeout 15 /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --notify-capabilities-json >"$notify_capabilities"; then
     rm -f "$notify_capabilities"
-    log "SLS could not inspect Asterisk SIP NOTIFY routing capabilities."
+    log "SLL could not inspect Asterisk SIP NOTIFY routing capabilities."
     exit 1
   fi
   notify_routing_mode="$(python3 -I - "$notify_capabilities" <<'PY'
@@ -6573,14 +7425,14 @@ PY
     >"$endpoint_inventory" 2>"$endpoint_inventory_err"; then
     cat "$endpoint_inventory_err" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>/dev/null || true
     rm -f "$endpoint_inventory" "$endpoint_inventory_err"
-    log "SLS AMI PJSIP contact discovery failed. Confirm the loopback manager user has system-event read permission; see $LOG_FILE."
+    log "SLL AMI PJSIP contact discovery failed. Confirm the loopback manager user has system-event read permission; see $LOG_FILE."
     exit 1
   fi
   endpoint_records=""
   if ! endpoint_records="$(endpoint_inventory_records "$endpoint_inventory" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}")"; then
     cat "$endpoint_inventory" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>/dev/null || true
     rm -f "$endpoint_inventory" "$endpoint_inventory_err"
-    log "SLS AMI PJSIP contact discovery returned invalid data; see $LOG_FILE."
+    log "SLL AMI PJSIP contact discovery returned invalid data; see $LOG_FILE."
     exit 1
   fi
 
@@ -6672,7 +7524,7 @@ PY
   if [ ! -x /usr/sbin/sendmail ]; then
     log "Warning: /usr/sbin/sendmail is unavailable; email delivery will remain disabled until a local MTA is installed."
   elif [ ! -x /usr/sbin/postqueue ]; then
-    log "Warning: SLS email requires the local Postfix postqueue command to check backlog before submission. No mail transport was changed; configure Postfix before using SLS email."
+    log "Warning: SLL email requires the local Postfix postqueue command to check backlog before submission. No mail transport was changed; configure Postfix before using SLL email."
   fi
   ls -lh /var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices
 }
@@ -6688,10 +7540,12 @@ inspect_installation() {
   [ -x /usr/bin/curl ] || [ -x /usr/bin/wget ] || { printf 'Inspection needs curl or wget for signed release evidence.\n' >&2; return 1; }
   [ -f /etc/freepbx.conf ] && [ -f /var/www/html/admin/modules/framework/module.xml ] || { printf 'FreePBX is not present at the supported paths.\n' >&2; return 1; }
   if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
-    report="$(bootstrap_resource_capacity --check --mode prepare --config "$CONFIG_FILE")" || { printf '%s\n' "$report"; return 1; }
+    local -a capacity_arguments=(--check --mode prepare --config "$CONFIG_FILE")
   else
-    report="$(bootstrap_resource_capacity --check --mode prepare --desktop-limit 25 --auto-phone-limit)" || { printf '%s\n' "$report"; return 1; }
+    local -a capacity_arguments=(--check --mode prepare --desktop-limit 25 --auto-phone-limit)
   fi
+  [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || capacity_arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
+  report="$(bootstrap_resource_capacity "${capacity_arguments[@]}")" || { printf '%s\n' "$report"; return 1; }
   select_install_temp_root "$report" || return 1
   LOG_FILE="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-inspection.XXXXXXXX.log")" || return 1
   chmod 0600 "$LOG_FILE" || return 1
@@ -6699,6 +7553,7 @@ inspect_installation() {
   open_root_owned_file INSTALL_LOG_FD "$LOG_FILE" log || return 1
   INSTALL_LOG_OUTPUT="/proc/${BASHPID}/fd/$INSTALL_LOG_FD"
   printf '%s\n' "$report" >>"$INSTALL_LOG_OUTPUT"
+  validate_installer_memory_profile "$report" || return $?
   if download_tgz && verify_tgz && stage_module_directory && prepare_installer_bootstrap && prepare_authenticated_installer; then
     inspection_status=0
   else
@@ -6751,12 +7606,12 @@ main() {
   # Use the held descriptor for every write, including after fwconsole chown.
   # LOG_FILE remains the human-readable path for diagnostics and support.
   INSTALL_LOG_OUTPUT="/proc/${BASHPID}/fd/$INSTALL_LOG_FD"
-  printf '\nSLS Mass Notify installation started: %s\n' "$(date --iso-8601=seconds)" >>"$INSTALL_LOG_OUTPUT"
+  printf '\nSLL Mass Notify Server installation started: %s\n' "$(date --iso-8601=seconds)" >>"$INSTALL_LOG_OUTPUT"
   trap guard_config_on_exit EXIT
   trap 'handle_install_signal TERM 143' TERM
   trap 'handle_install_signal INT 130' INT
   trap 'handle_install_signal HUP 129' HUP
-  set_install_stage "hardware admission" "Provide the combined PBX/SLS CPU, RAM, persistent storage, and free-space requirements documented in README before retrying installation."
+  set_install_stage "hardware admission" "Provide the combined PBX/SLL CPU, RAM, persistent storage, and free-space requirements documented in README before retrying installation."
   preflight_hardware_requirements || exit $?
   set_install_stage "platform validation" "Confirm this is a healthy FreePBX 17 host with working database, Asterisk, fwconsole, package repositories, and local AMI access, then rerun the installer."
   require_freepbx
@@ -6770,6 +7625,8 @@ main() {
   prepare_installer_bootstrap
   INSTALL_ERROR_CATEGORY="php_security_preflight_failed"
   verify_php_security_versions_before_mutation
+  INSTALL_ERROR_CATEGORY="freepbx_web_preflight_failed"
+  verify_freepbx_web_response
   INSTALL_ERROR_CATEGORY="install_command_failed"
   bootstrap_missing_dashboard
   set_install_stage "publisher and stock approval" "Review the upgrade evidence directory printed in the log. Standard stock modules bootstrap from signed upstream packages; local differences require independently reviewed inventories. No maintenance changes occur before approval."
@@ -6789,7 +7646,7 @@ main() {
   set_install_stage "previous phone collector recovery" "Review the collector journal and approved service state. The installer verifies a fresh authenticated heartbeat before pausing notification workers; it does not reset phone history."
   restore_previous_phone_collector
   INSTALL_ERROR_CATEGORY="worker_coordination_failed"
-  set_install_stage "notification worker coordination" "Let active SLS work finish, then retry. Review the named worker mutex if ownership, mode, contents or identity were rejected."
+  set_install_stage "notification worker coordination" "Let active SLL work finish, then retry. Review the named worker mutex if ownership, mode, contents or identity were rejected."
   acquire_worker_coordination
   INSTALL_ERROR_CATEGORY="protected_config_validation_failed"
   set_install_stage "configuration coordination" "Close active configuration editors and retry. The settings mutex must remain an empty, private regular file with a stable inode; review the specific failure in the log."
@@ -6807,6 +7664,8 @@ main() {
   verify_served_php_configuration
   preflight_python
   initialize_configuration_keyring
+  apply_requested_deployment_profile
+  apply_factory_branding_defaults
   validate_staged_central_config
   ensure_freepbx_prerequisites
   preflight_platform
@@ -6821,6 +7680,9 @@ main() {
   activate_staged_module
   persist_install_transaction mutating
   initialize_fresh_install_config
+  retain_configuration_snapshots
+  persist_install_transaction mutating
+  prepare_module_ami_intent
   ensure_local_signer
   if SLS_MASS_NOTIFY_DEFER_SIGNING=1 install_module_with_autoenable; then
     :
@@ -6839,6 +7701,7 @@ main() {
   protected_install_phase activate --apply
   refresh_served_php_workers
   SLS_MASS_NOTIFY_PRESERVE_PENDING=1 run_without_install_maintenance_lock fwconsole reload
+  verify_phone_collector
   protected_install_phase verify
   sls_as_asterisk /usr/sbin/asterisk -rx "module reload res_pjsip_notify.so" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
   sls_as_asterisk /usr/sbin/asterisk -rx "dialplan reload" || true
@@ -6847,6 +7710,7 @@ main() {
   verify_announcement_worker_health
   verify_piper_voices
   verify_served_php_runtime
+  verify_freepbx_web_response
   verify_install
   verify_confirmed_system_timezone
   verify_config_unchanged
@@ -6855,7 +7719,7 @@ main() {
   INSTALL_COMMITTED=1
   persist_install_transaction committed || { INSTALL_COMMITTED=0; exit 1; }
   clear_install_failure
-  log "SLS Mass Notify install finished."
+  log "SLL Mass Notify Server install finished."
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

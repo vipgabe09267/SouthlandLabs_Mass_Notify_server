@@ -66,6 +66,7 @@ MAX_RETRY_STATE_BYTES = 4 * 1024 * 1024
 RETRY_MARKER = b'SLS_JSON_V1\n'
 _retry_context = threading.local()
 MAX_RETRY_RECORDS_PER_RUN = 3
+RETRY_WORKER_CLAIM_SECONDS = 120
 COMPLETED_RETRY_RETENTION_SECONDS = 7 * 86400
 PENDING_RETRY_MAX_AGE_SECONDS = 3600
 RETRYABLE_PRE_SUBMISSION_ERRORS = {
@@ -76,12 +77,12 @@ RETRYABLE_PRE_SUBMISSION_ERRORS = {
     "request_timeout",
     "tls_failure",
 }
-USER_AGENT = "SouthlandServers-Mass-Notifications-Server/0.1.8-beta"
+USER_AGENT = "SouthlandLabs-Mass-Notify-Server/0.1.9-beta"
 DISCORD_HOSTS = {"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"}
 DISCORD_PATH = re.compile(r"^/api/webhooks/[0-9]+/[A-Za-z0-9._~-]+$")
 # Downloaded and bundled artwork; providers retrieve it from this PBX, not
-# from the Southland Servers website. The revision matches the packaged PNG.
-DISCORD_EMBED_IMAGE_PATH = "/sls_mass_notify/assets/webhook-builder.png?v=b9e17309980e"
+# from the Southland Labs website. The revision matches the packaged PNG.
+DISCORD_EMBED_IMAGE_PATH = "/sls_mass_notify/assets/webhook-builder.png?v=983d96d18168"
 DNS_NAME = re.compile(
     r"^(?=.{1,253}\.?$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$",
@@ -388,20 +389,20 @@ def build_discord_payload(config, subject, body, event="", severity="", fields=N
                 raise DestinationError('invalid_webhook_fields', submission_possible=False)
             embed_fields.append({"name": name, "value": normalized, "inline": len(normalized) <= 42})
     embed = {
-        "author": {"name": "Southland Servers Group • SLS Mass Notification System"},
+        "author": {"name": "Southland Labs • SLL Mass Notify Server"},
         "title": f"{icon} {_integration_text(subject)}",
         "description": _integration_text(body) or _integration_text(subject),
         "color": color,
         "fields": embed_fields,
         "footer": {
-            "text": f"{urgency} • SLS Mass Notification System"[:2048],
+            "text": f"{urgency} • SLL Mass Notify Server"[:2048],
         },
         "timestamp": _normalize_timestamp(timestamp),
     }
     if avatar_url:
         embed["footer"]["icon_url"] = avatar_url
     payload = {
-        "username": "SLS Mass Notification System",
+        "username": "SLL Mass Notify Server",
         "embeds": [embed],
     }
     if avatar_url:
@@ -424,7 +425,7 @@ def build_announcement_discord_payload(config, title, body, background_color="#6
     color = str(background_color or "").strip()
     if re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
         payload["embeds"][0]["color"] = int(color[1:], 16)
-    payload["embeds"][0]["footer"]["text"] = "DASHBOARD ANNOUNCEMENT • SLS Mass Notification System"
+    payload["embeds"][0]["footer"]["text"] = "DASHBOARD ANNOUNCEMENT • SLL Mass Notify Server"
     return _validate_discord_payload(payload)
 
 
@@ -550,7 +551,7 @@ def build_collaboration_payload(adapter, title, body, event="", severity="", fie
                                 timestamp="", source="", event_id="", *, incident_id="", config=None, incident_context=None):
     if not isinstance(adapter, str) or adapter not in {"slack", "teams_workflow", "teams_bearer", "google_chat", "mattermost"}:
         raise DestinationError("invalid_payload_format", submission_possible=False)
-    title = _integration_text(title) or "SLS Mass Notification"
+    title = _integration_text(title) or "SLL Mass Notify Server"
     body = _integration_text(body)
     incident_context = collaboration_incident_context(incident_context)
     if incident_context is not None:
@@ -588,10 +589,10 @@ def build_collaboration_payload(adapter, title, body, event="", severity="", fie
         raise DestinationError("payload_too_large", submission_possible=False)
     if adapter in {"google_chat", "mattermost"}:
         # These formats interpret mentions in text. Break mention syntax while
-        # retaining the full instructions; recipient selection stays in SLS.
+        # retaining the full instructions; recipient selection stays in SLL.
         rendered = text.replace('@', '@\u200b').replace('<', '\u2039').replace('>', '\u203a')
         if incident_url:
-            rendered += '\n\nOpen incident in SLS: ' + incident_url
+            rendered += '\n\nOpen incident in SLL: ' + incident_url
         payload = {'text': rendered}
     elif adapter == "slack":
         # Block Kit plain_text never interprets alert content as mentions or
@@ -605,7 +606,7 @@ def build_collaboration_payload(adapter, title, body, event="", severity="", fie
             # A normal link needs no interaction callback. Only this fixed label
             # and a validated configured origin enter mrkdwn; alert text cannot.
             payload["blocks"].append({"type": "context", "elements": [{"type": "mrkdwn",
-                "text": "<" + incident_url.replace("&", "&amp;") + "|Open incident in SLS>", "verbatim": True}]})
+                "text": "<" + incident_url.replace("&", "&amp;") + "|Open incident in SLL>", "verbatim": True}]})
     else:
         # TextRun is plain text (no Markdown). The only action opens the protected
         # PBX incident page; it never submits a human response or changes state.
@@ -613,7 +614,7 @@ def build_collaboration_payload(adapter, title, body, event="", severity="", fie
                 "type": "AdaptiveCard", "version": "1.2",
                 "body": [{"type": "RichTextBlock", "inlines": [{"type": "TextRun", "text": part}]} for part in lines if part]}
         if incident_url:
-            card["actions"] = [{"type": "Action.OpenUrl", "title": "Open incident in SLS", "url": incident_url}]
+            card["actions"] = [{"type": "Action.OpenUrl", "title": "Open incident in SLL", "url": incident_url}]
         payload = {"type": "message", "attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "contentUrl": None, "content": card}]}
     if len(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) > 24 * 1024:
         raise DestinationError("payload_too_large", submission_possible=False)
@@ -666,6 +667,37 @@ class _AnnouncementSubmissionGuard:
             self.failure_code = 'authorization_changed'
             return False
         return True
+
+
+class _WeatherSubmissionGuard:
+    """Last-boundary source authority; false proves no transport was started."""
+    def __init__(self, check):
+        self.check = check
+        self.decision = 'deferred'
+        self.reason = 'source_authority_unavailable'
+        self.failure_code = self.reason
+
+    def __call__(self):
+        try:
+            decision, reason = self.check()
+            if decision not in {'eligible', 'deferred', 'cancelled'}:
+                raise ValueError('invalid_weather_submission_decision')
+            self.decision, self.reason = decision, reason
+        except Exception:
+            self.decision, self.reason = 'deferred', 'source_authority_unavailable'
+        self.failure_code = self.reason
+        return self.decision == 'eligible'
+
+
+def _guarded_delivery_result(row, guard, attempts):
+    if isinstance(guard, _WeatherSubmissionGuard):
+        return {'type': row['kind'], 'id': row['id'], 'name': row['name'],
+                'status': guard.decision, 'attempts': attempts, 'http_status': None,
+                'error': guard.reason, 'retryable': guard.decision == 'deferred'}
+    code = getattr(guard, 'failure_code', 'schedule_deadline_expired')
+    return {'type': row['kind'], 'id': row['id'], 'name': row['name'],
+            'status': 'cancelled' if code == 'authorization_changed' else 'failed',
+            'attempts': attempts, 'http_status': None, 'error': code, 'retryable': False}
 
 
 def _current_authorization(context):
@@ -733,6 +765,15 @@ def _request_once(url, kind, payload, timeout=DEFAULT_TIMEOUT, resolver=socket.g
             cluster_claim = _cluster_guard.begin('webhook', hashlib.sha256(url.encode()).hexdigest(), payload,
                                                  delivery_id='webhook-' + hashlib.sha256(idempotency_key.encode()).hexdigest(),
                                                  created_at=created_at)
+            # Cluster coordination and the final policy read can both wait.
+            # Neither may extend authority or the original request budget.
+            if submission_guard is not None and not submission_guard():
+                raise DestinationError(getattr(submission_guard, 'failure_code', 'schedule_deadline_expired'), submission_possible=False)
+            remaining = request_deadline - time.monotonic()
+            if remaining <= 0:
+                raise DestinationError('request_timeout', submission_possible=False)
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining)
             submission_possible = True
             connection.request("POST", path, body=body, headers=headers)
             remaining = request_deadline - time.monotonic()
@@ -773,6 +814,13 @@ def _request_once(url, kind, payload, timeout=DEFAULT_TIMEOUT, resolver=socket.g
                         _cluster_guard.finish(cluster_claim, uncertain=True, category='webhook_reply_uncertain')
                     except Exception:
                         pass
+            elif cluster_claim is not None:
+                # A consumed coordination claim is retained even though no
+                # POST started. Never describe this refusal as transport doubt.
+                try:
+                    _cluster_guard.finish(cluster_claim, uncertain=False, category='submission_suppressed', timeout=1)
+                except Exception:
+                    pass
             connection.close()
     raise DestinationError(last_category, submission_possible=False)
 
@@ -877,9 +925,7 @@ def _deliver(row, payload, event_id, transport, resolver, sleep, deadline, clock
     safe = {"type": row["kind"], "id": row["id"], "name": row["name"]}
     for attempt in range(1, MAX_ATTEMPTS + 1):
         if submission_guard is not None and not submission_guard():
-            code = getattr(submission_guard, 'failure_code', 'schedule_deadline_expired')
-            return {**safe, "status": "cancelled" if code == 'authorization_changed' else "failed", "attempts": attempt - 1, "http_status": None,
-                    "error": code, "retryable": False}
+            return _guarded_delivery_result(row, submission_guard, attempt - 1)
         remaining = deadline - clock()
         if remaining <= 0:
             return _budget_failure(row, attempt - 1)
@@ -897,6 +943,8 @@ def _deliver(row, payload, event_id, transport, resolver, sleep, deadline, clock
         except DestinationError as exc:
             if exc.submission_possible:
                 return _uncertain_delivery(row, attempt, exc.code)
+            if isinstance(submission_guard, _WeatherSubmissionGuard) and submission_guard.decision != 'eligible':
+                return _guarded_delivery_result(row, submission_guard, attempt - 1)
             if clock() >= deadline:
                 return _budget_failure(row, attempt)
             if exc.code in {"network_failure", "tls_failure", "dns_failure", "request_timeout"} and attempt < MAX_ATTEMPTS:
@@ -959,6 +1007,7 @@ def dispatch_webhook_destinations(
     wall_clock=time.time,
     enforce_wall_clock=True,
     destination_keys=None,
+    submission_guard_factory=None,
 ):
     """Send an actual NWS/Xweather alert and return secret-free results."""
     normalized_source = str(source or "").strip().lower()
@@ -1011,6 +1060,7 @@ def dispatch_webhook_destinations(
                     sleep,
                     row_deadline,
                     clock,
+                    submission_guard=submission_guard_factory(row) if submission_guard_factory is not None else None,
                 )
         except DeliveryBudgetExceeded:
             result = _uncertain_delivery(row, reason="delivery_budget_exhausted")
@@ -1266,11 +1316,15 @@ def _load_retry_state(path):
     for record in state['deliveries'].values():
         if not isinstance(record, dict):
             raise RetryStateError('retry_state_corrupt')
-        for field in ('created_at', 'expires_at', 'completed_at', 'last_attempt_at', 'last_attempt_sequence'):
+        for field in ('created_at', 'expires_at', 'completed_at', 'last_attempt_at',
+                      'last_attempt_sequence', 'worker_claimed_at'):
             _retry_record_integer(record, field)
-        for field in ('email_pending', 'email_inflight', 'channels_pending'):
+        for field in ('email_pending', 'email_inflight', 'channels_pending', 'channels_inflight'):
             if field in record and type(record[field]) is not bool:
                 raise RetryStateError('retry_state_corrupt')
+        worker_claim = record.get('worker_claim', '')
+        if not isinstance(worker_claim, str) or (worker_claim and not re.fullmatch(r'[a-f0-9]{32}', worker_claim)):
+            raise RetryStateError('retry_state_corrupt')
         for field in ('webhook_pending', 'webhook_inflight'):
             values = record.get(field, [])
             if (not isinstance(values, list) or len(values) > MAX_DESTINATIONS * 2
@@ -1389,7 +1443,7 @@ def _prune_retry_state(state, now=None):
         completed_at = _retry_record_integer(record, 'completed_at')
         created_at = _retry_record_integer(record, 'created_at')
         expires_at = _retry_record_integer(record, 'expires_at') or created_at + PENDING_RETRY_MAX_AGE_SECONDS
-        if not completed_at and current >= expires_at:
+        if not completed_at and current >= expires_at and not _retry_claim_active(record, current):
             record['expired_channels'] = (list(record.get('webhook_pending') or [])
                                           + (['email'] if record.get('email_pending') else [])
                                           + (['channels'] if record.get('channels_pending') else []))
@@ -1419,6 +1473,18 @@ def _retry_record_integer(record, field):
     if type(value) is not int or value < 0:
         raise RetryStateError("retry_state_corrupt")
     return value
+
+
+def _retry_claim_active(record, now=None):
+    """Return whether another worker owns a short, bounded record lease."""
+    token = record.get('worker_claim', '')
+    claimed_at = _retry_record_integer(record, 'worker_claimed_at')
+    current = int(time.time() if now is None else now)
+    # A wall-clock rollback must not make an active transport eligible for a
+    # duplicate submission. A future claim therefore remains fail-closed until
+    # the clock reaches it; normal stale claims expire after the fixed window.
+    return bool(token and claimed_at and (current < claimed_at
+        or current - claimed_at < RETRY_WORKER_CLAIM_SECONDS))
 
 
 def _retry_record_order(record):
@@ -1783,7 +1849,7 @@ def external_delivery_uncertain(state_path, source, correlation_key):
         return isinstance(record, dict) and bool(
             record.get("webhook_uncertain") or record.get("webhook_inflight")
             or record.get("email_uncertain") or record.get("email_inflight")
-            or record.get("channels_uncertain")
+            or record.get("channels_uncertain") or record.get("channels_inflight")
         )
 
 
@@ -1795,19 +1861,22 @@ def external_delivery_status(state_path, source, correlation_key):
             return "unknown"
         if (record.get("webhook_uncertain") or record.get("webhook_inflight")
                 or record.get("email_uncertain") or record.get("email_inflight")
-                or record.get("channels_uncertain")):
+                or record.get("channels_uncertain") or record.get("channels_inflight")):
             return "uncertain"
         if not record.get("completed_at"):
             return "pending"
         return str(record.get("terminal_status") or "complete")
 
 
-def _recover_webhook_inflight(state):
+def _recover_webhook_inflight(state, now=None):
     """A process exit after durable intent must never automatically replay POSTs."""
     results = []
+    current = int(time.time() if now is None else now)
     for delivery_key, record in state["deliveries"].items():
         if not isinstance(record, dict):
             raise RetryStateError("retry_state_corrupt")
+        if _retry_claim_active(record, current):
+            continue
         inflight = record.get("webhook_inflight") or []
         uncertain = record.get("webhook_uncertain") or {}
         pending = record.get("webhook_pending") or []
@@ -1829,23 +1898,47 @@ def _recover_webhook_inflight(state):
             record["webhook_uncertain"] = uncertain
             record["webhook_pending"] = sorted(set(pending) - set(inflight))
             if not record.get("email_pending") and not record["webhook_pending"] and not record.get("channels_pending"):
-                record.update(completed_at=int(time.time()), terminal_status="uncertain")
+                record.update(completed_at=current, terminal_status="uncertain")
     return results
 
 
-def _recover_email_inflight(state):
+def _recover_email_inflight(state, now=None):
     """Mail accepted before a crash must never be enqueued automatically again."""
     results = []
+    current = int(time.time() if now is None else now)
     for delivery_key, record in state['deliveries'].items():
         if not isinstance(record, dict) or type(record.get('email_inflight', False)) is not bool:
             raise RetryStateError('retry_state_corrupt')
+        if _retry_claim_active(record, current):
+            continue
         if not record.get('email_inflight'): continue
         receipt = {'type': 'email', 'id': 'email', 'status': 'uncertain', 'error': 'interrupted_submission'}
         record.update(email_inflight=False, email_pending=False, email_uncertain=receipt)
         _record_external_receipt(record, receipt)
         results.append({'delivery': delivery_key, **receipt})
         if not record.get('webhook_pending') and not record.get('channels_pending'):
-            record.update(completed_at=int(time.time()), terminal_status='uncertain')
+            record.update(completed_at=current, terminal_status='uncertain')
+    return results
+
+
+def _recover_channels_inflight(state, now=None):
+    """Treat an interrupted PBX channel handoff as uncertain, never replayable."""
+    results = []
+    current = int(time.time() if now is None else now)
+    for delivery_key, record in state['deliveries'].items():
+        if not isinstance(record, dict) or type(record.get('channels_inflight', False)) is not bool:
+            raise RetryStateError('retry_state_corrupt')
+        if _retry_claim_active(record, current) or not record.get('channels_inflight'):
+            continue
+        receipt = {
+            'type': 'channels', 'id': 'sms_external_voice', 'status': 'uncertain',
+            'error': 'interrupted_submission',
+        }
+        record.update(channels_inflight=False, channels_pending=False, channels_uncertain=receipt)
+        _record_external_receipt(record, receipt)
+        results.append({'delivery': delivery_key, **receipt})
+        if not record.get('webhook_pending') and not record.get('email_pending'):
+            record.update(completed_at=current, terminal_status='uncertain')
     return results
 
 
@@ -1861,6 +1954,30 @@ def _webhook_result_retryable(result):
     return http_status is None and result.get('error') in RETRYABLE_PRE_SUBMISSION_ERRORS
 
 
+def _cancel_external_remaining(record, now, reason):
+    """Stop unsent work while retaining every earlier irreversible receipt."""
+    submitted = any(receipt.get('status') in {'accepted', 'queued', 'uncertain'}
+                    for receipt in record.get('destination_receipts', {}).values())
+    submitted = submitted or bool(record.get('webhook_uncertain') or record.get('email_uncertain')
+                                  or record.get('channels_uncertain'))
+    record.update(completed_at=now, terminal_status='partial_cancelled' if submitted else 'cancelled',
+                  terminal_reason=reason, email_pending=False, webhook_pending=[], channels_pending=False)
+
+
+def _release_stale_retry_claims(state, now=None):
+    """Release abandoned leases; transport intents remain for recovery below."""
+    current = int(time.time() if now is None else now)
+    changed = False
+    for record in state['deliveries'].values():
+        if not isinstance(record, dict):
+            raise RetryStateError('retry_state_corrupt')
+        if record.get('worker_claim') and not _retry_claim_active(record, current):
+            record['worker_claim'] = ''
+            record['worker_claimed_at'] = 0
+            changed = True
+    return changed
+
+
 def retry_external_deliveries(
     state_path,
     config,
@@ -1870,122 +1987,306 @@ def retry_external_deliveries(
     test=False,
     dry_run=False,
     preferred_correlation_key="",
-    email_sender=_default_email_sender,
-    webhook_dispatcher=dispatch_webhook_destinations,
+    email_sender=None,
+    webhook_dispatcher=None,
+    guarded_email_sender=None,
+    guarded_webhook_dispatcher=None,
+    configuration_reader=None,
     max_records=MAX_RETRY_RECORDS_PER_RUN,
     validity_checker=None,
 ):
-    """Retry only pending external channels; never invoke local PBX channels."""
+    """Retry pending external channels without holding the journal lock over I/O.
+
+    A durable record lease prevents concurrent workers from submitting the same
+    destination.  Each channel intent is committed before its transport starts;
+    an interrupted intent becomes terminally uncertain instead of being replayed.
+    """
     normalized_source = str(source or "").strip().lower()
     if not live or test or dry_run or normalized_source not in {"nws", "weather.gov", "xweather"}:
         return {"results": [], "pending": 0}
     preferred_key = (
         _retry_delivery_key(normalized_source, preferred_correlation_key)
-        if preferred_correlation_key
-        else ""
+        if preferred_correlation_key else ""
     )
+    validator = validity_checker or validate_external_weather
+    if email_sender is not None and guarded_email_sender is not None:
+        raise ValueError('Specify one email transport contract')
+    if webhook_dispatcher is not None and guarded_webhook_dispatcher is not None:
+        raise ValueError('Specify one webhook transport contract')
+    from sls_branded_email import MailSubmissionSuppressed
+    effective_config = [config]
+
+    def read_configuration():
+        try:
+            value = config if configuration_reader is None else configuration_reader()
+        except (OSError, ValueError, RuntimeError):
+            raise RetryStateError('retry_configuration_unavailable') from None
+        if not isinstance(value, dict):
+            raise RetryStateError('retry_configuration_unavailable')
+        effective_config[0] = value
+        return value
+
+    def current_authority(record, current, directory, now):
+        expires = (_retry_record_integer(record, 'expires_at')
+                   or _retry_record_integer(record, 'created_at') + PENDING_RETRY_MAX_AGE_SECONDS)
+        if now >= expires:
+            return 'cancelled', 'delivery_expired', None
+        if not _cluster_guard.runtime_running(current):
+            return 'deferred', 'runtime_stopped', None
+        return validator(record, current, directory, now)
+    try:
+        record_limit = max(1, min(10, int(max_records)))
+    except (TypeError, ValueError, OverflowError):
+        record_limit = MAX_RETRY_RECORDS_PER_RUN
     safe_results = []
-    with _locked_retry_state(state_path) as locked_path:
-        state = _load_retry_state(locked_path)
-        recovered = _recover_webhook_inflight(state) + _recover_email_inflight(state)
-        if recovered:
+    processed = set()
+
+    def release_claim(delivery_key, token):
+        if not delivery_key or not token:
+            return
+        with _locked_retry_state(state_path) as locked_path:
+            state = _load_retry_state(locked_path)
+            record = state['deliveries'].get(delivery_key)
+            if isinstance(record, dict) and record.get('worker_claim') == token:
+                record['worker_claim'] = ''
+                record['worker_claimed_at'] = 0
+                _write_retry_state(locked_path, state)
+
+    def authority(delivery_key, token, kind='', target=''):
+        """Short transaction; no transport runs while source/route state is held."""
+        with _locked_retry_state(state_path) as locked_path:
+            state = _load_retry_state(locked_path)
+            record = state['deliveries'].get(delivery_key)
+            if not isinstance(record, dict) or record.get('worker_claim') != token:
+                return 'cancelled', 'retry_worker_claim_lost'
+            now = max(0, int(time.time()))
+            try:
+                current = read_configuration()
+                decision, reason, group = current_authority(record, current, locked_path.parent, now)
+            except Exception:
+                decision, reason, group = 'deferred', 'source_authority_unavailable', None
+            record.update(source_checked_at=now, source_decision=decision,
+                          source_reason=reason, worker_claimed_at=now)
+            if decision == 'cancelled':
+                _cancel_external_remaining(record, now, reason)
+            elif decision == 'eligible' and group is not None:
+                email, hooks = _remaining_external_routes(record, group, current)
+                if email != record.get('email_recipients', '') or hooks != sorted(record.get('webhook_pending') or []):
+                    record['routing_restricted_at'] = now
+                record['email_recipients'] = email
+                record['email_pending'] = bool(record.get('email_pending') and email)
+                record['webhook_pending'] = hooks
+                if kind == 'email' and set(target.lower().split()) != set(email.lower().split()):
+                    # The prepared envelope includes a removed address. Do not
+                    # submit it; retain only the narrowed unsent set for retry.
+                    decision = 'deferred' if email else 'cancelled'
+                    reason = 'recipient_removed_or_disabled'
+                elif kind == 'webhook' and target not in hooks:
+                    decision, reason = 'cancelled', 'recipient_removed_or_disabled'
             _write_retry_state(locked_path, state)
-            safe_results.extend(recovered)
-        _prune_retry_state(state)
-        records = [
-            (key, record)
-            for key, record in state["deliveries"].items()
-            if isinstance(record, dict)
-            and int(record.get("completed_at", 0) or 0) == 0
-            and str((record.get("payload") or {}).get("source") or "").lower() == normalized_source
-        ]
-        records.sort(key=lambda item: (
-            0 if item[0] == preferred_key else 1,
-            *_retry_record_order(item[1]),
-            item[0],
-        ))
-        attempt_sequence = int(state.get("attempt_sequence", 0) or 0)
-        for record in state["deliveries"].values():
-            if isinstance(record, dict):
-                attempt_sequence = max(
-                    attempt_sequence,
-                    _retry_record_integer(record, "last_attempt_sequence"),
+            return decision, reason
+
+    for _index in range(record_limit):
+        delivery_key = ''
+        claim_token = ''
+        try:
+            # Claim one record at a time. This preserves fair rotation and does
+            # not reserve later records while an earlier transport is slow.
+            with _locked_retry_state(state_path) as locked_path:
+                state = _load_retry_state(locked_path)
+                now = max(0, int(time.time()))
+                _release_stale_retry_claims(state, now)
+                recovered = (
+                    _recover_webhook_inflight(state, now)
+                    + _recover_email_inflight(state, now)
+                    + _recover_channels_inflight(state, now)
                 )
-        for delivery_key, record in records[: max(1, min(10, int(max_records)))]:
-            attempt_sequence += 1
-            state["attempt_sequence"] = attempt_sequence
-            record["last_attempt_at"] = max(0, int(time.time()))
-            record["last_attempt_sequence"] = attempt_sequence
-            # Persist scheduling before invoking a channel.  A timeout or crash
-            # therefore moves this record behind untouched work on the next run.
-            _write_retry_state(locked_path, state)
-            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-            eligibility, reason, group = (validity_checker or validate_external_weather)(
-                record, config, locked_path.parent, int(time.time())
-            )
-            record["source_checked_at"] = int(time.time())
-            record["source_decision"] = eligibility
-            record["source_reason"] = reason
-            if eligibility != "eligible":
-                if eligibility == "cancelled":
-                    record.update(completed_at=int(time.time()), terminal_status="cancelled",
-                                  terminal_reason=reason, email_pending=False, webhook_pending=[], channels_pending=False)
-                safe_results.append({"delivery": delivery_key, "type": "source", "id": "weather",
-                                     "status": eligibility, "error": reason})
+                if recovered:
+                    safe_results.extend(recovered)
+                _prune_retry_state(state, now)
+                records = [
+                    (key, record)
+                    for key, record in state['deliveries'].items()
+                    if key not in processed
+                    and isinstance(record, dict)
+                    and not record.get('completed_at')
+                    and not _retry_claim_active(record, now)
+                    and str((record.get('payload') or {}).get('source') or '').lower() == normalized_source
+                ]
+                records.sort(key=lambda item: (
+                    0 if item[0] == preferred_key else 1,
+                    *_retry_record_order(item[1]),
+                    item[0],
+                ))
+                if not records:
+                    _write_retry_state(locked_path, state)
+                    break
+                delivery_key, record = records[0]
+                processed.add(delivery_key)
+                sequence = int(state.get('attempt_sequence', 0) or 0)
+                for candidate in state['deliveries'].values():
+                    if isinstance(candidate, dict):
+                        sequence = max(sequence, _retry_record_integer(candidate, 'last_attempt_sequence'))
+                sequence += 1
+                claim_token = os.urandom(16).hex()
+                state['attempt_sequence'] = sequence
+                record.update(
+                    last_attempt_at=now,
+                    last_attempt_sequence=sequence,
+                    worker_claim=claim_token,
+                    worker_claimed_at=now,
+                )
                 _write_retry_state(locked_path, state)
-                continue
-            if group is not None:
-                remaining_email, remaining_hooks = _remaining_external_routes(record, group, config)
-                changed = remaining_email != record.get("email_recipients", "") or remaining_hooks != sorted(record.get("webhook_pending") or [])
-                record["email_recipients"] = remaining_email
-                record["email_pending"] = bool(record.get("email_pending") and remaining_email)
-                record["webhook_pending"] = remaining_hooks
-                if changed:
-                    record["routing_restricted_at"] = int(time.time())
-                    safe_results.append({"delivery": delivery_key, "type": "routing", "id": "weather",
-                                         "status": "cancelled", "error": "recipient_removed_or_disabled"})
+
+            # Validate current source state and narrow the frozen audience while
+            # holding only the short journal transaction—not any transport I/O.
+            channel_envelope = None
+            with _locked_retry_state(state_path) as locked_path:
+                state = _load_retry_state(locked_path)
+                record = state['deliveries'].get(delivery_key)
+                if not isinstance(record, dict) or record.get('worker_claim') != claim_token:
+                    raise RetryStateError('retry_worker_claim_lost')
+                now = max(0, int(time.time()))
+                record['worker_claimed_at'] = now
+                payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
+                current = read_configuration()
+                eligibility, reason, group = current_authority(record, current, locked_path.parent, now)
+                record.update(source_checked_at=now, source_decision=eligibility, source_reason=reason)
+                if eligibility != 'eligible':
+                    if eligibility == 'cancelled':
+                        _cancel_external_remaining(record, now, reason)
+                    record.update(worker_claim='', worker_claimed_at=0)
+                    safe_results.append({
+                        'delivery': delivery_key, 'type': 'source', 'id': 'weather',
+                        'status': eligibility, 'error': reason,
+                    })
+                    _write_retry_state(locked_path, state)
+                    claim_token = ''
+                    continue
+                if group is not None:
+                    remaining_email, remaining_hooks = _remaining_external_routes(record, group, current)
+                    changed = (
+                        remaining_email != record.get('email_recipients', '')
+                        or remaining_hooks != sorted(record.get('webhook_pending') or [])
+                    )
+                    record['email_recipients'] = remaining_email
+                    record['email_pending'] = bool(record.get('email_pending') and remaining_email)
+                    record['webhook_pending'] = remaining_hooks
+                    if changed:
+                        record['routing_restricted_at'] = now
+                        safe_results.append({
+                            'delivery': delivery_key, 'type': 'routing', 'id': 'weather',
+                            'status': 'cancelled', 'error': 'recipient_removed_or_disabled',
+                        })
+                if record.get('channels_pending'):
+                    record['channels_inflight'] = True
+                    context = {
+                        'source_validity': record.get('source_validity'),
+                        'event': payload.get('event', ''),
+                        'severity': payload.get('severity', ''),
+                        'deadline_at': min(record['expires_at'], record['created_at'] + 600),
+                        'channels': record['channels'],
+                    }
+                    channel_envelope = {
+                        'key': delivery_key, 'context': context,
+                        'title': payload.get('subject', 'Weather alert'),
+                        'body': payload.get('body', ''),
+                    }
                 _write_retry_state(locked_path, state)
-            if record.get("channels_pending"):
-                context = {'source_validity':record.get('source_validity'), 'event':payload.get('event',''),
-                           'severity':payload.get('severity',''), 'deadline_at':min(record['expires_at'],record['created_at']+600),
-                           'channels':record['channels']}
-                envelope = {'key':delivery_key, 'context':context, 'title':payload.get('subject','Weather alert'), 'body':payload.get('body','')}
+
+            if channel_envelope is not None:
                 try:
-                    process = subprocess.run(['/usr/bin/timeout','40','/usr/bin/php','/usr/local/bin/sls_mass_notify/sls_mass_notify_weather_channels.php'],
-                        input=json.dumps(envelope,separators=(',',':')),capture_output=True,text=True,timeout=45,check=False,
-                        env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','LC_ALL':'C.UTF-8'})
-                    reply=_strict_json(process.stdout) if len(process.stdout)<16384 else {}
+                    process = subprocess.run(
+                        ['/usr/bin/timeout', '40', '/usr/bin/php',
+                         '/usr/local/bin/sls_mass_notify/sls_mass_notify_weather_channels.php'],
+                        input=json.dumps(channel_envelope, separators=(',', ':')),
+                        capture_output=True, text=True, timeout=45, check=False,
+                        env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'},
+                    )
+                    reply = _strict_json(process.stdout) if len(process.stdout) < 16384 else {}
                     if (not isinstance(reply, dict) or type(reply.get('success')) is not bool
                             or not isinstance(reply.get('status'), str)
                             or reply['status'] not in {'accepted', 'queued', 'deferred', 'failed', 'cancelled', 'uncertain'}
-                            or not isinstance(reply.get('message', ''), str) or len(reply.get('message', '')) > 400
+                            or not isinstance(reply.get('message', ''), str)
+                            or len(reply.get('message', '')) > 400
                             or not isinstance(reply.get('job_id', ''), str)
-                            or (reply.get('job_id', '') and not re.fullmatch(r'job_[a-f0-9]{32}', reply['job_id']))):
-                        raise ValueError('Invalid Weather channel reply')
+                            or (reply.get('job_id', '')
+                                and not re.fullmatch(r'job_[a-f0-9]{32}', reply['job_id']))):
+                        raise ValueError('invalid_weather_channel_reply')
                 except Exception:
-                    reply={'success':False,'status':'deferred','message':'weather_channel_submission_unavailable'}
-                status=reply.get('status','deferred')
-                if status in {'accepted','queued','failed','cancelled','uncertain'}:
-                    record['channels_pending']=False
-                    record['channel_job_id']=reply.get('job_id','')
-                receipt={'type':'channels','id':'sms_external_voice','status':status,'error':str(reply.get('message',''))[:400]}
-                if status == 'uncertain':
-                    record['channels_uncertain'] = dict(receipt)
-                safe_results.append({'delivery':delivery_key,**receipt});_record_external_receipt(record,receipt)
-                _write_retry_state(locked_path,state)
-            if record.get("email_pending"):
-                record['email_inflight'] = True
-                _write_retry_state(locked_path, state)
-                uncertain_email = False; error_code = ''
-                try:
-                    sent = email_sender(
-                        config,
-                        payload.get("subject", ""),
-                        payload.get("body", ""),
-                        payload.get("event", ""),
-                        payload.get("severity", ""),
-                        record.get("email_recipients", ""),
+                    # The helper can enqueue a durable PBX job before its
+                    # response is truncated, malformed, or times out.  Treat
+                    # every unconfirmed handoff as uncertain; only a validated
+                    # explicit `deferred` reply proves that retry is safe.
+                    reply = {
+                        'success': False, 'status': 'uncertain',
+                        'message': 'weather_channel_submission_unconfirmed',
+                    }
+                with _locked_retry_state(state_path) as locked_path:
+                    state = _load_retry_state(locked_path)
+                    record = state['deliveries'].get(delivery_key)
+                    if (not isinstance(record, dict) or record.get('worker_claim') != claim_token
+                            or not record.get('channels_inflight')):
+                        raise RetryStateError('retry_channel_intent_lost')
+                    status = reply.get('status', 'deferred')
+                    record['channels_inflight'] = False
+                    record['worker_claimed_at'] = max(0, int(time.time()))
+                    if status in {'accepted', 'queued', 'failed', 'cancelled', 'uncertain'}:
+                        record['channels_pending'] = False
+                        record['channel_job_id'] = reply.get('job_id', '')
+                    receipt = {
+                        'type': 'channels', 'id': 'sms_external_voice', 'status': status,
+                        'error': str(reply.get('message', ''))[:400],
+                    }
+                    if status == 'uncertain':
+                        record['channels_uncertain'] = dict(receipt)
+                    safe_results.append({'delivery': delivery_key, **receipt})
+                    _record_external_receipt(record, receipt)
+                    _write_retry_state(locked_path, state)
+
+            # The previous channel handoff can consume most of its 40-second
+            # budget. Its authority cannot authorize a later email or webhook.
+            decision, reason = authority(delivery_key, claim_token)
+            if decision != 'eligible':
+                safe_results.append({'delivery': delivery_key, 'type': 'source', 'id': 'weather',
+                                     'status': decision, 'error': reason})
+                continue
+            email_arguments = None
+            with _locked_retry_state(state_path) as locked_path:
+                state = _load_retry_state(locked_path)
+                record = state['deliveries'].get(delivery_key)
+                if not isinstance(record, dict) or record.get('worker_claim') != claim_token:
+                    raise RetryStateError('retry_worker_claim_lost')
+                record['worker_claimed_at'] = max(0, int(time.time()))
+                payload = record.get('payload') if isinstance(record.get('payload'), dict) else {}
+                if record.get('email_pending'):
+                    record['email_inflight'] = True
+                    email_arguments = (
+                        payload.get('subject', ''), payload.get('body', ''),
+                        payload.get('event', ''), payload.get('severity', ''),
+                        record.get('email_recipients', ''),
                     )
+                _write_retry_state(locked_path, state)
+
+            if email_arguments is not None:
+                uncertain_email = False
+                error_code = ''
+                suppressed = ''
+                email_guard = _WeatherSubmissionGuard(
+                    lambda: authority(delivery_key, claim_token, 'email', email_arguments[-1]))
+                try:
+                    if not email_guard():
+                        raise MailSubmissionSuppressed(email_guard.decision, email_guard.reason)
+                    if email_sender is None:
+                        sender = guarded_email_sender or _default_email_sender
+                        sent = sender(effective_config[0], *email_arguments, submission_guard=email_guard)
+                    else:
+                        # Legacy injected transports keep their positional
+                        # contract; authority is checked immediately at handoff.
+                        sent = email_sender(effective_config[0], *email_arguments)
+                except MailSubmissionSuppressed as error:
+                    sent = False
+                    suppressed, error_code = error.decision, error.reason
                 except Exception as error:
                     sent = False
                     try:
@@ -1996,70 +2297,89 @@ def retry_external_deliveries(
                     if admission_blocked:
                         error_code = error.code
                     else:
-                        uncertain_email = True; error_code = 'submission_unconfirmed'
+                        uncertain_email = True
+                        error_code = 'submission_unconfirmed'
                 if sent is not True and sent is not False:
-                    uncertain_email = True; error_code = 'submission_unconfirmed'
-                status = 'uncertain' if uncertain_email else 'accepted' if sent else 'failed'
+                    uncertain_email = True
+                    error_code = 'submission_unconfirmed'
+                status = suppressed or ('uncertain' if uncertain_email else 'accepted' if sent else 'failed')
                 receipt = {
-                    "delivery": delivery_key,
-                    "type": "email",
-                    "id": "email",
-                    "status": status,
-                    "error": '' if sent is True else error_code or 'submission_failed',
+                    'delivery': delivery_key, 'type': 'email', 'id': 'email',
+                    'status': status,
+                    'error': '' if sent is True else error_code or 'submission_failed',
                 }
-                safe_results.append(receipt)
-                _record_external_receipt(record, receipt)
-                record['email_inflight'] = False
-                if uncertain_email:
-                    record['email_uncertain'] = {key: receipt[key] for key in ('type', 'id', 'status', 'error')}
-                if sent or uncertain_email:
-                    record["email_pending"] = False
+                with _locked_retry_state(state_path) as locked_path:
+                    state = _load_retry_state(locked_path)
+                    record = state['deliveries'].get(delivery_key)
+                    if (not isinstance(record, dict) or record.get('worker_claim') != claim_token
+                            or not record.get('email_inflight')):
+                        raise RetryStateError('retry_email_intent_lost')
+                    record['worker_claimed_at'] = max(0, int(time.time()))
+                    record['email_inflight'] = False
+                    if uncertain_email:
+                        record['email_uncertain'] = {
+                            key: receipt[key] for key in ('type', 'id', 'status', 'error')
+                        }
+                    if sent or uncertain_email or suppressed == 'cancelled':
+                        record['email_pending'] = False
+                    safe_results.append(receipt)
+                    _record_external_receipt(record, receipt)
+                    _write_retry_state(locked_path, state)
+
+            current = read_configuration()
+            configured_rows = _destination_rows(current, 'discord') + _destination_rows(current, 'generic')
+            configured_keys = {f"{row['kind']}:{row['id']}" for row in configured_rows}
+            active = set()
+            webhook_payload = {}
+            skip_remaining = False
+            with _locked_retry_state(state_path) as locked_path:
+                state = _load_retry_state(locked_path)
+                record = state['deliveries'].get(delivery_key)
+                if not isinstance(record, dict) or record.get('worker_claim') != claim_token:
+                    raise RetryStateError('retry_worker_claim_lost')
+                now = max(0, int(time.time()))
+                record['worker_claimed_at'] = now
+                active = set(str(value) for value in (record.get('webhook_pending') or [])) & configured_keys
+                record['webhook_pending'] = sorted(active)
+                if active:
+                    eligibility, reason, _group = current_authority(record, current, locked_path.parent, now)
+                    record.update(source_checked_at=now, source_decision=eligibility, source_reason=reason)
+                    if eligibility != 'eligible':
+                        if eligibility == 'cancelled':
+                            _cancel_external_remaining(record, now, reason)
+                        safe_results.append({
+                            'delivery': delivery_key, 'type': 'source', 'id': 'weather',
+                            'status': eligibility, 'error': reason,
+                        })
+                        skip_remaining = True
+                    else:
+                        record['webhook_inflight'] = sorted(active)
+                        webhook_payload = (
+                            record.get('payload') if isinstance(record.get('payload'), dict) else {}
+                        )
                 _write_retry_state(locked_path, state)
 
-            configured_rows = _destination_rows(config, "discord") + _destination_rows(config, "generic")
-            configured_keys = {f"{row['kind']}:{row['id']}" for row in configured_rows}
-            requested = set(str(value) for value in (record.get("webhook_pending") or []))
-            active = requested & configured_keys
-            # Removing or disabling a destination cancels its outstanding work;
-            # a deleted secret must never be retained in retry state.
-            record["webhook_pending"] = sorted(active)
-            if active:
-                # A slow local email submission can cross a quiet-hour or
-                # source-validity boundary. Recheck before starting HTTP.
-                eligibility, reason, _group = (validity_checker or validate_external_weather)(
-                    record, config, locked_path.parent, int(time.time())
-                )
-                if eligibility != "eligible":
-                    record.update(source_checked_at=int(time.time()), source_decision=eligibility, source_reason=reason)
-                    if eligibility == "cancelled":
-                        record.update(completed_at=int(time.time()), terminal_status="cancelled",
-                                      terminal_reason=reason, webhook_pending=[])
-                    safe_results.append({"delivery": delivery_key, "type": "source", "id": "weather",
-                                         "status": eligibility, "error": reason})
-                    _write_retry_state(locked_path, state)
-                    continue
-                # Persist intent before entering any transport.  The dispatcher
-                # returns receipts for every selected destination, including
-                # definite failures for work it did not have time to start.
-                record["webhook_inflight"] = sorted(active)
-                _write_retry_state(locked_path, state)
+            if active and not skip_remaining:
                 try:
-                    webhook_results = webhook_dispatcher(
-                        config,
-                        payload.get("subject", ""),
-                        payload.get("body", ""),
-                        payload.get("event", ""),
-                        payload.get("severity", ""),
-                        payload.get("fields") or [],
-                        payload.get("timestamp", ""),
-                        normalized_source,
-                        payload.get("event_id", ""),
-                        payload.get("details") or {},
-                        live=True,
-                        test=False,
-                        dry_run=False,
-                        destination_keys=active,
-                    )
+                    decision, reason = authority(delivery_key, claim_token)
+                    if decision != 'eligible':
+                        webhook_results = [{'type': row['kind'], 'id': row['id'], 'name': row['name'],
+                            'status': decision, 'error': reason, 'attempts': 0, 'retryable': decision == 'deferred'}
+                            for row in configured_rows if row['kind'] + ':' + row['id'] in active]
+                    else:
+                        dispatcher = webhook_dispatcher or guarded_webhook_dispatcher or dispatch_webhook_destinations
+                        guarded = {} if webhook_dispatcher is not None else {'submission_guard_factory': lambda row: _WeatherSubmissionGuard(
+                            lambda: authority(delivery_key, claim_token, 'webhook', row['kind'] + ':' + row['id']))}
+                        webhook_results = dispatcher(
+                            effective_config[0],
+                            webhook_payload.get('subject', ''), webhook_payload.get('body', ''),
+                            webhook_payload.get('event', ''), webhook_payload.get('severity', ''),
+                            webhook_payload.get('fields') or [], webhook_payload.get('timestamp', ''),
+                            normalized_source, webhook_payload.get('event_id', ''),
+                            webhook_payload.get('details') or {},
+                            live=True, test=False, dry_run=False, destination_keys=active,
+                            **guarded,
+                        )
                 except Exception:
                     webhook_results = []
                 receipts = {}
@@ -2068,49 +2388,91 @@ def retry_external_deliveries(
                         key = f"{result.get('type')}:{result.get('id')}"
                         if key in active:
                             receipts[key] = result
-                uncertain = record.get("webhook_uncertain") or {}
-                if not isinstance(uncertain, dict):
-                    raise RetryStateError("retry_state_corrupt")
-                retryable = set()
-                for row in configured_rows:
-                    key = f"{row['kind']}:{row['id']}"
-                    if key not in active:
-                        continue
-                    result = receipts.get(key)
-                    if not result or result.get("status") not in {"accepted", "failed", "uncertain"}:
-                        result = _uncertain_delivery(row, reason="dispatcher_failed")
-                    if result.get("status") == "uncertain":
-                        uncertain[key] = result
-                    elif result.get("status") == "failed" and _webhook_result_retryable(result):
-                        retryable.add(key)
-                    safe_results.append({"delivery": delivery_key, **result})
-                    _record_external_receipt(record, result)
-                record["webhook_pending"] = sorted(retryable)
-                record["webhook_uncertain"] = uncertain
-                record["webhook_inflight"] = []
-                _write_retry_state(locked_path, state)
+                with _locked_retry_state(state_path) as locked_path:
+                    state = _load_retry_state(locked_path)
+                    record = state['deliveries'].get(delivery_key)
+                    if (not isinstance(record, dict) or record.get('worker_claim') != claim_token
+                            or set(record.get('webhook_inflight') or []) != active):
+                        raise RetryStateError('retry_webhook_intent_lost')
+                    uncertain = record.get('webhook_uncertain') or {}
+                    if not isinstance(uncertain, dict):
+                        raise RetryStateError('retry_state_corrupt')
+                    retryable = set()
+                    for row in configured_rows:
+                        key = f"{row['kind']}:{row['id']}"
+                        if key not in active:
+                            continue
+                        result = receipts.get(key)
+                        if not result or result.get('status') not in {'accepted', 'failed', 'uncertain', 'cancelled', 'deferred'}:
+                            result = _uncertain_delivery(row, reason='dispatcher_failed')
+                        if result.get('status') == 'uncertain':
+                            uncertain[key] = result
+                        elif result.get('status') == 'deferred':
+                            retryable.add(key)
+                        elif result.get('status') == 'cancelled':
+                            record['routing_restricted_at'] = max(0, int(time.time()))
+                        elif result.get('status') == 'failed' and _webhook_result_retryable(result):
+                            retryable.add(key)
+                        safe_results.append({'delivery': delivery_key, **result})
+                        _record_external_receipt(record, result)
+                    record['webhook_pending'] = sorted(retryable)
+                    record['webhook_uncertain'] = uncertain
+                    record['webhook_inflight'] = []
+                    record['worker_claimed_at'] = max(0, int(time.time()))
+                    _write_retry_state(locked_path, state)
 
-            if not record.get("email_pending") and not record.get("webhook_pending") and not record.get("channels_pending"):
-                record["completed_at"] = int(time.time())
-                record["terminal_status"] = ("uncertain" if record.get("webhook_uncertain") or record.get('email_uncertain') or record.get('channels_uncertain') else
-                                             "failed" if any(receipt.get('status') == 'failed' for receipt in record.get('destination_receipts', {}).values()) else
-                                             "partial_cancelled" if record.get("routing_restricted_at") else "complete")
+            with _locked_retry_state(state_path) as locked_path:
+                state = _load_retry_state(locked_path)
+                record = state['deliveries'].get(delivery_key)
+                if not isinstance(record, dict) or record.get('worker_claim') != claim_token:
+                    raise RetryStateError('retry_worker_claim_lost')
+                if (not record.get('email_pending') and not record.get('webhook_pending')
+                        and not record.get('channels_pending')):
+                    record['completed_at'] = max(0, int(time.time()))
+                    record['terminal_status'] = (
+                        ('partial_cancelled' if any(receipt.get('status') in {'accepted', 'queued', 'uncertain'}
+                            for receipt in record.get('destination_receipts', {}).values()) else 'cancelled')
+                        if record.get('source_decision') == 'cancelled'
+                        else
+                        'uncertain'
+                        if (record.get('webhook_uncertain') or record.get('email_uncertain')
+                            or record.get('channels_uncertain'))
+                        else 'failed'
+                        if any(receipt.get('status') == 'failed'
+                               for receipt in record.get('destination_receipts', {}).values())
+                        else 'partial_cancelled' if record.get('routing_restricted_at') else 'complete'
+                    )
+                record.update(worker_claim='', worker_claimed_at=0)
                 _write_retry_state(locked_path, state)
+                claim_token = ''
+        finally:
+            if delivery_key and claim_token:
+                try:
+                    release_claim(delivery_key, claim_token)
+                except RetryStateError:
+                    # A bounded stale lease is recoverable. Never replace the
+                    # original transport exception with a cleanup exception.
+                    pass
+
+    with _locked_retry_state(state_path) as locked_path:
+        state = _load_retry_state(locked_path)
+        now = max(0, int(time.time()))
+        _release_stale_retry_claims(state, now)
+        _prune_retry_state(state, now)
         pending = sum(
-            1
-            for record in state["deliveries"].values()
-            if isinstance(record, dict)
-            and int(record.get("completed_at", 0) or 0) == 0
-            and str((record.get("payload") or {}).get("source") or "").lower() == normalized_source
+            1 for record in state['deliveries'].values()
+            if isinstance(record, dict) and not record.get('completed_at')
+            and str((record.get('payload') or {}).get('source') or '').lower() == normalized_source
         )
         uncertain = sum(
-            1 for record in state["deliveries"].values()
-            if isinstance(record, dict) and (record.get("webhook_uncertain") or record.get('email_uncertain')
-                                             or record.get('channels_uncertain'))
-            and str((record.get("payload") or {}).get("source") or "").lower() == normalized_source
+            1 for record in state['deliveries'].values()
+            if isinstance(record, dict)
+            and (record.get('webhook_uncertain') or record.get('email_uncertain')
+                 or record.get('channels_uncertain'))
+            and str((record.get('payload') or {}).get('source') or '').lower() == normalized_source
         )
         _write_retry_state(locked_path, state)
-    return {"results": safe_results, "pending": pending, "uncertain": uncertain}
+    return {'results': safe_results, 'pending': pending, 'uncertain': uncertain}
 
 
 def dispatch_discord_destinations(
@@ -2243,7 +2605,10 @@ def main():
                 raise ValueError('oversize authorization context')
             authorization = _strict_json(raw_authorization) if raw_authorization else None
             if authorization is not None and (not isinstance(authorization, dict) or
-                    set(authorization) - {'api_credential_id', 'automation_context', 'webhook_ids'}):
+                    set(authorization) - {'api_credential_id', 'api_credential_revision', 'automation_context', 'webhook_ids'}
+                    or ('api_credential_revision' in authorization and
+                        (not isinstance(authorization['api_credential_revision'], str) or
+                         not re.fullmatch(r'[a-f0-9]{64}', authorization['api_credential_revision'])))):
                 raise ValueError('invalid authorization context')
         except ValueError:
             print('{"results":[],"error":"invalid_authorization_context"}')
@@ -2288,7 +2653,7 @@ def main():
                     retry_state_path,
                     config,
                     correlation_key,
-                    os.environ.get("SLS_DESTINATION_SUBJECT", "Southland Servers Mass Notification"),
+                    os.environ.get("SLS_DESTINATION_SUBJECT", "SLL Mass Notify Server"),
                     os.environ.get("SLS_DESTINATION_BODY", "A notification was issued."),
                     os.environ.get("SLS_DESTINATION_EVENT", ""),
                     os.environ.get("SLS_DESTINATION_SEVERITY", ""),
@@ -2307,6 +2672,7 @@ def main():
                 test=False,
                 dry_run=False,
                 preferred_correlation_key=correlation_key,
+                configuration_reader=lambda: _config_crypto.read_config(config_path),
             )
             current_pending = (
                 external_delivery_pending(retry_state_path, source, correlation_key)
@@ -2332,7 +2698,7 @@ def main():
     requested_budget = os.environ.get("SLS_DESTINATION_BUDGET_SECONDS", DEFAULT_DELIVERY_BUDGET)
     results = dispatch_webhook_destinations(
         config,
-        os.environ.get("SLS_DESTINATION_SUBJECT", "Southland Servers Mass Notification"),
+        os.environ.get("SLS_DESTINATION_SUBJECT", "SLL Mass Notify Server"),
         os.environ.get("SLS_DESTINATION_BODY", "A notification was issued."),
         os.environ.get("SLS_DESTINATION_EVENT", ""),
         os.environ.get("SLS_DESTINATION_SEVERITY", ""),

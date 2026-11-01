@@ -161,12 +161,31 @@ if (!$agi->hasReturnedToIvr() && !in_array($case,['visual_connected','no_text_co
     settings = json.loads((root/'settings.json').read_text())
     settings.update(phone_device_limit=25, sipnotify={'format_overrides':{'1001':'yealink'}}, ami={'host':'127.0.0.1','port':5038,'username':'fixture','password':'fixture-isolated-only'})
     data = Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin'); data.mkdir(parents=True,exist_ok=True)
+    account = pwd.getpwnam('asterisk')
+    def write_runtime_settings(value):
+        """Publish fixture settings with the same atomic/private contract as production."""
+        payload=json.dumps(value,separators=(',',':')).encode()
+        temporary=data/('.mass-notifications.config.fixture-'+str(os.getpid()))
+        temporary.unlink(missing_ok=True)
+        descriptor=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
+        try:
+            os.fchmod(descriptor,0o640);os.fchown(descriptor,account.pw_uid,account.pw_gid)
+            view=memoryview(payload)
+            while view:
+                written=os.write(descriptor,view)
+                if written<=0:raise OSError('short fixture configuration write')
+                view=view[written:]
+            os.fsync(descriptor)
+        finally:os.close(descriptor)
+        os.replace(temporary,data/'mass-notifications.config')
+        directory=os.open(data,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(directory)
+        finally:os.close(directory)
     preserved = {}
     for name in ('mass-notifications.config','phone-admission.json','phone-events.lock'):
         path = data/name
         preserved[name] = (path.read_bytes(),path.stat()) if path.exists() else None
-    (data/'mass-notifications.config').write_text(json.dumps(settings)); (data/'mass-notifications.config').chmod(0o640)
-    account = pwd.getpwnam('asterisk'); os.chown(data/'mass-notifications.config',account.pw_uid,account.pw_gid)
+    write_runtime_settings(settings)
     worker_lock=data/'enterprise-worker.lock';worker_lock.touch(mode=0o640);worker_lock.chmod(0o640)
     os.chown(worker_lock,account.pw_uid,account.pw_gid)
     (root/'etc/manager.conf').write_text('[general]\nenabled=yes\nport=5038\nbindaddr=127.0.0.1\n[fixture]\nsecret=fixture-isolated-only\nread=all\nwrite=all\n')
@@ -367,6 +386,20 @@ raise SystemExit(module.main())
             else:raise RuntimeError('Private PJSIP endpoint did not initialize: '+endpoint)
             register_contact(300)
             collector = subprocess.Popen(['/usr/bin/python3','-I','/usr/local/bin/sls_mass_notify/sls_phone_events.py'],stdout=console,stderr=console)
+            def wait_collector_ready(context):
+                deadline=time.monotonic()+10
+                last='no health response'
+                while time.monotonic()<deadline:
+                    if collector.poll() is not None:
+                        raise RuntimeError('Private collector stopped during '+context+': '+(root/'console.log').read_text()[-3000:])
+                    probe=subprocess.run(['/usr/bin/python3','-I','/usr/local/bin/sls_mass_notify/sls_phone_events.py','--health'],
+                        capture_output=True,text=True,timeout=5)
+                    last=(probe.stdout+probe.stderr)[-3000:]
+                    try:health=json.loads(probe.stdout)
+                    except ValueError:health={}
+                    if probe.returncode==0 and health.get('ok') is True and health.get('connected') is True:return
+                    time.sleep(.1)
+                raise RuntimeError('Private collector did not establish fresh AMI readiness during '+context+': '+last+'; '+(root/'console.log').read_text()[-3000:])
             for _ in range(100):
                 try:
                     state = json.loads((data/'phone-admission.json').read_bytes())
@@ -375,6 +408,7 @@ raise SystemExit(module.main())
                 if collector.poll() is not None: raise RuntimeError('Private collector failed: '+(root/'console.log').read_text()[-2000:])
                 time.sleep(.1)
             else: raise RuntimeError('Private collector did not establish AMI readiness')
+            wait_collector_ready('startup')
             cases = [('unlisted','+15125550124','allowed','0123','external_caller_not_approved','ivr-1'),
                      ('withheld','+15125550123','prohib_not_screened','0123','external_caller_not_approved','ivr-1'),
                      ('approved','5125550123','allowed','0123','page_ended','ivr-1'),
@@ -392,6 +426,7 @@ raise SystemExit(module.main())
             if os.environ.get('SLS_PAGING_VISUAL_ONLY')=='1':
                 cases=[case for case in cases if case[0] in ('visual_connected','immediate_speech')]
             for case, number, presentation, pin, expected, ivr in cases:
+                wait_collector_ready('case '+case)
                 behavior['answer'] = case in ('visual_connected','no_text_connected','immediate_speech')
                 sip_start=len(sip_evidence);rtp_start=len(rtp_evidence)
                 for name in ('cue-result.json','cue-results.jsonl','cue-events.jsonl','caller.wav','caller-read.wav','speech-start.json'):(root/name).unlink(missing_ok=True)
@@ -399,7 +434,8 @@ raise SystemExit(module.main())
                 if case=='no_text_connected':
                     for group in current['live_paging']['groups']:group['notify_extensions']=[]
                 (root/'settings.json').write_text(json.dumps(current))
-                (data/'mass-notifications.config').write_text(json.dumps(current))
+                write_runtime_settings(current)
+                wait_collector_ready('updated configuration for '+case)
                 if case in ('offline', 'reregistered'):
                     # Remove and restore the actual private Asterisk contact;
                     # retain the group, PIN and caller settings unchanged.
@@ -419,7 +455,14 @@ raise SystemExit(module.main())
                     time.sleep(.1)
                 else: raise RuntimeError('No private paging result: '+(root/'log/evidence').read_text()[-3000:])
                 evidence = json.loads(result.read_text())
-                assert evidence['result']['status'] == expected, (case,evidence,(root/'log/evidence').read_text()[-2000:], (root/'console.log').read_text()[:4500])
+                if evidence['result']['status'] != expected:
+                    diagnostics = {'case': case, 'expected': expected, 'result': evidence,
+                        'asterisk_log': (root/'log/evidence').read_text()[-6000:],
+                        'console': (root/'console.log').read_text()[-8000:]}
+                    for label, path in [('admission_ledger', data/'phone-admission.json'),
+                                        ('visual_debug', root/'visual-debug.log')]:
+                        if path.exists(): diagnostics[label] = path.read_text()[-8000:]
+                    raise AssertionError(diagnostics)
                 if expected == 'external_caller_not_approved': assert evidence['evidence'] == ['denied'], evidence
                 elif case in ('approved','single_digit','legacy_empty','group_ten','reregistered','visual_connected','no_text_connected','immediate_speech','ready_unanswered'): assert evidence['evidence'] == ['menu','pin_prompt','admission','page'], evidence
                 elif case == 'offline':

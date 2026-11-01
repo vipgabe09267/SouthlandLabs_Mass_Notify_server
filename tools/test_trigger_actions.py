@@ -49,7 +49,8 @@ class TriggerActions(unittest.TestCase):
     def script(self, text, extension='sh'):
         path = self.directory / ('script-' + os.urandom(8).hex() + '.' + extension)
         path.write_text(text); path.chmod(0o644)
-        return {'enabled':True,'kind':'script','path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+        return {'enabled':True,'kind':'script','path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+            'execution_mode':'trusted'}
 
     def test_restricted_mode_requires_isolation_without_fallback(self):
         action=self.script('echo SHOULD_NOT_RUN\n');action['execution_mode']='restricted'
@@ -61,6 +62,14 @@ class TriggerActions(unittest.TestCase):
             command=actions.restricted_command(7,'/bin/bash')
             self.assertIn('--unshare-all',command);self.assertIn('--disable-userns',command)
             self.assertNotIn('/etc',command);self.assertNotIn('/var/lib/asterisk',command)
+
+    def test_omitted_execution_mode_is_restricted_not_trusted(self):
+        action=self.script('echo SHOULD_NOT_RUN\n')
+        action.pop('execution_mode')
+        if not Path('/usr/bin/bwrap').exists():
+            result=self.worker(action)
+            self.assertEqual(result['state'],'failed')
+            self.assertIn('No unrestricted fallback',result['detail'])
 
     def test_actual_restricted_script_when_private_binary_is_supplied(self):
         binary=os.environ.get('SLS_BWRAP_FIXTURE','')

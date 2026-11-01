@@ -1,16 +1,16 @@
 <module>
 	<rawname>slsmassnotifyserver</rawname>
 	<repo>custom</repo>
-	<name>Southland Servers Mass Notifications Server</name>
-	<version>0.1.8-beta</version>
-	<publisher>Southland Servers</publisher>
+	<name>SLL Mass Notify Server</name>
+	<version>0.1.9-beta</version>
+	<publisher>Southland Labs</publisher>
 	<license>AGPLv3+</license>
 	<licenselink>https://www.gnu.org/licenses/agpl-3.0.txt</licenselink>
 	<candisable>yes</candisable>
 	<canuninstall>yes</canuninstall>
 	<category>User Panel Z</category>
 	<description>
-		Southland Servers Mass Notifications Server for FreePBX. Provides SIP NOTIFY alerts, scheduled announcements, U.S. weather.gov and optional Xweather notifications, live desktop notifications, and Piper TTS audio.
+		SLL Mass Notify Server for FreePBX. Provides SIP NOTIFY alerts, scheduled announcements, U.S. weather.gov and optional Xweather notifications, live desktop notifications, and Piper TTS audio.
 	</description>
 	<menuitems>
 		<slsmassnotifyserver_operations category="Mass Notify" sort="0.5" href="/mass-notify/" target="_blank">Operator Portal</slsmassnotifyserver_operations>

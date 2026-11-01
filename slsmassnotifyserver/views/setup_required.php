@@ -1,6 +1,6 @@
 <?php
 declare(strict_types=1);
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 $setupModal = is_string($setup_modal ?? null) ? $setup_modal : '';
 $page = is_string($requested_page ?? null) ? trim($requested_page) : '';
 $heroImage = is_string($hero_image ?? null) ? $hero_image : '';

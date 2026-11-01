@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only admission checks for provisional combined PBX/SLS resource tiers.
+"""Read-only admission checks for provisional combined PBX/SLL resource tiers.
 
 These engineering allocations do not certify delivery throughput. Desktop
 transport retains its separate stream limit and requires JSON-poll fallback.
@@ -21,6 +21,10 @@ import types
 GIB = 1024 ** 3
 MIB = 1024 ** 2
 TIERS = ((50, 2, 4), (100, 3, 5), (250, 4, 6), (500, 6, 8), (1000, 8, 12))
+LITE_TIERS = ((25, 2, 2),)
+DEPLOYMENT_PROFILES = ('standard', 'lite')
+LITE_MAX_DESKTOPS = 25
+LITE_MAX_PHONES = 25
 MAX_KERNEL_RESERVE = 256 * MIB
 PHONE_BASELINE = 25
 # 2026-10-02 private Asterisk: 25/50/100 PCM conference recipients used
@@ -226,14 +230,14 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
     except FileNotFoundError:
         return result
     if not stat.S_ISDIR(root_metadata.st_mode):
-        raise ValueError('An SLS storage root is not a real directory')
+        raise ValueError('An SLL storage root is not a real directory')
     cache = {} if cache is None else cache
     if str(root) in cache: return dict(cache[str(root)])
     seen, seen_directories, examined, pending = set(), set(), 0, [(root, False)]
     reports, children = {}, {}
     while pending:
         if time.monotonic() > deadline:
-            raise ResourceProbeError('storage_scan_timeout', 'SLS storage measurement exceeded its time limit. Reduce retained files or resolve storage latency, then retry.')
+            raise ResourceProbeError('storage_scan_timeout', 'SLL storage measurement exceeded its time limit. Reduce retained files or resolve storage latency, then retry.')
         directory, complete = pending.pop()
         key = str(directory)
         if complete:
@@ -264,9 +268,9 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
                 for entry in entries:
                     examined += 1
                     if examined > maximum_entries:
-                        raise ResourceProbeError('storage_scan_entry_limit', 'SLS storage measurement exceeded its ' + str(maximum_entries) + '-entry limit. Review retained files before retrying.')
+                        raise ResourceProbeError('storage_scan_entry_limit', 'SLL storage measurement exceeded its ' + str(maximum_entries) + '-entry limit. Review retained files before retrying.')
                     if time.monotonic() > deadline:
-                        raise ResourceProbeError('storage_scan_timeout', 'SLS storage measurement exceeded its time limit. Resolve storage latency or reduce retained files before retrying.')
+                        raise ResourceProbeError('storage_scan_timeout', 'SLL storage measurement exceeded its time limit. Resolve storage latency or reduce retained files before retrying.')
                     try:
                         metadata = entry.stat(follow_symlinks=False)
                     except FileNotFoundError:
@@ -290,10 +294,10 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
             if re.fullmatch(r'[A-Za-z0-9_./-]{1,120}', relative) and relative != '.':
                 detail += '/' + relative
             raise ResourceProbeError('storage_directory_unreadable',
-                'The PBX account cannot read SLS storage at ' + detail +
+                'The PBX account cannot read SLL storage at ' + detail +
                 '. Run Repair Installation to restore directory traversal/read permissions, then retry the resource check.') from error
         except OSError as error:
-            raise ValueError('Unable to measure an SLS storage directory safely') from error
+            raise ValueError('Unable to measure an SLL storage directory safely') from error
     return dict(cache.get(str(root), result))
 
 
@@ -499,6 +503,43 @@ def trusted_temporary_directory(path):
         return False
 
 
+def probe_runtime_speech_scratch(profile, saved):
+    """Installer scratch fallback does not move the runtime's /tmp audio files."""
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid deployment profile')
+    slots = saved.get('speech_synthesis_limit', 1)
+    reserve = saved.get('generated_media_min_free_mib', 128)
+    if type(slots) is not int or not 1 <= slots <= 4 or type(reserve) is not int or not 64 <= reserve <= 4096:
+        raise ValueError('Invalid speech workspace settings')
+    if profile == 'lite':
+        if saved.get('deployment_profile', 'standard') == 'lite' and slots > 1:
+            raise ValueError('Invalid Lite speech concurrency')
+        slots = 1
+    if not trusted_temporary_directory('/tmp'):
+        raise ResourceProbeError('runtime_speech_workspace_unsafe',
+            'Runtime audio requires the standard root-owned /tmp directory with safe sticky permissions. Restore its ownership and permissions before installing.')
+    if os.geteuid() == 0:
+        try:
+            access = subprocess.run(['/usr/sbin/runuser', '-u', 'asterisk', '--', '/usr/bin/test',
+                                     '-w', '/tmp', '-a', '-x', '/tmp'], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            access = False
+    else:
+        access = os.access('/tmp', os.W_OK | os.X_OK)
+    if not access:
+        raise ResourceProbeError('runtime_speech_workspace_unsafe',
+            'The PBX account cannot write and traverse /tmp for runtime audio. Restore that directory access before installing.')
+    usage = os.statvfs('/tmp')
+    # Match Admission.bytes at the supported 600-second bound and preserve
+    # its configured free-space floor; this is a prerequisite, not a quota.
+    required = reserve * MIB + slots * (600 * (48000 * 2 + 8000 * 2 * 4) + MIB)
+    return {'path': '/tmp', 'available_bytes': usage.f_bavail * usage.f_frsize,
+            'required_free_bytes': required, 'synthesis_workers': slots,
+            'read_only': bool(getattr(usage, 'f_flag', 0) & os.ST_RDONLY),
+            'inodes_exhausted': getattr(usage, 'f_files', 0) > 0 and getattr(usage, 'f_favail', None) == 0}
+
+
 def probe_storage_filesystems(storage, temporary_directory=None):
     """Use persistent scratch space when a small /tmp cannot hold the install.
 
@@ -632,17 +673,28 @@ def configured_limits(path):
         raise ValueError('Invalid notification capacity')
     optional=value.get('speech_optional_voice_packs',[])
     if not isinstance(optional,list) or len(optional)>2 or any(not isinstance(pack,str) or pack not in REGIONAL_VOICE_BYTES for pack in optional) or len(set(optional))!=len(optional):raise ValueError('Invalid optional speech packs')
+    profile=value.get('deployment_profile','standard')
+    if not isinstance(profile,str) or profile not in DEPLOYMENT_PROFILES:raise ValueError('Invalid deployment profile')
+    capacities['deployment_profile']=profile
     if optional:capacities['speech_optional_voice_packs']=optional
+    for key, minimum, maximum in (('speech_synthesis_limit', 1, 4), ('generated_media_min_free_mib', 64, 4096)):
+        if key in value:
+            field=value[key]
+            if type(field) is not int or not minimum <= field <= maximum:raise ValueError('Invalid speech workspace settings')
+            capacities[key]=field
     return capacities
 
 
-def rounded_phone_capacity(count):
+def rounded_phone_capacity(count, profile='standard'):
     """Retain 25 for small installations, then round up in blocks of 50."""
     if type(count) is not int or count < 0:
         raise ValueError('Invalid detected phone count')
-    if count > 1000:
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid deployment profile')
+    maximum = LITE_MAX_PHONES if profile == 'lite' else 1000
+    if count > maximum:
         raise ResourceProbeError('phone_inventory_exceeds_limit',
-            'More than 1000 internal phone contacts were detected. SLS supports at most 1000 simultaneous contacts; review the device inventory before installation.')
+            f'{count} internal phone contacts were detected, but SLL {profile.title()} mode supports at most {maximum}. Use Standard mode with sufficient resources or reduce the configured phone inventory before installation.')
     return PHONE_BASELINE if count <= PHONE_BASELINE else rounded(count, 50)
 
 
@@ -712,20 +764,29 @@ def detect_internal_phones():
             'The internal phone inventory could not be verified. Confirm Asterisk is running and its DEVICE database and PJSIP contact commands are available, then retry installation. No phone capacity was guessed.') from error
 
 
-def capacity_requirements(requested, phone_requested):
+def capacity_requirements(requested, phone_requested, profile='standard'):
     if type(requested) is not int or not 1 <= requested <= 1000:
         raise ValueError('Desktop capacity must be between 1 and 1000')
     if type(phone_requested) is not int or not 1 <= phone_requested <= 1000:
         raise ValueError('Phone capacity must be between 1 and 1000')
-    tier_limit, desktop_cpu, desktop_memory = next(tier for tier in TIERS if requested <= tier[0])
-    extra_contacts = max(0, phone_requested - PHONE_RESOURCE_BASELINE)
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid deployment profile')
+    if profile == 'lite' and (requested > LITE_MAX_DESKTOPS or phone_requested > LITE_MAX_PHONES):
+        raise ResourceProbeError('lite_capacity_exceeded',
+            f'Lite mode supports at most {LITE_MAX_DESKTOPS} desktops and {LITE_MAX_PHONES} phone contacts. Lower both capacities or install in Standard mode on a host that meets the Standard resource requirements.')
+    tiers = LITE_TIERS if profile == 'lite' else TIERS
+    tier_limit, desktop_cpu, desktop_memory = next(tier for tier in tiers if requested <= tier[0])
+    phone_resource_baseline = LITE_MAX_PHONES if profile == 'lite' else PHONE_RESOURCE_BASELINE
+    extra_contacts = max(0, phone_requested - phone_resource_baseline)
     phone_cpu = (extra_contacts + PHONE_CONTACTS_PER_CPU - 1) // PHONE_CONTACTS_PER_CPU
     phone_memory = rounded(extra_contacts * PHONE_MEMORY_PER_CONTACT, PHONE_MEMORY_ROUNDING)
     return desktop_cpu + phone_cpu, desktop_memory * GIB + phone_memory, {
-        'combined_baseline': {'cpu_count': 2, 'memory_bytes': 4 * GIB,
-                              'desktop_clients': 50, 'phone_contacts': PHONE_RESOURCE_BASELINE},
+        'combined_baseline': {'cpu_count': 2, 'memory_bytes': (2 if profile == 'lite' else 4) * GIB,
+                              'desktop_clients': LITE_MAX_DESKTOPS if profile == 'lite' else 50,
+                              'phone_contacts': phone_resource_baseline,
+                              'deployment_profile': profile},
         'desktop_growth': {'tier_limit': tier_limit, 'cpu_count': desktop_cpu - 2,
-                           'memory_bytes': (desktop_memory - 4) * GIB},
+                           'memory_bytes': (desktop_memory - (2 if profile == 'lite' else 4)) * GIB},
         'phone_growth': {'contacts_over_baseline': extra_contacts, 'cpu_count': phone_cpu,
                          'memory_bytes': phone_memory},
     }
@@ -750,8 +811,8 @@ def probe_memory_limit():
     return min(limits) if limits else None
 
 
-def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
-    cpu, memory_bytes, components = capacity_requirements(requested, phone_requested)
+def evaluate(hardware, requested, phone_requested=PHONE_BASELINE, profile='standard'):
+    cpu, memory_bytes, components = capacity_requirements(requested, phone_requested, profile)
     required_memory = minimum_reported_memory(hardware, memory_bytes)
     errors = []
     storage = hardware.get('storage', storage_requirements())
@@ -767,12 +828,23 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
     require('cpu_insufficient',
             f'{cpu} effective CPU cores are required for {requested} desktops and {phone_requested} phone contacts; {hardware["effective_cpu_count"]:g} are allocated. Add CPU allocation or lower Desktop Capacity or Phone Capacity.',
             hardware['effective_cpu_count'], cpu)
-    advice = ('This is the minimum combined PBX/SLS tier; reducing device capacities will not lower its RAM baseline.'
-              if memory_bytes == 4 * GIB else 'Add RAM or lower Desktop Capacity or Phone Capacity.')
+    advice = ('This is the minimum combined PBX/SLL tier for the selected deployment profile; reducing device capacities will not lower its RAM baseline.'
+              if memory_bytes == (2 if profile == 'lite' else 4) * GIB else 'Add RAM or lower Desktop Capacity or Phone Capacity.')
     require('memory_insufficient',
             f'{memory_bytes / GIB:g} GiB nominal RAM is required for {requested} desktops and {phone_requested} phone contacts; {hardware["effective_memory_bytes"] / GIB:.2f} GiB is usable and {required_memory / GIB:.2f} GiB is required after kernel reservations and scratch space. {advice}',
             hardware['effective_memory_bytes'], required_memory)
     disks_ok = True
+    runtime_scratch = hardware.get('runtime_speech_scratch')
+    if runtime_scratch is not None:
+        before = len(errors)
+        if runtime_scratch.get('read_only') or runtime_scratch.get('inodes_exhausted'):
+            errors.append({'code':'runtime_speech_workspace_unavailable',
+                'message':'Runtime audio requires writable /tmp storage with free file entries. Restore that filesystem before installing.',
+                'actual':None,'required':None})
+        require('runtime_speech_workspace_insufficient',
+                f'Runtime speech requires {runtime_scratch["required_free_bytes"] / MIB:.2f} MiB free in /tmp, including its protected reserve; {runtime_scratch["available_bytes"] / MIB:.2f} MiB is available. Increase or free /tmp before installing. Installer fallback to /var/tmp does not move runtime audio workspace.',
+                runtime_scratch['available_bytes'],runtime_scratch['required_free_bytes'])
+        disks_ok = len(errors) == before
     for item in hardware['filesystems']:
         before = len(errors)
         destinations = [path for path in item['paths'] if storage['free_budgets_bytes'].get(path, 0)] or item['paths']
@@ -788,25 +860,31 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
         if volatile:
             errors.append({'code': 'storage_not_persistent', 'message': 'The filesystem containing ' + location + ' is volatile. Configuration, delivery history and installed runtime require persistent storage.', 'actual': None, 'required': None})
         require('free_space_insufficient',
-                f'{item["required_free_bytes"] / MIB:.2f} MiB of additional SLS free space is required on the filesystem containing {location}; {item["available_bytes"] / MIB:.2f} MiB is available. Free space or expand this filesystem.',
+                f'{item["required_free_bytes"] / MIB:.2f} MiB of additional SLL free space is required on the filesystem containing {location}; {item["available_bytes"] / MIB:.2f} MiB is available. Free space or expand this filesystem.',
                 item['available_bytes'], item['required_free_bytes'])
         disks_ok = disks_ok and len(errors) == before
     eligible = 0
     eligible_phone = 0
     if disks_ok:
-        for maximum, _, _ in TIERS:
-            tier_cpu, tier_memory, _ = capacity_requirements(maximum, phone_requested)
+        tiers = LITE_TIERS if profile == 'lite' else TIERS
+        maximum_phone = LITE_MAX_PHONES if profile == 'lite' else 1000
+        for maximum, _, _ in tiers:
+            tier_cpu, tier_memory, _ = capacity_requirements(maximum, phone_requested, profile)
             if hardware['effective_cpu_count'] >= tier_cpu and hardware['effective_memory_bytes'] >= minimum_reported_memory(hardware, tier_memory) + scratch_memory:
                 eligible = maximum
         # Phone capacity is a continuous integer policy, not the desktop tiers.
-        for phone_limit in range(1, 1001):
-            phone_cpu, phone_memory, _ = capacity_requirements(requested, phone_limit)
+        for phone_limit in range(1, maximum_phone + 1):
+            phone_cpu, phone_memory, _ = capacity_requirements(requested, phone_limit, profile)
             if hardware['effective_cpu_count'] >= phone_cpu and hardware['effective_memory_bytes'] >= minimum_reported_memory(hardware, phone_memory) + scratch_memory:
                 eligible_phone = phone_limit
     checks = {'cpu': {'ok': hardware['effective_cpu_count'] >= cpu,
                       'actual': hardware['effective_cpu_count'], 'required': cpu},
               'memory': {'ok': hardware['effective_memory_bytes'] >= required_memory,
                          'actual': hardware['effective_memory_bytes'], 'required': required_memory}}
+    if runtime_scratch is not None:
+        checks['runtime_temporary'] = {**runtime_scratch,
+            'ok': runtime_scratch['available_bytes'] >= runtime_scratch['required_free_bytes']
+                  and not runtime_scratch.get('read_only') and not runtime_scratch.get('inodes_exhausted')}
     temporary = storage.get('temporary_directory', '/tmp')
     for name, paths in (('storage', set(storage['free_budgets_bytes']) - {temporary}), ('temporary', {temporary})):
         filesystems = [item for item in hardware['filesystems'] if paths.intersection(item['paths'])]
@@ -818,13 +896,21 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
                        if paths <= covered else None,
                        'filesystems': [{'paths': item['paths'], 'actual': item['available_bytes'],
                                         'required': item['required_free_bytes']} for item in filesystems]}
+    if runtime_scratch is not None:
+        checks['temporary']['ok'] = checks['temporary']['ok'] is True and checks['runtime_temporary']['ok']
+    displayed_temporary = storage['temporary_free_bytes']
+    if runtime_scratch is not None and storage.get('mode') == 'runtime':
+        displayed_temporary = max(displayed_temporary, runtime_scratch['required_free_bytes'])
     return {
-        'schema': 1, 'requested_limit': requested, 'eligible_limit': eligible, 'hardware': hardware,
+        'schema': 1, 'deployment_profile': profile, 'requested_limit': requested, 'eligible_limit': eligible, 'hardware': hardware,
+        'profile_selection': {
+            'standard_memory_eligible': hardware['effective_memory_bytes'] >= minimum_reported_memory(hardware, 4 * GIB),
+            'lite_memory_eligible': minimum_reported_memory(hardware, 2 * GIB) <= hardware['effective_memory_bytes'] < minimum_reported_memory(hardware, 4 * GIB)},
         'requested_phone_limit': phone_requested, 'eligible_phone_limit': eligible_phone,
         'requirements': {'cpu_count': cpu, 'memory_bytes': memory_bytes,
                          'minimum_reported_memory_bytes': required_memory,
                          'components': components, 'disk_policy': 'additional_sls_free_headroom',
-                         'sls_persistent_free_bytes': storage['sls_persistent_free_bytes'], 'temporary_free_bytes': storage['temporary_free_bytes'],
+                         'sls_persistent_free_bytes': storage['sls_persistent_free_bytes'], 'temporary_free_bytes': displayed_temporary,
                          'free_budgets_bytes': storage['free_budgets_bytes'], 'storage': storage,
                          'reporting_allowance_percent': (memory_bytes - minimum_reported_memory(hardware, memory_bytes)) * 100 / memory_bytes,
                          'kernel_reserve_bytes': memory_bytes - minimum_reported_memory(hardware, memory_bytes),
@@ -832,14 +918,17 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE):
         'assumptions': {'load_certified': False, 'phone_baseline_contacts': PHONE_BASELINE,
                         'additional_phone_contacts_per_cpu_core': PHONE_CONTACTS_PER_CPU,
                         'additional_phone_memory_bytes_per_contact': PHONE_MEMORY_PER_CONTACT,
-                        'phone_memory_rounding_bytes': PHONE_MEMORY_ROUNDING, 'desktop_sse_limit': 32,
-                        'included_phone_contacts': PHONE_RESOURCE_BASELINE,
-                        'synthesis_concurrency_limited_by_this_check': False,
+                        'phone_memory_rounding_bytes': PHONE_MEMORY_ROUNDING,
+                        'included_phone_contacts': LITE_MAX_PHONES if profile == 'lite' else PHONE_RESOURCE_BASELINE,
+                        'synthesis_concurrency_limited_by_this_check': profile == 'lite',
+                        'maximum_synthesis_workers': 1 if profile == 'lite' else 4,
+                        'maximum_speech_queue': 2 if profile == 'lite' else 32,
+                        'desktop_sse_limit': 4 if profile == 'lite' else 32,
                         'whole_volume_size_is_enforced': False},
         'errors': errors,
         'resource_checks': checks,
-        'warnings': ['Provisional combined PBX/SLS allocation; not load-certified. Phone growth reserves capacity for registered contacts and Local/Page overhead, not measured phones-per-core throughput. Runtime speech admission separately enforces its configured concurrency and media budget.',
-                     f'SLS measured fixed files occupy {storage["measured_fixed_allocation_bytes"] / MIB:.1f} MiB. Additional {storage.get("mode", "install")} workspace requires {storage["additional_free_bytes"] / MIB:.1f} MiB across the listed filesystems, including {storage["steady_state_reserve_bytes"] / MIB:.1f} MiB for bounded writes/compaction. Retention and concurrent speech require additional measured provisioning; these are not storage quotas or a guarantee for an arbitrary workload.',
+        'warnings': [f'Provisional combined PBX/SLL {profile.title()} allocation; not load-certified. Phone growth reserves capacity for registered contacts and Local/Page overhead, not measured phones-per-core throughput. Runtime speech admission separately enforces its configured concurrency and media budget.',
+                     f'SLL measured fixed files occupy {storage["measured_fixed_allocation_bytes"] / MIB:.1f} MiB. Additional {storage.get("mode", "install")} workspace requires {storage["additional_free_bytes"] / MIB:.1f} MiB across the listed filesystems, including {storage["steady_state_reserve_bytes"] / MIB:.1f} MiB for bounded writes/compaction. Retention and concurrent speech require additional measured provisioning; these are not storage quotas or a guarantee for an arbitrary workload.',
                      'Desktop clients above the stream limit require cursor-aware JSON polling. Existing PBX calls, codecs, recording, voicemail, backups, and long retention need separate resource budgets.'],
     }
 
@@ -849,6 +938,7 @@ def main(argv=None):
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--config', type=Path)
     parser.add_argument('--desktop-limit', type=int)
+    parser.add_argument('--profile', choices=DEPLOYMENT_PROFILES)
     parser.add_argument('--temporary-directory', choices=('/tmp', '/var/tmp'))
     parser.add_argument('--mode', choices=('runtime', 'prepare', 'install'), default='runtime')
     parser.add_argument('--candidate-source', type=Path, help='Authenticated root-private candidate payload for installation budgets')
@@ -863,6 +953,7 @@ def main(argv=None):
     selection = None
     try:
         saved = configured_limits(options.config) if options.config else {}
+        profile = options.profile or saved.get('deployment_profile', 'standard')
         if requested is None:
             requested = saved.get('desktop_client_limit', 25)
         if phone_requested is None:
@@ -870,24 +961,27 @@ def main(argv=None):
         if options.auto_phone_limit and not saved:
             stage = 'internal phone inventory'
             selection = detect_internal_phones()
-            phone_requested = rounded_phone_capacity(selection['detected_phone_contacts'])
+            phone_requested = rounded_phone_capacity(selection['detected_phone_contacts'], profile)
             selection.update({'source': 'internal_pjsip_inventory', 'rounded_phone_capacity': phone_requested})
         stage = 'CPU and memory'
         cpu, memory = probe_compute()
-        stage = 'SLS storage'
+        stage = 'SLL storage'
         payloads = measure_release_payloads(options.candidate_source) if options.candidate_source else None
         storage = probe_storage(options.mode,payloads,optional_packs=saved['speech_optional_voice_packs']) if saved.get('speech_optional_voice_packs') else probe_storage(options.mode,payloads)
         stage = 'filesystem free space'
         storage, filesystems = probe_storage_filesystems(storage, options.temporary_directory)
+        stage = 'runtime audio temporary workspace'
+        runtime_scratch = probe_runtime_speech_scratch(profile, saved)
         result = evaluate({'effective_cpu_count': cpu, 'effective_memory_bytes': memory,
-                           'memory_limit_bytes': probe_memory_limit(), 'filesystems': filesystems, 'storage': storage}, requested, phone_requested)
+                           'memory_limit_bytes': probe_memory_limit(), 'filesystems': filesystems, 'storage': storage,
+                           'runtime_speech_scratch':runtime_scratch}, requested, phone_requested, profile)
         if selection is not None:
             result['auto_phone_selection'] = selection
     except (OSError, ValueError, ZeroDivisionError, StopIteration) as error:
         code = error.code if isinstance(error, ResourceProbeError) else 'resource_probe_failed'
         message = str(error) if isinstance(error, ResourceProbeError) else (
             'The ' + stage + ' resource check could not be completed. Check the protected configuration and storage permissions, then run Repair Installation before increasing capacity.')
-        result = {'schema': 1, 'requested_limit': requested, 'eligible_limit': 0, 'hardware': {}, 'requirements': {},
+        result = {'schema': 1, 'deployment_profile': locals().get('profile', options.profile or 'standard'), 'requested_limit': requested, 'eligible_limit': 0, 'hardware': {}, 'requirements': {},
                   'requested_phone_limit': phone_requested, 'eligible_phone_limit': 0,
                   'errors': [{'code': code, 'message': message, 'actual': None, 'required': None}], 'warnings': []}
         print(json.dumps(result, sort_keys=True))

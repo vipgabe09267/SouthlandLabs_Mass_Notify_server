@@ -1,6 +1,6 @@
 <?php
 
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 require_once dirname(__DIR__) . '/SchedulePresentation.php';
 require_once dirname(__DIR__) . '/api/sls-mass-notify/security.php';
 
@@ -265,6 +265,7 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 @media (max-width:991px) { .sls-schedule-summary-wrap { width:50%; margin-bottom:10px; } .sls-schedule-heading { display:block; } .sls-timezone-pill { margin-top:10px; } }
 @media (max-width:600px) { .sls-schedule-summary-wrap { width:100%; } .sls-schedule-panel-head { display:block; } .sls-schedule-panel-head .btn { width:100%; margin-top:10px; } .sls-occurrence-row { align-items:stretch; flex-direction:column; } .sls-occurrence-row .btn { width:100%; } }
 </style>
+<div id="sls-scheduling">
 <div class="container-fluid sls-schedule-page">
 	<div class="display full-border">
 		<div class="fpbx-container">
@@ -311,8 +312,12 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 						<tbody>
 						<?php foreach ($clientSchedules as $schedule) {
 							$id = $scheduleId($schedule);
+							$scheduleName = (string)($schedule['name'] ?? _('Scheduled announcement'));
 							$enabled = !empty($schedule['enabled']);
 							$next = $nextOccurrence($schedule);
+							$nextLabel = $next !== null ? $formatInstant($next->format(DATE_ATOM)) : _('No future dates');
+							$targetLabel = $targetSummary($schedule);
+							$maximumDelay = is_int($schedule['max_lateness_minutes'] ?? null) ? $schedule['max_lateness_minutes'] : 15;
 							$state = $scheduleState($schedule, $executionState);
 							$stateName = strtolower(trim((string)($state['state'] ?? $state['last_status'] ?? '')));
 							if (in_array($stateName, ['prepared', 'preparing', 'queued', 'running', 'claimed', 'uncertain'], true)) {
@@ -336,15 +341,15 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 							}
 						?>
 							<tr data-schedule-id="<?php echo htmlspecialchars($id); ?>" data-rendered-state="<?php echo htmlspecialchars($stateName); ?>">
-								<td><div class="sls-schedule-name"><?php echo htmlspecialchars((string)($schedule['name'] ?? _('Scheduled announcement'))); ?></div><div class="sls-schedule-meta"><?php echo htmlspecialchars($scheduleRecurrenceSummary($schedule)); ?></div><div class="sls-schedule-meta"><?php echo htmlspecialchars('Created by: ' . ($schedule['created_by'] ?? 'Scheduled announcement')); ?></div><div class="sls-schedule-meta"><?php echo sprintf(_('Maximum start delay: %d minutes'), is_int($schedule['max_lateness_minutes'] ?? null) ? $schedule['max_lateness_minutes'] : 15); ?></div><?php if ($scheduleRecurrenceMode($schedule) !== 'none' && $lastRun !== '') { ?><div class="sls-schedule-meta"><?php echo htmlspecialchars('Scheduled through ' . $formatInstant($lastRun) . '. Edit the schedule to extend it.'); ?></div><?php } ?></td>
+								<td><div class="sls-schedule-name"><?php echo htmlspecialchars($scheduleName); ?></div><div class="sls-schedule-meta"><?php echo htmlspecialchars($scheduleRecurrenceSummary($schedule)); ?></div><div class="sls-schedule-meta"><?php echo htmlspecialchars('Created by: ' . ($schedule['created_by'] ?? 'Scheduled announcement')); ?></div><div class="sls-schedule-meta"><?php echo sprintf(_('Maximum start delay: %d minutes'), $maximumDelay); ?></div><?php if ($scheduleRecurrenceMode($schedule) !== 'none' && $lastRun !== '') { ?><div class="sls-schedule-meta"><?php echo htmlspecialchars('Scheduled through ' . $formatInstant($lastRun) . '. Edit the schedule to extend it.'); ?></div><?php } ?></td>
 								<td><?php if ($next !== null) { ?><strong><?php echo htmlspecialchars($formatInstant($next->format(DATE_ATOM))); ?></strong><?php } else { ?><span class="text-muted"><?php echo _('No future dates'); ?></span><?php } ?></td>
-								<td><div><?php echo htmlspecialchars($targetSummary($schedule)); ?></div></td>
+								<td><div><?php echo htmlspecialchars($targetLabel); ?></div></td>
 								<td><div><?php echo htmlspecialchars(ucwords(str_replace('_', ' + ', $audioMode))); ?></div><div class="sls-schedule-meta"><?php echo $style === 'colored' ? _('Colored announcement · Labs') : _('Standard announcement'); ?></div></td>
 								<td><span class="label label-<?php echo $meta['class']; ?>"><i class="fa <?php echo $meta['icon']; ?>" aria-hidden="true"></i> <?php echo htmlspecialchars($meta['label']); ?></span><?php if (!empty($state['job_id']) && preg_match('/^job_[a-f0-9]{32}$/D', (string)$state['job_id'])) { ?><div class="sls-schedule-meta" style="overflow-wrap:anywhere"><?php echo htmlspecialchars(_('Delivery job: ') . $state['job_id']); ?></div><?php } if (!empty($state['deadline_at'])) { ?><div class="sls-schedule-meta"><?php echo htmlspecialchars(_('Start deadline: ') . $formatInstant($state['deadline_at'])); ?></div><?php } ?><?php if (!empty($state['message'])) { ?><div class="sls-schedule-meta" style="margin-top:5px"><?php echo htmlspecialchars((string)$state['message']); ?></div><?php } ?></td>
 								<td><div class="sls-schedule-actions">
-									<button type="button" class="btn btn-default btn-sm sls-schedule-edit" data-schedule-id="<?php echo htmlspecialchars($id); ?>" title="<?php echo htmlspecialchars(_('Edit schedule')); ?>"><i class="fa fa-pencil" aria-hidden="true"></i></button>
-									<form method="post" action="config.php?display=slsmassnotifyserver_scheduling" class="sls-schedule-action-form"><input type="hidden" name="slsmassnotifyserver_csrf" value="<?php echo htmlspecialchars($csrfToken); ?>"><input type="hidden" name="slsmassnotifyserver_action" value="toggle_scheduled_announcement"><input type="hidden" name="schedule_id" value="<?php echo htmlspecialchars($id); ?>"><input type="hidden" name="schedule_enabled" value="<?php echo $enabled ? '0' : '1'; ?>"><button type="submit" class="btn btn-<?php echo $enabled ? 'warning' : 'success'; ?> btn-sm" title="<?php echo htmlspecialchars($enabled ? _('Disable schedule') : _('Enable schedule')); ?>"><i class="fa <?php echo $enabled ? 'fa-pause' : 'fa-play'; ?>" aria-hidden="true"></i></button></form>
-									<form method="post" action="config.php?display=slsmassnotifyserver_scheduling" class="sls-schedule-delete-form sls-schedule-action-form"><input type="hidden" name="slsmassnotifyserver_csrf" value="<?php echo htmlspecialchars($csrfToken); ?>"><input type="hidden" name="slsmassnotifyserver_action" value="delete_scheduled_announcement"><input type="hidden" name="schedule_id" value="<?php echo htmlspecialchars($id); ?>"><button type="submit" class="btn btn-danger btn-sm" title="<?php echo htmlspecialchars(_('Delete schedule')); ?>"><i class="fa fa-trash" aria-hidden="true"></i></button></form>
+									<button type="button" class="btn btn-default btn-sm sls-schedule-edit" data-schedule-id="<?php echo htmlspecialchars($id); ?>" title="<?php echo htmlspecialchars(_('Edit schedule')); ?>" aria-label="<?php echo htmlspecialchars(sprintf(_('Edit schedule: %s'), $scheduleName)); ?>"><i class="fa fa-pencil" aria-hidden="true"></i></button>
+									<form method="post" action="config.php?display=slsmassnotifyserver_scheduling" class="sls-schedule-action-form" data-schedule-enabling="<?php echo $enabled ? '0' : '1'; ?>" data-schedule-name="<?php echo htmlspecialchars($scheduleName); ?>" data-schedule-next="<?php echo htmlspecialchars($nextLabel); ?>" data-schedule-targets="<?php echo htmlspecialchars($targetLabel); ?>" data-schedule-deadline="<?php echo $maximumDelay; ?> minutes"><input type="hidden" name="slsmassnotifyserver_csrf" value="<?php echo htmlspecialchars($csrfToken); ?>"><input type="hidden" name="slsmassnotifyserver_action" value="toggle_scheduled_announcement"><input type="hidden" name="schedule_id" value="<?php echo htmlspecialchars($id); ?>"><input type="hidden" name="schedule_enabled" value="<?php echo $enabled ? '0' : '1'; ?>"><button type="submit" class="btn btn-<?php echo $enabled ? 'warning' : 'success'; ?> btn-sm" title="<?php echo htmlspecialchars($enabled ? _('Disable schedule') : _('Enable schedule')); ?>" aria-label="<?php echo htmlspecialchars(sprintf($enabled ? _('Disable schedule: %s') : _('Enable schedule: %s'), $scheduleName)); ?>"><i class="fa <?php echo $enabled ? 'fa-pause' : 'fa-play'; ?>" aria-hidden="true"></i></button></form>
+									<form method="post" action="config.php?display=slsmassnotifyserver_scheduling" class="sls-schedule-delete-form sls-schedule-action-form"><input type="hidden" name="slsmassnotifyserver_csrf" value="<?php echo htmlspecialchars($csrfToken); ?>"><input type="hidden" name="slsmassnotifyserver_action" value="delete_scheduled_announcement"><input type="hidden" name="schedule_id" value="<?php echo htmlspecialchars($id); ?>"><button type="submit" class="btn btn-danger btn-sm" title="<?php echo htmlspecialchars(_('Delete schedule')); ?>" aria-label="<?php echo htmlspecialchars(sprintf(_('Delete schedule: %s'), $scheduleName)); ?>"><i class="fa fa-trash" aria-hidden="true"></i></button></form>
 								</div></td>
 							</tr>
 						<?php } ?>
@@ -417,11 +422,13 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 		</form>
 	</div></div>
 </div>
+</div>
 
 <script>
 (function() {
 	'use strict';
 	var schedules = <?php echo json_encode(array_values($clientSchedules), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_INVALID_UTF8_SUBSTITUTE); ?>;
+	var scheduleRoot = document.getElementById('sls-scheduling');
 	var modal = window.jQuery ? window.jQuery('#sls-schedule-modal') : null;
 	var form = document.getElementById('sls-schedule-form');
 	var createButton = document.getElementById('sls-schedule-create');
@@ -559,6 +566,7 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 		renderOptions();
 	}
 	function openEditor(schedule) {
+		if (scheduleRoot) scheduleRoot.dispatchEvent(new CustomEvent('sls:editor-opened'));
 		resetEditor();
 		if (schedule) {
 			var targets = schedule.targets && typeof schedule.targets === 'object' ? schedule.targets : {};
@@ -623,6 +631,7 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 		}
 		if (modal) modal.modal('show');
 	}
+	if (modal && typeof modal.on === 'function') modal.on('hidden.bs.modal', function() { if (scheduleRoot) scheduleRoot.dispatchEvent(new CustomEvent('sls:editor-closed')); });
 	if (occurrenceAdd) occurrenceAdd.addEventListener('click', function() { addOccurrence(''); });
 	if (recurrence) recurrence.addEventListener('change', renderRecurrenceOptions);
 	if (createButton) createButton.addEventListener('click', function() { openEditor(null); });
@@ -641,6 +650,13 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 	Array.prototype.forEach.call(document.querySelectorAll('.sls-schedule-action-form'), function(actionForm) {
 		actionForm.addEventListener('submit', function(event) {
 			if (event.defaultPrevented) return;
+			if (actionForm.getAttribute('data-schedule-enabling') === '1') {
+				var activation = <?php echo json_encode(_('Confirm enabling schedule')); ?> + ': ' + (actionForm.getAttribute('data-schedule-name') || <?php echo json_encode(_('Scheduled announcement')); ?>)
+					+ '\n' + <?php echo json_encode(_('Next run')); ?> + ': ' + (actionForm.getAttribute('data-schedule-next') || <?php echo json_encode(_('No future dates')); ?>)
+					+ '\n' + <?php echo json_encode(_('Recipients')); ?> + ': ' + (actionForm.getAttribute('data-schedule-targets') || <?php echo json_encode(_('None')); ?>)
+					+ '\n' + <?php echo json_encode(_('Maximum start delay')); ?> + ': ' + (actionForm.getAttribute('data-schedule-deadline') || '15 minutes');
+				if (!window.confirm(activation)) { event.preventDefault(); return; }
+			}
 			if (actionForm.getAttribute('data-submitting') === '1') {
 				event.preventDefault();
 				return;
@@ -682,3 +698,5 @@ $defaultOccurrenceLocal = $nextPbxHour->setTime((int)$nextPbxHour->format('H'), 
 </script>
 
 <?php $source_picker_mode = 'schedule'; include __DIR__ . '/audience_source_picker.php'; ?>
+<script><?php readfile(__DIR__.'/save_state.js'); ?>
+window.SlsSaveState.attach(document.getElementById('sls-scheduling'),{mode:'apply',initial:'active',submit:'#sls-schedule-form,#sls-programmes-form'});</script>

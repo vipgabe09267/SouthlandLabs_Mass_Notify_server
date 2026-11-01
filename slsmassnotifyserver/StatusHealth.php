@@ -88,6 +88,9 @@ final class SlsStatusHealth
         $recovered = $recovered || ($stage === 'piper_voice_download'
             && ($status['last_piper_voice_install_status'] ?? '') === 'ok'
             && self::timestamp($status['last_piper_voice_install_at'] ?? '') > $at);
+        $recovered = $recovered || ($stage === 'dependencies'
+            && ($status['last_dependency_check_status'] ?? '') === 'ok'
+            && self::timestamp($status['last_dependency_check_at'] ?? '') > $at);
         $ongoing = in_array($stage, ['api', 'external', 'dependencies', 'piper_voice_download'], true);
         if (!$applicable || $recovered || (!$ongoing && !self::recent($status['last_fault_at'] ?? '', $now))) {
             $status['last_fault_at'] = '';

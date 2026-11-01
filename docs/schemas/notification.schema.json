@@ -1,5 +1,5 @@
 {
-  "$id": "https://southlandservers.xyz/schemas/sls/notification-1.json",
+  "$id": "https://southlandlabs.dev/schemas/sls/notification-1.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
   "properties": {
@@ -113,6 +113,6 @@
     "created_at",
     "is_test"
   ],
-  "title": "SLS notification payload schema 1",
+  "title": "SLL notification payload schema 1",
   "type": "object"
 }

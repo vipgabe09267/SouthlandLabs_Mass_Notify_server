@@ -1,4 +1,4 @@
-> Instructions for the `0.1.8-beta` prerelease. SLS remains beta software for noncritical testing.
+> Installation instructions for the `0.1.9-beta` prerelease. SLL remains beta software for noncritical testing.
 
 # Installation Notes
 
@@ -17,24 +17,19 @@
 - ImageMagick and DejaVu fonts for validated phone alert images
 - cron plus `flock`, `timeout`, `readlink`, and `runuser`
 
+Runtime audio also needs free `/tmp` space independently of installer scratch. With the default speech reserve, allow at least about 221 MiB free for one renderer (Lite), or 499 MiB for four. Custom reserve settings require more. An undersized or inaccessible runtime mount is rejected before mutation; see [resource requirements](docs/RESOURCES.md#runtime-audio-temporary-space).
+
 The installer detects these capabilities and installs only missing Debian packages. When the PBX is already complete, it skips both package installation and the package-index refresh.
 
 ## Recommended Install
 
-### 0.1.8-beta installation correction
+Do not use the withdrawn October 31 installer. After the corrected `0.1.9-beta` candidate is published, use the [checksum-pinned command in README](README.md#install-or-update) for a fresh installation. Until then, the replacement is available only as an independently verified private candidate. Existing installations must use **General Settings > Check for updates > Install Selected Release** or an independently verified recovery installer. The fresh bootstrap refuses an initialized publisher policy so it cannot replace, rewind or bypass established keys and revocations.
 
-Use the [current correction command in README](README.md#install-or-update)
-for the separately signed `0.1.8-beta` correction. Its matching installer,
-manifest, signature and TGZ are distributed on the
-[`correction-0.1.8-beta` branch](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/tree/correction-0.1.8-beta);
-the original immutable release assets remain unchanged. Do not mix files from
-the two bundles. Existing publisher trust remains in force, and the ordinary
-updater does not reinstall an equal version. See [verification and publisher
-policy](docs/FIRST_INSTALL_VERIFICATION.md#018-beta-installation-correction).
+The default `standard` profile requires the normal 4 GiB baseline, allowing bounded kernel reservations. Below that baseline, an interactive installation checks Lite eligibility, explains its hard limits and asks whether to install Lite. Only an explicit yes selects it; No, EOF and a 120-second timeout cancel. A noninteractive installation must explicitly pass `--lite` after the version: `bash ./sls-bootstrap.sh 0.1.9-beta --lite`. Lite is unavailable when the host meets Standard RAM requirements. Lite mode requires two effective cores, supports no more than 25 desktops and 25 phone contacts, and reduces bounded speech, SSE and Weather worker concurrency. Enterprise Labs and enterprise SSO are unavailable in Lite, with saved settings retained. Core notifications and local operator logins remain available. It does not skip a prerequisite, storage, signature, configuration, rollback or post-install check. More than 25 detected contacts is an error, never a truncated audience.
 
-For this `0.1.8-beta` bundle, use the [checksum-pinned correction command in README](README.md#install-or-update) for fresh installations and existing PBXs. It must authenticate the signed installer and package before execution. For routine upgrades to later releases, use **General Settings > Check for updates > Install Selected Release**, which retains the established publisher trust policy. Do not download a replacement publisher key or bypass an existing policy.
+An independently verified release installer accepts `--lite` or `--standard` before `--inspect` or the package URL. On an upgrade, a profile change is admitted against the requested profile before mutation, refuses unapplied pending settings and conversion away from active Enterprise Labs/SSO, rewrites the authenticated central profile/concurrency fields, and restores the original encrypted configuration if installation fails. Disable Enterprise Labs and enterprise SSO before converting to Lite. Returning to Standard leaves those features inactive until explicitly enabled. Recovery never changes profiles; complete the printed `--recover` command first. Configuration imports and FreePBX restore cannot switch profiles.
 
-Before publisher trust is initialized, the original release's fresh bootstrap also supports `--inspect` and `--recover` with the exact transaction path printed in the log. After initialization, use the installed verified updater or independently verify the matching standalone installer for inspection/recovery; the fresh bootstrap will refuse to bypass that policy.
+Before publisher trust is initialized, the bootstrap supports `--inspect` and `--recover` with the exact transaction path printed in the log. After initialization, use the installed verified updater or independently verify the matching standalone installer for inspection or recovery.
 
 The standalone release installer remains available to administrators who independently verify it using [FIRST_INSTALL_VERIFICATION.md](docs/FIRST_INSTALL_VERIFICATION.md). Keep its signature, manifest and recovery evidence together.
 
@@ -45,7 +40,7 @@ The updater resolves a release tag to its commit, verifies the publisher’s Ed2
 For an offline/local package, obtain its SHA-256 through a trusted channel and use the matching version’s installer:
 
 ```bash
-SLS_MASS_NOTIFY_TGZ='/tmp/slsmassnotifyserver-0.1.8-beta.tgz' \
+SLS_MASS_NOTIFY_TGZ='/tmp/slsmassnotifyserver-0.1.9-beta.tgz' \
 SLS_MASS_NOTIFY_SHA256='<trusted 64-character SHA-256>' \
 bash ./sls-install.sh
 ```
@@ -71,7 +66,7 @@ The module install hook prepares the local PBX integration by applying managed c
 - enforces `0640 asterisk:asterisk` on the protected central configuration after FreePBX ownership operations without changing its contents
 - creates the Asterisk-owned one-minute Weather observer, a separate chronological delivery worker, and a bounded cross-zone destination-claim journal so overlapping zones cannot duplicate an alert to a shared target; adaptive Lightning polling uses current Weather.gov alerts plus the structured forecast period active at the current time, without spending Xweather tokens merely because thunder is forecast for a later period
 - creates exactly one Asterisk-owned one-minute scheduled-announcement worker, verifies it as the `asterisk` account, and keeps its PBX-local execution ledger outside the module tree
-- installs the ownership-safe **SLS Mass Notify - Paging Tone Opening**, **SLS Mass Notify - Paging Tone Closing**, **SLS Mass Notify - NWS Alert**, and **SLS Mass Notify - Lightning Alert** recordings and managed Asterisk audio. A conflicting user-owned recording stops installation instead of being overwritten
+- installs the ownership-safe **SLL Mass Notify Server - Paging Tone Opening**, **SLL Mass Notify Server - Paging Tone Closing**, **SLL Mass Notify Server - NWS Alert**, and **SLL Mass Notify Server - Lightning Alert** recordings and managed Asterisk audio. A conflicting user-owned recording stops installation instead of being overwritten
 - verifies the real AMI contact-discovery and `PJSIPNotify` actions, matches registered numeric phones between the Asterisk CLI and AMI, checks spool access, sound links, WAV support, default audio formats, and the exact paging dialplan before reporting success
 - verifies all Asterisk functions and applications used by the paging dialplan before module activation, including `PJSIP_HEADER`, `PJSIP_CONTACT`, `PJSIP_AOR`, `PJSIP_DIAL_CONTACTS`, `CUT`, `Page`, and ConfBridge. An installed but unloaded provider is loaded and rechecked; a Debian-owned missing provider can be repaired using the exact installed package without upgrading Asterisk, while an unavailable or unmanaged provider stops with its exact module path before any module replacement
 - verifies every required Asterisk provider will load after restart. `autoload=no` systems must explicitly load each provider, and matching `noload` entries are rejected with the affected module name
@@ -79,7 +74,7 @@ The module install hook prepares the local PBX integration by applying managed c
 - verifies the publisher-signed archive and installer before running packaged helpers, stages and syntax-checks the module, and retains root-private recovery material before activation. Fixed root helpers install protected files; FreePBX hooks and database integration run as `asterisk`. Failed activation restores validated static files and supported service state without rewinding delivery journals or invoking old module hooks as root
 - compares every managed runtime, API, public asset, signer, and Dashboard file with its packaged source; stale managed files are removed without touching the central configuration or Piper models
 - verifies the eight Piper models and their eight metadata files against pinned hashes, and performs real synthesis checks with the required installed English voices
-- refuses to replace an existing `/usr/local/bin/piper` wrapper unless its contents prove it is already managed by SLS Mass Notify
+- refuses to replace an existing `/usr/local/bin/piper` wrapper unless its contents prove it is already managed by SLL Mass Notify Server
 - renders a phone image as the `asterisk` account in the real public media directory and retrieves the exact file through Apache
 - completes an authenticated desktop live-SSE handshake without printing or storing the client password outside protected memory; Weather and Lightning publish the durable desktop record independently before the handset-only visual delay
 - verifies an authenticated Control API status request when the Control API is enabled and loopback is allowed; disabled or deliberately loopback-blocked APIs remain valid configurations
@@ -135,7 +130,7 @@ Desktop protocol 2 fixes initial/reconnect event cursors and supports optional a
 
 ## Runtime console
 
-Installation, update and protected repair install and verify the publisher-authenticated `/usr/local/bin/slsconsole` entrypoint. Native restore checks its parity; rollback captures it, and uninstall removes it. Use `sudo slsconsole status`, `stop`, `start` or `reboot`. Stop pauses new notification admission, while existing calls and receipt tracking continue. Reboot restarts only the SLS phone collector and preserves a stopped state. Control commands preserve other active and staged configuration settings and do not restart PBX services. See README for the command table.
+Installation, update and protected repair install and verify the publisher-authenticated `/usr/local/bin/slsconsole` entrypoint. Native restore checks its parity; rollback captures it, and uninstall removes it. Use `sudo slsconsole status`, `stop`, `start` or `reboot`. Stop pauses new notification admission, while existing calls and receipt tracking continue. Reboot restarts only the SLL phone collector and preserves a stopped state. Control commands preserve other active and staged configuration settings and do not restart PBX services. See README for the command table.
 
 ## Update Safety
 
@@ -159,11 +154,11 @@ Executable runtime, including Piper and the automatic updater, is root-owned. Mu
 
 ### Installer log and runtime errors
 
-Ordinary `fwconsole reload` and Apply Config continue if the SLS phone collector is reconnecting, stopped or unable to authenticate. The reload logs a warning; SLS phone audio still requires a fresh authenticated heartbeat. Check `systemctl status sls-mass-notify-phone-events.service` and `journalctl -u sls-mass-notify-phone-events.service --no-pager -n 50`, then review SLS Help/Deployment readiness or run Repair Installation. Installation and post-restore verification still require a healthy collector. A full PBX restart is not required to diagnose this fault.
+Ordinary `fwconsole reload` and Apply Config continue if the SLL phone collector is reconnecting, stopped or unable to authenticate. The reload logs a warning; SLL phone audio still requires a fresh authenticated heartbeat. Check `systemctl status sls-mass-notify-phone-events.service` and `journalctl -u sls-mass-notify-phone-events.service --no-pager -n 50`, then review SLL Help/Deployment readiness or run Repair Installation. Installation and post-restore verification still require a healthy collector. A full PBX restart is not required to diagnose this fault.
 
 `AH00112: Warning: DocumentRoot [/invalid/folder/name] does not exist` is an Apache warning. If `apache2ctl configtest` exits successfully, it does not stop installation. The installer still requires valid Apache syntax and reachable PBX/API routes. Do not create that directory or change an unrelated virtual host merely to silence the warning. Keep the complete `/tmp/slsmassnotifyserver-install.log`; its stage and resource report identify the actual stop condition.
 
-Free-space admission checks the filesystems containing the actual SLS directories, including dedicated or bind mounts. Shared filesystems are counted once. A small `/tmp` can use safe root-owned `/var/tmp` scratch space instead, and the selected location is printed in the log. There is no extra minimum on an unused parent directory. Insufficient target/scratch space still stops installation before dependency/module changes.
+Free-space admission checks the filesystems containing the actual SLL directories, including dedicated or bind mounts. Shared filesystems are counted once. A small `/tmp` can use safe root-owned `/var/tmp` scratch space instead, and the selected location is printed in the log. There is no extra minimum on an unused parent directory. Insufficient target/scratch space still stops installation before dependency/module changes.
 
 Storage failures show required and available MiB on the affected filesystem. Read-only targets and exhausted inodes have separate errors; free space on another mount cannot satisfy these checks. Stage messages and protected-helper failures are saved in the installer log as well as displayed in the terminal.
 
@@ -189,13 +184,13 @@ If an error reports corrupt or empty audio reservation storage, an invalid initi
 
 ### Automatic repair and configuration variants
 
-The supported target is FreePBX 17 on Debian 12 with the documented conventional paths and Asterisk service account. The installer checks capabilities instead of requiring one exact Asterisk build. It can install missing supported dependencies, load installed Asterisk providers, repair safely identified Debian-owned providers at the installed Asterisk version, restore SLS-owned permissions, and regenerate and verify SLS integrations in FreePBX's required order. It does not replace an administrator's custom Asterisk build or change `autoload`/`noload` policy to bypass a failed check.
+The supported target is FreePBX 17 on Debian 12 with the documented conventional paths and Asterisk service account. The installer checks capabilities instead of requiring one exact Asterisk build. It can install missing supported dependencies, load installed Asterisk providers, repair safely identified Debian-owned providers at the installed Asterisk version, restore SLL-owned permissions, and regenerate and verify SLL integrations in FreePBX's required order. It does not replace an administrator's custom Asterisk build or change `autoload`/`noload` policy to bypass a failed check.
 
 Local web checks discover bounded Apache virtual-host ports and connect only to loopback while preserving the configured hostname for Host/SNI. Public forwarded ports remain separate from local listeners. These checks do not modify Apache listeners, firewall/NAT rules, or the configured public address, and cannot prove a remote phone can reach that address.
 
-The SLS AMI account permits IPv4 and IPv6 loopback only. A saved literal `127.0.0.1` or `::1` is preserved; a new configuration follows FreePBX when its manager host explicitly selects `::1`. `localhost` retains the existing IPv4 interpretation. An IPv6-only deployment must use literal `::1` in both relevant configurations. A conflicting saved endpoint is reported for review rather than silently rewritten, and remote AMI is unsupported. No administrator-controlled AMI listener is changed.
+The SLL AMI account permits IPv4 and IPv6 loopback only. A saved literal `127.0.0.1` or `::1` is preserved; a new configuration follows FreePBX when its manager host explicitly selects `::1`. `localhost` retains the existing IPv4 interpretation. An IPv6-only deployment must use literal `::1` in both relevant configurations. A conflicting saved endpoint is reported for review rather than silently rewritten, and remote AMI is unsupported. No administrator-controlled AMI listener is changed.
 
-For speech, an executable file alone is insufficient: the managed environment's interpreter, environment prefix, pip, pinned packages, and Piper startup are checked. A broken interpreter or pip triggers recreation of only the protected SLS virtual environment; package-version drift builds a checked replacement in a private namespace, then atomically exchanges it with the existing environment. Unsafe ownership, links, mounted subtrees, or unsupported wheel availability produce a specific error. Voice models and the central `.config` are preserved. This repair does not replace a broken system Python interpreter.
+For speech, an executable file alone is insufficient: the managed environment's interpreter, environment prefix, pip, pinned packages, and Piper startup are checked. A broken interpreter or pip triggers recreation of only the protected SLL virtual environment; package-version drift builds a checked replacement in a private namespace, then atomically exchanges it with the existing environment. Unsafe ownership, links, mounted subtrees, or unsupported wheel availability produce a specific error. Voice models and the central `.config` are preserved. This repair does not replace a broken system Python interpreter.
 
 Repairs are followed by the same required postconditions as a new install, including API access under the web account, AMI capability checks after FreePBX reload, collector readiness, runtime parity, and local signatures. A failed upgrade attempts restoration and verifies the restored state. Incomplete restoration retains its recovery locations and fault notice. Hardware shortages, unrelated configuration faults, and unavailable external services cannot be fixed by skipping verification.
 
@@ -239,7 +234,7 @@ This does not configure Postfix, an SMTP relay, DNS, SPF, DKIM, DMARC, or PTR/re
 
 ## Uninstall
 
-Use the included uninstaller as root; no download or additional SLS software is required. The default also retains delivery history, audit logs and media in place. It authenticates teardown helpers from the retained publisher generation even if unrelated runtime workers are missing, including `sls_privileged_install.py`. It drains notification workers and refuses active phone delivery before teardown. Unexpected cron read/write failures require review and cannot replace unrelated jobs. See [offline removal and retry](docs/INSTALLER_OPERATIONS.md#included-offline-removal) for approved-state recovery after interrupted teardown.
+Use the included uninstaller as root; no download or additional SLL software is required. The default also retains delivery history, audit logs and media in place. It authenticates teardown helpers from the retained publisher generation even if unrelated runtime workers are missing, including `sls_privileged_install.py`. It drains notification workers and refuses active phone delivery before teardown. Unexpected cron read/write failures require review and cannot replace unrelated jobs. See [offline removal and retry](docs/INSTALLER_OPERATIONS.md#included-offline-removal) for approved-state recovery after interrupted teardown.
 
 The default uninstall preserves the central config, config backups, uploaded tones, and `schedule-executions.json`. Preserving the PBX-local execution ledger prevents completed schedules from replaying after reinstall. The uninstaller removes the module-owned FreePBX Manager record and verifies that Apache/Asterisk artifacts are not regenerated and that Dashboard and Framework remain trusted. A bundled System Recording is removed only while its row, metadata, and audio hash still prove module ownership. Before the module hook removes the normal signer copies, the current uninstaller saves a protected temporary copy for the stock-module cleanup transaction. When FreePBX repository access is unavailable, that copy signs and verifies the cleaned modules and is deleted before exit; older releases use the compatibility fallback. Set `SLS_MASS_NOTIFY_PURGE_CONFIG=1` only when those deployment files should also be removed.
 
@@ -251,7 +246,7 @@ sudo /usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh
 
 ## Authenticated installation and recovery
 
-The installer verifies the candidate SLS release and approves the previous release before changing protected runtime or maintenance. Existing reviewed Framework/Dashboard inventories remain authoritative for their recorded versions. A stock version change is reverified from the signed upstream package at the installed version. If they are missing, the installer downloads GPG-signed upstream packages at the exact installed versions, verifies the pinned FreePBX signing key, and compares deployed files with upstream bytes plus signed previous/candidate SLS widgets and the supported menu insertion. It accounts for Framework web-file mappings, installer-only omissions and the supported spinner symlink. It neither replaces stock files nor approves arbitrary live hashes.
+The installer verifies the candidate SLL release and approves the previous release before changing protected runtime or maintenance. Existing reviewed Framework/Dashboard inventories remain authoritative for their recorded versions. A stock version change is reverified from the signed upstream package at the installed version. If they are missing, the installer downloads GPG-signed upstream packages at the exact installed versions, verifies the pinned FreePBX signing key, and compares deployed files with upstream bytes plus signed previous/candidate SLL widgets and the supported menu insertion. It accounts for Framework web-file mappings, installer-only omissions and the supported spinner symlink. It neither replaces stock files nor approves arbitrary live hashes.
 
 Unknown differences stop preparation before mutation. The installer prints a retained root-private review directory containing `review-required.json`; independently review each reported change before supplying an approved inventory and its digest. Existing local branding and security changes must be preserved. See [the trust inventory procedure](docs/privileged-trust.md).
 
@@ -260,7 +255,7 @@ For the previous root runtime, missing helpers are reconstructed only from the a
 Collect private inspection evidence with the matching installer and verified release assets. Inspection does not bootstrap FreePBX, install dependencies, create worker/settings locks, rotate keys, change trust pointers or write Dashboard failure notices:
 
 ```bash
-bash ./sls-install.sh --inspect 'https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.7-beta/slsmassnotifyserver-0.1.7-beta.tgz'
+bash ./sls-install.sh --inspect 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
 # SLS_MASS_NOTIFY_INVENTORY_ONLY=1 remains an equivalent compatibility option.
 ```
 
@@ -268,9 +263,9 @@ For disconnected preparation, set `SLS_MASS_NOTIFY_UPSTREAM_PACKAGES` to a root-
 
 The supported legacy Piper compatibility layout contains only `venv/bin/piper -> /usr/local/bin/piper`. The installer validates its exact contents and safe ownership/modes, retains recovery metadata, then recreates root-owned compatibility directories. A known authenticated wrapper missing its execute bit is repaired by dependency preparation. Unknown executables, additional files, unsafe links and writable environments require investigation; do not recursively change ownership to bypass validation.
 
-0.1.8-beta uses a new tag and signed artifacts. The updater can select it from 0.1.6-beta or earlier; equal versions remain ignored, and installed settings and delivery history are preserved.
+The corrected 0.1.9-beta candidate has newly signed artifact hashes. The updater can select it from 0.1.8-beta or an earlier supported beta; equal versions remain ignored. A PBX already running the withdrawn 0.1.9-beta package needs the independently authenticated manual installer. Saved settings and delivery history are preserved.
 
-Keep all recovery paths printed by a failed installer. Static recovery preserves the original snapshot and does not rewind notification or schedule execution history. Rollback restores the previous maintenance schedule only after its release, recovered web files and root runtime match the approval made before installation. If any recovery check fails, SLS root jobs remain disabled and the installer reports the failed postcondition and recovery paths. A restored file tree alone is not sufficient proof of a complete repair.
+Keep all recovery paths printed by a failed installer. Static recovery preserves the original snapshot and does not rewind notification or schedule execution history. Rollback restores the previous maintenance schedule only after its release, recovered web files and root runtime match the approval made before installation. If any recovery check fails, SLL root jobs remain disabled and the installer reports the failed postcondition and recovery paths. A restored file tree alone is not sufficient proof of a complete repair.
 
 The installer verifies that generated image/XML requests pass through the configured [media access policy](docs/MEDIA_ACCESS.md), including legacy API aliases. It preserves existing restrictions, enables the required Apache modules idempotently, and distinguishes an intentional network denial from broken routing. Policy settings remain in the central `.config`; changing them does not restart the firewall or PBX.
 
@@ -283,15 +278,15 @@ When the served handler is PHP-FPM, activation and rollback reload its qualified
 
 The current self-signing key is preserved. Release manifests now include signed expiry metadata. Optional reviewed publisher rotation/revocation and root offline recovery are documented in [Release Trust](docs/RELEASE_TRUST.md). Do not initialize a stricter publisher policy merely to troubleshoot an install: initialization intentionally disables legacy manifests without expiry metadata.
 
-Fresh installation detects configured internal PJSIP phones and their registered contacts, excluding trunks. Phone capacity remains 25 for up to 25 contacts, then rounds up to the next 50: 79/89 selects 100, and 125 selects 150. Offline configured devices reserve one slot each. The rounded capacity must pass the combined resource check before any dependency/module changes, and again before configuration creation. The setup wizard displays this detected capacity. Upgrades preserve the saved limits; failed or incomplete inventories stop with an actionable error instead of guessing.
+Fresh Standard installation detects configured internal PJSIP phones and their registered contacts, excluding trunks. Phone capacity remains 25 for up to 25 contacts, then rounds up to the next 50: 79/89 selects 100, and 125 selects 150. Lite installation accepts at most 25 detected contacts and keeps capacity at 25. Offline configured devices reserve one slot each. The selected capacity must pass the profile's combined resource check before any dependency/module changes, and again before configuration creation. The setup wizard displays this detected capacity and profile. Upgrades preserve saved limits and profile unless the verified installer receives an explicit profile flag; failed or incomplete inventories stop with an actionable error instead of guessing.
 
 Setup offers an IANA timezone selector. Leaving the existing timezone selected preserves it; an explicit change is applied by the protected maintenance worker. The CLI installer keeps the existing timezone unless SLS_MASS_NOTIFY_TIMEZONE is supplied. See README for combined capacity and dedicated free-space budgets.
 
 ### Resource and recovery diagnostics
 
-A nominal 4 GiB host reporting 4,068,581,376 usable bytes passes the bounded kernel-reservation check. A container with an enforced allocation below the nominal tier does not. Reducing capacity below the minimum tier cannot reduce that tier’s baseline; add allocation when the report identifies a genuine baseline shortage. Runtime UI checks exclude installation-only archive, dependency and rollback storage.
+A nominal 4 GiB Standard host or 2 GiB Lite host may report up to the smaller of 256 MiB or one-sixteenth less RAM for kernel reservations. A container with an enforced cgroup allocation below the nominal tier receives no allowance. Reducing capacity below the selected profile's minimum does not lower its baseline. Runtime UI checks exclude installation-only archive, dependency and rollback storage.
 
-The signed candidate is measured before dependency repair. Each filesystem must have the reported free bytes and inodes. Persistent SLS paths cannot use tmpfs; a volatile scratch directory is budgeted against RAM and the installer prefers a safe persistent `/var/tmp` when available. Sparse/compressed recovery copies use logical size. Metadata scans are bounded and identify unreadable paths or scan limits explicitly.
+The signed candidate is measured before dependency repair. Each filesystem must have the reported free bytes and inodes. Persistent SLL paths cannot use tmpfs; a volatile scratch directory is budgeted against RAM and the installer prefers a safe persistent `/var/tmp` when available. Sparse/compressed recovery copies use logical size. Metadata scans are bounded and identify unreadable paths or scan limits explicitly.
 
 The installer copies the candidate into a private directory on the module filesystem before renaming it. Previous modules stay on that filesystem for rollback, regardless of `/tmp` or `/var/tmp` mounts. Service masks, runtime-only enablement, custom collector units and drop-ins require administrator review before mutation. Idle collector repair preserves closed batches and requires the new collector to reconcile orphaned reservations; it never clears live ledgers to force installation through.
 
@@ -301,6 +296,6 @@ Paging failures include a safe `phone_error` code in the Asterisk/PHP error log.
 
 The supported adapter remains Debian 12, FreePBX 17 and the documented runtime paths. Different architectures require the pinned binary wheels; containers need private mount namespaces and `renameat2` for atomic Piper replacement. Unsupported layouts or missing namespace capability stop with a specific explanation instead of creating a second runtime tree or changing host networking.
 
-### Previously installed withdrawn candidate
+### Version transitions
 
-0.1.8-beta upgrades earlier 0.1.6-beta builds using a distinct version and signed package. Published release assets remain immutable. The separately signed same-version correction requires the explicit correction command above; the ordinary updater intentionally ignores equal versions. Do not bypass package signatures, delete trust inventories or downgrade protected configuration to make the update appear newer.
+This corrected candidate retains the owner-selected 0.1.9-beta version and has newly signed artifacts. The withdrawn package must not be reused. The updater intentionally ignores an equal or older version; same-version corrections require the independently authenticated manual installer. Do not bypass package signatures, delete trust inventories or downgrade protected configuration to force an update.

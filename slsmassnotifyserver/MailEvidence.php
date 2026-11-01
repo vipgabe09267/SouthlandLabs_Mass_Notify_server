@@ -32,10 +32,10 @@ final class MailEvidence
         if($record['stage']==='relay_accepted'){
             $receipt['detail']='Postfix reports relay acceptance (DSN '.$record['dsn'].'). This does not confirm mailbox placement or that a person read the message.';
         }elseif($record['stage']==='deferred'){
-            $receipt['detail']='Postfix deferred this message (DSN '.$record['dsn'].'). Postfix may retry under its own queue policy; SLS has not resubmitted it.';
+            $receipt['detail']='Postfix deferred this message (DSN '.$record['dsn'].'). Postfix may retry under its own queue policy; SLL has not resubmitted it.';
         }else{
             $receipt['local_submission_state']=$receipt['state'];$receipt['state']='failed';$receipt['retryable']=false;$receipt['failure_category']='postfix_bounce';$receipt['submission_started']=true;
-            $receipt['detail']='Postfix reports a bounce (DSN '.$record['dsn'].'). Review the recipient and mail relay; SLS will not resubmit this message automatically.';
+            $receipt['detail']='Postfix reports a bounce (DSN '.$record['dsn'].'). Review the recipient and mail relay; SLL will not resubmit this message automatically.';
         }
         return $receipt;
     }

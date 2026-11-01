@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Manage SLS runtime, inspect installation health, or uninstall the signed module."""
+"""Manage SLL runtime, inspect installation health, or uninstall the signed module."""
 from contextlib import contextmanager
 import argparse
 import fcntl
@@ -89,28 +89,28 @@ def load_uninstall_trust(root=TRUST_ROOT):
             return body
     reference = json.loads(read(root / 'slsmassnotifyserver.active.json', 1024))
     if not isinstance(reference, dict):
-        raise RuntimeError('The protected SLS publisher reference is invalid.')
+        raise RuntimeError('The protected SLL publisher reference is invalid.')
     digest = reference.get('sha256', '')
     if not isinstance(digest, str) or not re.fullmatch('[a-f0-9]{64}', digest) or reference.get('generation') != 'slsmassnotifyserver-' + digest:
-        raise RuntimeError('The protected SLS publisher generation is invalid.')
+        raise RuntimeError('The protected SLL publisher generation is invalid.')
     generation = root / reference['generation']
     raw = read(generation / 'inventory.json', 8 * 1024 * 1024)
     if hashlib.sha256(raw).hexdigest() != digest:
-        raise RuntimeError('The protected SLS publisher inventory changed.')
+        raise RuntimeError('The protected SLL publisher inventory changed.')
     inventory = json.loads(raw)
     if not isinstance(inventory, dict) or not isinstance(inventory.get('files'), dict):
-        raise RuntimeError('The protected SLS publisher inventory is invalid.')
+        raise RuntimeError('The protected SLL publisher inventory is invalid.')
     name = 'bin/sls_mass_notify/sls_module_trust.py'
     entry = inventory.get('files', {}).get(name)
     path = generation / 'module' / name
     body = read(path, 2 * 1024 * 1024)
     if not isinstance(entry, dict) or hashlib.sha256(body).hexdigest() != entry.get('sha256'):
-        raise RuntimeError('The retained SLS trust helper changed.')
+        raise RuntimeError('The retained SLL trust helper changed.')
     trust = types.ModuleType('_console_uninstall_trust'); trust.__file__ = str(path)
     exec(compile(body, str(path), 'exec'), trust.__dict__)
     data, checked = trust.load(root, 'slsmassnotifyserver')
     if checked != generation or data['source']['kind'] != 'publisher-ed25519':
-        raise RuntimeError('An existing publisher-approved SLS generation is required.')
+        raise RuntimeError('An existing publisher-approved SLL generation is required.')
     return trust
 
 
@@ -161,7 +161,7 @@ class RuntimeConsole:
                 info = os.fstat(fd)
                 current = os.stat(name, dir_fd=parent, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != self.uid or info.st_mode & 0o027 or (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
-                    raise RuntimeError('SLS activity lock is unsafe; no setting changed.')
+                    raise RuntimeError('SLL activity lock is unsafe; no setting changed.')
                 fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
                 yield
             finally:
@@ -222,15 +222,15 @@ class RuntimeConsole:
                 self.service('restart')
                 self.set_running(previous)
             else:
-                raise ValueError('Unknown SLS console command.')
+                raise ValueError('Unknown SLL console command.')
             return self.status()
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='slsconsole', description=__doc__, epilog='stop pauses new SLS sends; existing calls and receipt tracking continue. reboot restarts only the SLS collector and preserves a stopped state. Configuration, credentials and PBX services remain intact.')
+    parser = argparse.ArgumentParser(prog='slsconsole', description=__doc__, epilog='stop pauses new SLL sends; existing calls and receipt tracking continue. reboot restarts only the SLL collector and preserves a stopped state. Configuration, credentials and PBX services remain intact.')
     parser.add_argument('command', nargs='?', default='help', choices=('start', 'stop', 'reboot', 'status', 'doctor', 'reconcile-stock', 'uninstall', 'help'))
     parser.add_argument('--json', action='store_true', help='print a bounded, secret-free status object')
-    parser.add_argument('--purge', action='store_true', help='with uninstall only: permanently delete retained SLS settings, media and history')
+    parser.add_argument('--purge', action='store_true', help='with uninstall only: permanently delete retained SLL settings, media and history')
     parser.add_argument('--online',action='store_true',help='with reconcile-stock only: obtain independently signed current and prior FreePBX stock packages')
     parser.add_argument('--upstream-packages',type=Path,help='with reconcile-stock only: directory containing local signed FreePBX packages')
     args = parser.parse_args()
@@ -270,7 +270,7 @@ def main():
     if args.json:
         print(json.dumps(status, separators=(',', ':')))
     else:
-        print('SLS Mass Notify: ' + status['runtime'])
+        print('SLL Mass Notify Server: ' + status['runtime'])
         print('New notifications: ' + ('enabled' if status['notification_admission'] else 'paused'))
         print('Phone receipt collector: ' + status['phone_collector'] + ' (' + status['collector_state'] + ')')
     return 0
@@ -280,8 +280,8 @@ if __name__ == '__main__':
     try:
         raise SystemExit(main())
     except BlockingIOError:
-        print('SLS console: protected maintenance or another console operation is active. Wait for it to finish and check slsconsole status before retrying.', file=sys.stderr)
+        print('SLL console: protected maintenance or another console operation is active. Wait for it to finish and check slsconsole status before retrying.', file=sys.stderr)
         raise SystemExit(1)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
-        print('SLS console: ' + str(error), file=sys.stderr)
+        print('SLL console: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

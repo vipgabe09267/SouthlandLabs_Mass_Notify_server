@@ -135,7 +135,7 @@ trait SlsEnterpriseIntegrations
             if($config['public_warning']['enabled']==='1'&&(!extension_loaded('dom')||!extension_loaded('openssl')||($config['public_warning']['ipaws_enabled']==='1'&&!extension_loaded('curl')))){throw new \DomainException('CAP authoring requires PHP DOM and OpenSSL; IPAWS transmission also requires cURL in the runtime serving FreePBX.');}
         }
         $extensions=array_map('strval',$this->getConfiguredPjsipExtensionNumbers());
-        foreach ($config['speakers']['devices'] as $speaker) { if (!in_array($speaker['extension'],$extensions,true)) { throw new \DomainException('Enroll speakers as existing PBX PJSIP extensions before selecting them in SLS.'); } }
+        foreach ($config['speakers']['devices'] as $speaker) { if (!in_array($speaker['extension'],$extensions,true)) { throw new \DomainException('Enroll speakers as existing PBX PJSIP extensions before selecting them in SLL.'); } }
         $speakerExtensions=array_column($config['speakers']['devices'],'extension');
         foreach($config['radios']['devices'] as $radio){
             if(!in_array($radio['extension'],$extensions,true)||in_array($radio['extension'],$speakerExtensions,true)){
@@ -382,10 +382,12 @@ trait SlsEnterpriseIntegrations
         return $this->enterpriseIntegrationsService()->voiceResponse($config['responses'],$input,fn($row)=>$this->integrationResponseCurrent($row),
             function($id,$response,$actor): array { return $this->incidentService()->respond($id,$response,$actor); });
     }
-    public function receiveSensorHeartbeat(string $ruleId,array $input): array
+    public function receiveSensorHeartbeat(string $ruleId,array $input,?array $authentication=null): array
     {
-        $config=$this->enabledEnterpriseIntegration('sensors',false); $rules=AutomationConfig::normalize($this->getActiveSettings()['automations']??[])['rules'];
+        $settings=$this->getActiveSettings();$integrations=$this->enterpriseIntegrationsConfig($settings);
+        if ($integrations['enabled']!=='1' || $integrations['sensors']['enabled']!=='1') { throw new \DomainException('This Enterprise Labs integration is disabled.'); }
+        $config=$integrations['sensors'];$rules=AutomationConfig::normalize($settings['automations']??[])['rules'];
         $rule=array_column($rules,null,'id')[$ruleId]??null; if (!$rule) { throw new \DomainException('Unknown enrolled sensor.'); }
-        return $this->enterpriseIntegrationsService()->heartbeat($config,$rule,$input);
+        return $this->enterpriseIntegrationsService()->heartbeat($config,$rule,$input,$authentication);
     }
 }

@@ -24,7 +24,7 @@ Introduced in `0.1.5-beta`. All additions are disabled by default. Existing PBX 
 
 ## Excluded scope
 
-Managed mustering, native mobile app push, dynamic geofencing, temporary visitors, wearable panic badges and camera threat detection. Verified browser Web Push is included; it uses the browser's push service and does not require a native SLS application. Full FreePBX telephone-service clustering is separate from SLS notification failover.
+Managed mustering, native mobile app push, dynamic geofencing, temporary visitors, wearable panic badges and camera threat detection. Verified browser Web Push is included; it uses the browser's push service and does not require a native SLL application. Full FreePBX telephone-service clustering is separate from SLL notification failover.
 
 ## Dangerous-feature acknowledgment
 

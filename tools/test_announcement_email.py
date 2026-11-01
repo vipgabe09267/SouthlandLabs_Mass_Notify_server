@@ -142,5 +142,9 @@ class AnnouncementEmail(unittest.TestCase):
         import sls_branded_email as branded
         self.assertIn('EXTREME WEATHER',branded.build_html('Tornado warning','Stay indoors'))
         self.assertIn('SYSTEM TEST',branded.build_html('System test','Test only',is_test=True))
+        rendered = branded.build_html('Tornado warning', 'Stay indoors')
+        self.assertIn('SLL Mass Notify Server', rendered)
+        self.assertIn('Southland Labs', rendered)
+        self.assertNotIn('Southland Servers', rendered)
 
 if __name__=='__main__':unittest.main()

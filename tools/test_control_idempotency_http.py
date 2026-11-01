@@ -52,6 +52,13 @@ class ControlIdempotencyHttpTests(unittest.TestCase):
         self.assertFalse(failed[1]['retryable'])
         self.assertEqual(len(calls.read_text().splitlines()), 2)
 
+    def test_send_requires_idempotency_key_before_module_submission(self):
+        response = self.api.request(self.named['secret'], self.payload)
+        self.assertEqual(response[0], 400, response)
+        self.assertEqual(response[1]['error'], 'idempotency_key_required')
+        self.assertFalse((self.api.directory / 'module-calls.jsonl').exists())
+        self.assertFalse((self.api.directory / 'control-idempotency').exists())
+
     def test_revocation_and_restricted_labs_rejected_before_claim(self):
         for field, identifier in [('browser_recipient_ids', 'sub_'+'a'*24), ('connector_ids', 'conn_'+'b'*24)]:
             response = self.api.request(self.restricted['secret'], {**self.payload, field: [identifier]}, **{'Idempotency-Key': 'fixture-key-00000002'})

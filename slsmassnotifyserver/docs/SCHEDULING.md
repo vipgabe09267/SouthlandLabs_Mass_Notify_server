@@ -30,7 +30,7 @@ An `.ics` event uses `DTSTART;VALUE=DATE:YYYYMMDD` and an optional exclusive
 escaped summary text follow [RFC 5545](https://www.rfc-editor.org/rfc/rfc5545#section-3.6.1).
 Import is limited to 256 KiB and 100 events. Timed, recurring, cancelled,
 duration-based and nested events require conversion to explicit all-day dates;
-SLS rejects them rather than guessing their meaning. URLs and attachments are
+SLL rejects them rather than guessing their meaning. URLs and attachments are
 not fetched. Imported exact duplicate ranges are kept once by the editor; time
 overrides remain a separate explicit choice.
 
@@ -47,11 +47,11 @@ an actionable error instead of silently shortened.
 
 Each schedule has a **Maximum start delay** from 1 through 15 minutes, defaulting to 15. The deadline is the original occurrence time plus this value. Editing a schedule affects future preparation; it does not rewrite an already prepared announcement or extend its deadline.
 
-When an occurrence becomes due, SLS freezes its message, recipients and destination identities into a durable job. It saves the occurrence-to-job link before admitting any delivery. Scheduling shows **queued** or **running** until the job reports results; queue acceptance does not mean the announcement was delivered. Removing or disabling the schedule after preparation does not cancel the submitted job.
+When an occurrence becomes due, SLL freezes its message, recipients and destination identities into a durable job. It saves the occurrence-to-job link before admitting any delivery. Scheduling shows **queued** or **running** until the job reports results; queue acceptance does not mean the announcement was delivered. Removing or disabling the schedule after preparation does not cancel the submitted job.
 
 Scheduled admission coordinates recipient cooldowns, so a different audience can proceed independently. Interactive sends retain the configured global cooldown. Actual phone contact limits and active-call reservations still apply. The scheduling page warns about nearby overlapping saved audiences. These warnings cannot predict TTS preparation time, registration changes or unscheduled traffic.
 
-The original deadline follows the job through speech preparation, audio waiting, phone admission, desktop journal publication, webhook retries and email/SMS submission. Unstarted destinations are rejected after the deadline. Calls and requests already started may finish; SLS does not interrupt playback. A partially submitted occurrence keeps its individual receipts instead of being reported as wholly missed. Phone visual workers must start before the deadline and retain their normal bounded execution timeout.
+The original deadline follows the job through speech preparation, audio waiting, phone admission, desktop journal publication, webhook retries and email/SMS submission. Unstarted destinations are rejected after the deadline. Calls and requests already started may finish; SLL does not interrupt playback. A partially submitted occurrence keeps its individual receipts instead of being reported as wholly missed. Phone visual workers must start before the deadline and retain their normal bounded execution timeout.
 
 An interrupted preparation is reconciled against the exact stored job identity and request fingerprint. A committed prepared job can resume admission without renewing its reservation. A missing job is never rebuilt from changed settings. A worker lost after it starts has an uncertain result and is not automatically replayed. Explicit eligible retries retain the original deadline and cannot resend accepted or uncertain destinations.
 

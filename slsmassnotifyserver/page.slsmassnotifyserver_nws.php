@@ -71,7 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 				? ['success' => false, 'message' => _('Select at least one NWS zone for the test.')]
 				: $slsmassnotifyserver->triggerTest('tts', '', $triggerName, $testZoneIds);
 		} catch (\Throwable $e) {
-			error_log('SLS Mass Notify Weather test response failed: ' . get_class($e));
+			error_log('SLL Mass Notify Server Weather test response failed: ' . get_class($e));
 			$result = [
 				'success' => false,
 				'message' => _('Weather test could not return a confirmed delivery result.'),

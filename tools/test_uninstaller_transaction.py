@@ -90,6 +90,7 @@ class OfflineUninstaller(unittest.TestCase):
         body = body.replace("os.readlink('/proc/' + name + '/exe')", 'os.readlink(' + repr(str(self.proc) + '/') + " + name + '/exe')")
         for name, path in {
             'bin/sls_mass_notify_uninstall.sh': '/usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh',
+            'bin/slsconsole': '/usr/local/bin/slsconsole',
             'bin/sign_sls_mass_notify_local_sig.sh': '/usr/local/sbin/sign_sls_mass_notify_local_sig.sh',
             'bin/sls_mass_notify/sls_module_trust.py': '/usr/local/bin/sls_mass_notify/sls_module_trust.py',
             'bin/sls_mass_notify/sls_config_crypto.php': '/usr/local/bin/sls_mass_notify/sls_config_crypto.php',
@@ -99,6 +100,7 @@ class OfflineUninstaller(unittest.TestCase):
             body = body.replace(path, str(self.installed / Path(name).name))
         body = body.replace(' /usr/local/bin/sls_mass_notify \\\n', ' ' + str(self.installed) + ' \\\n')
         body=body.replace('/var/lib/sls-mass-notify-uninstaller',str(self.base/'root-recovery'))
+        body=body.replace('/var/lib/asterisk/SLS_Mass_Notifications_Plugin',str(self.data))
         body=body.replace('/usr/bin/systemctl',str(self.systemctl))
         self.script = self.base / 'private-uninstall.sh'; self.script.write_text(body); self.script.chmod(0o700)
 
@@ -107,6 +109,84 @@ class OfflineUninstaller(unittest.TestCase):
                                'fixture', str(self.script), str(self.data)],
                               capture_output=True, text=True, timeout=20,
                               env=dict(os.environ, **(env or {})))
+
+    def test_all_supported_recovery_workspace_roles_are_accepted(self):
+        for role in ('signer', 'decoder', 'transaction', 'stock-review'):
+            with self.subTest(role=role):
+                result = self.shell('uninstall_recovery_workspace ' + shlex.quote('sls-uninstall-' + role) + '\n')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                folder = Path(result.stdout.strip())
+                self.assertEqual(folder.parent, self.base / 'root-recovery')
+                self.assertEqual((folder.stat().st_uid, stat.S_IMODE(folder.stat().st_mode)), (0, 0o700))
+        for role in ('../stock-review', 'stock-review/../../escape', 'unknown', 'signer.extra'):
+            with self.subTest(rejected_role=role):
+                result = self.shell('uninstall_recovery_workspace ' + shlex.quote('sls-uninstall-' + role) + '\n')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Invalid uninstall recovery workspace', result.stderr)
+
+    def test_changed_stock_enters_the_local_reconciliation_branch(self):
+        retained = self.base / 'retained'; retained.mkdir(mode=0o700)
+        (retained / 'sls_module_trust.py').write_text('raise SystemExit(1)\n')
+        report = self.base / 'stock-review-invoked.json'
+        (retained / 'sls_upgrade_trust.py').write_text('''import argparse,json,os,pathlib,stat
+p=argparse.ArgumentParser();p.add_argument('--workspace',type=pathlib.Path);p.add_argument('--reconcile-stock',action='store_true');p.add_argument('--coordination-fd',type=int);p.add_argument('--coordination-lock',type=pathlib.Path);a=p.parse_args()
+m=a.workspace.stat();held=os.fstat(a.coordination_fd);named=a.coordination_lock.lstat()
+assert m.st_uid==0 and stat.S_IMODE(m.st_mode)==0o700
+assert a.workspace.name.startswith('sls-uninstall-stock-review.')
+assert stat.S_ISREG(held.st_mode) and (held.st_dev,held.st_ino)==(named.st_dev,named.st_ino)
+pathlib.Path(os.environ['SLS_TEST_RECONCILE_REPORT']).write_text(json.dumps({'workspace':str(a.workspace),'reconcile':a.reconcile_stock,'lock':str(a.coordination_lock)}))
+''')
+        lock = self.base / 'maintenance.lock'
+        result = self.shell(
+            'RECOVERY_SIGNER_DIR=' + shlex.quote(str(retained)) + '\n'
+            'SLS_MASS_NOTIFY_MAINTENANCE_LOCK=' + shlex.quote(str(lock)) + '\n'
+            'exec 15>"$SLS_MASS_NOTIFY_MAINTENANCE_LOCK"\n'
+            'flock -n 15\nUNINSTALL_MAINTENANCE_LOCK_FD=15\n'
+            'refresh_uninstall_stock_approvals\n',
+            env={'SLS_TEST_RECONCILE_REPORT': str(report)},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        invoked = json.loads(report.read_text())
+        self.assertTrue(invoked['reconcile'])
+        self.assertEqual(invoked['lock'], str(lock))
+        self.assertEqual(Path(invoked['workspace']).parent, self.base / 'root-recovery')
+        self.assertIn('retained local signed packages', result.stdout)
+
+    def test_approved_stock_does_not_open_a_reconciliation_workspace(self):
+        retained = self.base / 'retained'; retained.mkdir(mode=0o700)
+        (retained / 'sls_module_trust.py').write_text('raise SystemExit(0)\n')
+        result = self.shell('RECOVERY_SIGNER_DIR=' + shlex.quote(str(retained)) + '\nrefresh_uninstall_stock_approvals\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.base / 'root-recovery').exists())
+
+    def test_runtime_removal_rejects_replaced_web_parent(self):
+        self.web.mkdir(mode=0o755)
+        os.chown(self.web, self.account.pw_uid, self.account.pw_gid)
+        api = self.web / 'api'; api.mkdir(mode=0o755)
+        os.chown(api, self.account.pw_uid, self.account.pw_gid)
+        outside = self.base / 'root-only'; outside.mkdir(mode=0o700)
+        victim = outside / 'sls-mass-notify'; victim.mkdir(mode=0o700)
+        sentinel = victim / 'config-keys.json'; sentinel.write_text('root-private key sentinel')
+        sentinel.chmod(0o600)
+        def drop_privileges():
+            os.setgroups([self.account.pw_gid]); os.setgid(self.account.pw_gid); os.setuid(self.account.pw_uid)
+        replaced = subprocess.run(['/usr/bin/python3', '-I', '-c',
+            'import os,sys;os.rename(sys.argv[1],sys.argv[1]+".old");os.symlink(sys.argv[2],sys.argv[1]);print(os.geteuid())',
+            str(api), str(outside)], preexec_fn=drop_privileges, capture_output=True, text=True, check=True)
+        self.assertEqual(replaced.stdout.strip(), str(self.account.pw_uid))
+        result = self.shell('''remove_piper_wrapper() { :; }
+remove_managed_sound_link() { :; }
+eval "$(declare -f remove_managed_path | sed '1s/remove_managed_path/remove_managed_path_real/')"
+remove_managed_path() {
+  if [[ "$1" = "$SLS_TEST_WEB/"* ]]; then remove_managed_path_real "$@"; fi
+}
+remove_runtime_files
+''', env={'SLS_TEST_WEB':str(self.web)})
+        print('WEB_PARENT_REMOVAL_OBSERVATION ' + json.dumps({'replacement_uid':int(replaced.stdout.strip()),
+            'root_only_parent_mode':oct(stat.S_IMODE(outside.stat().st_mode)),
+            'sentinel_exists_after_removal':sentinel.exists(),'shell_status':result.returncode}), flush=True)
+        self.assertTrue(sentinel.exists(), 'Root teardown followed an Asterisk-replaced web parent and deleted a root-private sentinel')
+        self.assertNotEqual(result.returncode, 0, 'Unsafe parent replacement must stop teardown')
 
     def test_signed_teardown_accepts_missing_operational_and_required_helpers(self):
         for path in self.installed.iterdir(): path.unlink()
@@ -341,6 +421,7 @@ bash -n "$RECOVERY_SIGNER"
                 result = self.shell('''PURGE_CONFIG="$SLS_TEST_PURGE"
 remove_piper_wrapper() { :; }
 remove_managed_sound_link() { :; }
+remove_managed_path() { if [ "$1" = "$DATA_DIR" ]; then /bin/rm -rf -- "$DATA_DIR"; fi; }
 rm() {
   local value
   for value in "$@"; do
@@ -509,7 +590,7 @@ run_fwconsole() { printf 'UNEXPECTED PBX COMMAND\\n'; return 9; }
 reload_removed_pbx_integration
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SLS removal was verified', result.stdout)
+        self.assertIn('SLL removal was verified', result.stdout)
         self.assertIn('run fwconsole reload', result.stdout)
         self.assertNotIn('UNEXPECTED PBX COMMAND', result.stdout)
 
@@ -522,7 +603,7 @@ run_fwconsole() { test "$1" = reload; printf 'unrelated PBX reload failure\\n'; 
 reload_removed_pbx_integration
 ''', env={'SLS_TEST_LOG': str(log)})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SLS removal was verified', result.stdout)
+        self.assertIn('SLL removal was verified', result.stdout)
         self.assertIn('PBX integration reload failed', result.stdout)
         self.assertEqual(log.read_text(), 'unrelated PBX reload failure\n')
 

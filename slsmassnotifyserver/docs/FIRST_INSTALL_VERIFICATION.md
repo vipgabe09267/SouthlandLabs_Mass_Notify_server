@@ -1,30 +1,13 @@
 # Verify a first installation
 
-## 0.1.8-beta installation correction
+## Manual verification
 
-For the corrected `0.1.8-beta` installer, use the [current checksum-pinned
-correction command](../README.md#install-or-update). The separately signed
-[correction bundle](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/tree/correction-0.1.8-beta)
-contains a matching installer, `release-manifest.json`, `release-manifest.sig`
-and `slsmassnotifyserver-0.1.8-beta.tgz`. Do not mix these with the original
-release assets. The original immutable release remains unchanged.
-
-This correction retains version `0.1.8-beta`; the ordinary updater does not
-reinstall an equal version. Existing installations need the explicit correction
-command. Their established publisher policy, including revocations and validity
-dates, remains authoritative; do not remove or bypass it. Correction mode checks
-the hashes of its verification helpers before running them against that policy.
-Failed verification against an established policy stops the correction; it does
-not fall back to the fresh-install key. A fresh PBX uses the unchanged publisher key below.
-
-## Manual verification of the original release
-
-The first installation has no trusted SLS verifier on the PBX. Verify the
+The first installation has no trusted SLL verifier on the PBX. Verify the
 downloaded installer with the host's OpenSSL and Python before executing it.
 Upgrades through the installed protected updater already verify the release
 manifest, installer and package before execution.
 
-Confirm the publisher key below against your independently retained SLS key
+Confirm the publisher key below against your independently retained SLL key
 record. A key downloaded with an installer cannot establish its own authority.
 The current publisher key remains unchanged:
 
@@ -34,10 +17,9 @@ MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
 -----END PUBLIC KEY-----
 ```
 
-The following reference commands use the original immutable `0.1.8-beta`
-release assets. They create a root-private directory and execute no downloaded
-code until both signature and installer hash checks succeed. Use the correction
-command above when the corrected installer is required.
+The following reference commands are for the `0.1.9-beta` candidate after its release is published.
+They create a root-private directory and execute no downloaded code until both
+signature and installer hash checks succeed.
 
 ```bash
  /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
@@ -47,12 +29,12 @@ command above when the corrected installer is required.
   umask 077
   SLS_INSTALL_DIR="$(/usr/bin/mktemp -d /tmp/sls-verified-install.XXXXXXXX)"
   cd "$SLS_INSTALL_DIR"
-  SLS_VERSION='0.1.8-beta'
+  SLS_VERSION='0.1.9-beta'
   SLS_TAG="slsmassnotifyserver-$SLS_VERSION"
-  SLS_RELEASE="https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/releases/download/$SLS_TAG"
+  SLS_RELEASE="https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/$SLS_TAG"
   /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 --max-filesize 16384 -fsSL -o release-manifest.json "$SLS_RELEASE/release-manifest.json"
   /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 --max-filesize 64 -fsSL -o release-manifest.sig "$SLS_RELEASE/release-manifest.sig"
-  /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 --max-filesize 1048576 -fsSL -o sls-install.sh "https://raw.githubusercontent.com/vipgabe09267/SouthlandServers_Mass_Notify_server/$SLS_TAG/tools/install_release.sh"
+  /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 --max-filesize 1048576 -fsSL -o sls-install.sh "https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/$SLS_TAG/tools/install_release.sh"
   /usr/bin/cat >publisher.pub <<'KEY'
 -----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
@@ -108,6 +90,8 @@ PY
 )
 SLS_BOOTSTRAP
 ```
+
+That command uses Standard mode. Below the Standard RAM baseline, an interactive installer offers Lite only when its two-core, nominal 2 GiB and at-most-25-contact requirements pass. It prints the limits, including unavailable Enterprise Labs/SSO, and requires an explicit yes. For unattended use on eligible hardware, add `--lite` after `./sls-install.sh`. A Standard-capable host rejects `--lite`. The same authenticated installer accepts `--standard` to return an existing installation to Standard mode after its 4 GiB resource check passes. Do not combine either profile flag with `--recover`; recovery restores the original profile first.
 
 Keep failed verification or installation evidence for review. Never remove
 signature/hash checks to make a download run. For an established installation,

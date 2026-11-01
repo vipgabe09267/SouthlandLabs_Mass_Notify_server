@@ -161,8 +161,7 @@ final class Store
                 return ['claimed'=>false,'row'=>$old];
             }
             if ($now>=$row['expires_at']) { throw new \DomainException('sms_expired'); }
-            $blocked=$this->query('SELECT blocked_at FROM opt_outs WHERE number_hash=?',[$row['number_hash']])->fetchColumn();
-            if ($blocked!==false && $consentAt<=(int)$blocked) { throw new \DomainException('sms_recipient_opted_out'); }
+            $this->assertSubmissionConsent($row['number_hash'],$consentAt);
             $this->query('DELETE FROM deliveries WHERE created_at<?',[$now-90*86400]);
             if ((int)$this->db->query('SELECT count(*) FROM deliveries')->fetchColumn()>=100000) { throw new \RuntimeException('sms_history_capacity_reached'); }
             foreach (['daily'=>'D'.gmdate('Y-m-d',$now),'monthly'=>'M'.gmdate('Y-m',$now)] as $period=>$key) {
@@ -178,6 +177,17 @@ final class Store
             $this->query('INSERT INTO message_formats VALUES (?,?,?)',[$row['id'],$row['message_type'],$row['media_hash']]);
             return ['claimed'=>true,'row'=>$this->get($row['id'])];
         });
+    }
+    /** Recheck immediately before provider submission; never holds a lock over I/O. */
+    public function assertSubmissionConsent(string $numberHash, int $consentAt): void
+    {
+        if (!preg_match('/^[a-f0-9]{64}$/D',$numberHash) || $consentAt<1) { throw new \InvalidArgumentException('sms_invalid_opt_out'); }
+        $this->verifyStorage();
+        $blocked=$this->query('SELECT blocked_at FROM opt_outs WHERE number_hash=?',[$numberHash])->fetchColumn();
+        if ($blocked!==false && $consentAt<=(int)$blocked) { throw new \DomainException('sms_recipient_opted_out'); }
+        // A full permanent replay inventory cannot safely accept a new STOP.
+        // Preserve its identities and require maintenance before new sends.
+        if ((int)$this->db->query('SELECT count(*) FROM inbound_events')->fetchColumn()>=100000) { throw new \DomainException('sms_opt_out_history_full'); }
     }
     /** Exact local/provider identities; stale progress cannot overwrite terminal receipts. */
     public function outcome(string $id, string $route, string $numberHash, string $providerId, string $state, string $code, int $now, string $detail=''): array

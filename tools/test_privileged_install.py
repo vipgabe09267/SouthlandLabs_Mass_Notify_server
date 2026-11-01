@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Authenticated root operations against a disposable filesystem and fake services."""
 import importlib.util
+import fcntl
+import threading
 import io
 import json
 import os
@@ -93,6 +95,9 @@ class PrivilegedInstall(unittest.TestCase):
         self.action = self.new_action()
     def new_action(self):
         return INSTALL.PrivilegedInstall(TRUST, self.store, files=self.fs, run=self.services)
+    def bind_mount(self, source, target):
+        subprocess.run(['/usr/bin/mount','--bind',str(source),str(target)],check=True,capture_output=True,text=True)
+        self.addCleanup(subprocess.run,['/usr/bin/umount',str(target)],check=False,capture_output=True,text=True)
     def test_timezone_applies_only_a_verified_configured_iana_name(self):
         self.action.prepare(); self.services.calls.clear()
         config=json.loads(self.configuration);config['pbx_timezone']='America/Chicago'
@@ -128,6 +133,152 @@ class PrivilegedInstall(unittest.TestCase):
         self.action.prepare()
         self.assertEqual(self.services.cron, before)
         self.assertTrue(all(call[0][0] == '/usr/bin/crontab' for call in self.services.calls))
+    def test_secure_tree_allows_a_committed_collector_temporary_to_disappear(self):
+        atomic = module('sls_atomic_json')
+        data = self.fs.path(INSTALL.DATA)
+        cache = data / 'phone-collector-display.json'
+        with atomic.locked_json(cache, maximum=1024, runtime_owner=True) as state:
+            state['counter'] = 0
+        ready, finish = threading.Event(), threading.Event()
+        errors = []
+        actual_replace, actual_listdir = os.replace, os.listdir
+        def paused_replace(*args, **kwargs):
+            ready.set()
+            if not finish.wait(3): raise RuntimeError('Fixture commit was not released')
+            return actual_replace(*args, **kwargs)
+        def writer():
+            try:
+                with atomic.locked_json(cache, maximum=1024, runtime_owner=True) as state:
+                    state['counter'] = 1
+            except BaseException as error: errors.append(error)
+        def captured_names(fd):
+            names = actual_listdir(fd)
+            if os.fstat(fd).st_ino == data.stat().st_ino and any(name.startswith('.phone-collector-display.json.') for name in names):
+                finish.set(); thread.join(3)
+                self.assertFalse(thread.is_alive())
+            return names
+        with mock.patch.object(atomic.os, 'replace', side_effect=paused_replace):
+            thread = threading.Thread(target=writer); thread.start()
+            try:
+                self.assertTrue(ready.wait(3))
+                with mock.patch.object(INSTALL.os, 'listdir', side_effect=captured_names):
+                    self.fs.secure_tree(INSTALL.DATA)
+            finally:
+                finish.set(); thread.join(3)
+        self.assertEqual(errors, [])
+        self.assertEqual(json.loads(cache.read_bytes()), {'counter': 1})
+
+    def test_secure_tree_coordinates_with_a_live_collector_writer(self):
+        atomic = module('sls_atomic_json')
+        cache = self.fs.path(INSTALL.DATA) / 'phone-collector-heartbeat.json'
+        with atomic.locked_json(cache, maximum=1024, runtime_owner=True) as state:
+            state['counter'] = 0
+        ready, finish = threading.Event(), threading.Event(); errors = []
+        actual_flock = fcntl.flock
+        def writer():
+            try:
+                with atomic.locked_json(cache, maximum=1024, runtime_owner=True) as state:
+                    state['counter'] = 1; ready.set()
+                    if not finish.wait(4): raise RuntimeError('Fixture writer was not released')
+            except BaseException as error: errors.append(error)
+        def observed_flock(fd, operation):
+            if threading.current_thread() is threading.main_thread() and operation & fcntl.LOCK_EX:
+                finish.set()
+            return actual_flock(fd, operation)
+        thread = threading.Thread(target=writer); thread.start()
+        try:
+            self.assertTrue(ready.wait(3))
+            with mock.patch.object(fcntl, 'flock', side_effect=observed_flock):
+                self.fs.secure_tree(INSTALL.DATA)
+        finally:
+            finish.set(); thread.join(3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [], 'Permission repair invalidated the collector transaction')
+        self.assertEqual(json.loads(cache.read_bytes()), {'counter': 1})
+
+    def test_correct_state_permissions_leave_metadata_unchanged(self):
+        self.fs.write(INSTALL.DATA + '/history.json', b'unchanged closed history', 0o640, user=True)
+        path = self.fs.path(INSTALL.DATA + '/history.json'); before = path.stat()
+        self.fs.secure_tree(INSTALL.DATA)
+        after = path.stat()
+        self.assertEqual((before.st_ino,before.st_mtime_ns,before.st_ctime_ns),
+                         (after.st_ino,after.st_mtime_ns,after.st_ctime_ns))
+        self.assertEqual(path.read_bytes(), b'unchanged closed history')
+
+    def test_collector_temporary_names_never_adopt_existing_unsafe_files(self):
+        for kind in ('symlink', 'hardlink', 'fifo'):
+            with self.subTest(kind=kind):
+                data = self.fs.path(INSTALL.DATA)
+                lock = data / 'phone-collector-display.json.lock'
+                self.fs.write(INSTALL.DATA + '/' + lock.name, b'SLS_JSON_V1\n', 0o640, user=True)
+                victim = self.base / ('victim-' + kind); victim.write_bytes(b'untouched'); victim.chmod(0o600)
+                temporary = data / ('.phone-collector-display.json.' + 'a'*32 + '.tmp')
+                if kind == 'symlink': temporary.symlink_to(victim)
+                elif kind == 'hardlink': os.link(victim, temporary)
+                else: os.mkfifo(temporary)
+                try:
+                    with self.assertRaises((INSTALL.InstallError,OSError)):
+                        self.fs.secure_tree(INSTALL.DATA)
+                    self.assertEqual(victim.read_bytes(), b'untouched')
+                    self.assertEqual(victim.stat().st_mode & 0o777, 0o600)
+                finally: temporary.unlink()
+
+    def test_collector_files_require_their_original_valid_mutex(self):
+        data = self.fs.path(INSTALL.DATA)
+        cache = data / 'phone-collector-display.json'
+        self.fs.write(INSTALL.DATA + '/' + cache.name, b'{"schema":1}', 0o640, user=True)
+        original = cache.stat()
+        with self.assertRaisesRegex(INSTALL.InstallError, 'permanent mutex'):
+            self.fs.secure_tree(INSTALL.DATA)
+        lock = cache.with_name(cache.name + '.lock')
+        for marker in (b'INVALID', b'SLS_JSON_V1\nextra'):
+            self.fs.write(INSTALL.DATA + '/' + lock.name, marker, 0o640, user=True)
+            with self.assertRaises(INSTALL.InstallError):
+                self.fs.secure_tree(INSTALL.DATA)
+            self.assertEqual(cache.stat().st_ctime_ns, original.st_ctime_ns)
+        lock.unlink(); lock.symlink_to(cache)
+        with self.assertRaises(OSError):
+            self.fs.secure_tree(INSTALL.DATA)
+        self.assertEqual(cache.stat().st_ctime_ns, original.st_ctime_ns)
+
+    def test_phone_history_marker_uses_the_ledger_writer_mutex(self):
+        marker = INSTALL.DATA + '/.phone-admission-required'
+        lock = INSTALL.DATA + '/phone-admission.lock'
+        self.fs.write(marker, b'SLS_PHONE_ADMISSION_V1\n', 0o600, user=True)
+        self.fs.write(lock, b'', 0o640, user=True)
+        with self.fs.path(lock).open('rb') as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.object(INSTALL.os, 'listdir', return_value=['.phone-admission-required']), \
+                    mock.patch.object(INSTALL.time, 'monotonic', side_effect=[0, 6]):
+                with self.assertRaisesRegex(INSTALL.InstallError, 'remained busy'):
+                    self.fs.secure_tree(INSTALL.DATA)
+            self.assertEqual(stat.S_IMODE(self.fs.path(marker).stat().st_mode), 0o600)
+
+    def test_busy_collector_mutex_fails_without_touching_its_writer(self):
+        path = INSTALL.DATA + '/phone-collector-display.json.lock'
+        self.fs.write(path, b'SLS_JSON_V1\n', 0o640, user=True)
+        mutex = self.fs.path(path)
+        with mutex.open('rb') as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = mutex.stat()
+            with mock.patch.object(INSTALL.time, 'monotonic', side_effect=[0, 6]):
+                with self.assertRaisesRegex(INSTALL.InstallError, 'remained busy'):
+                    self.fs.secure_tree(INSTALL.DATA)
+            self.assertEqual(mutex.stat().st_ctime_ns, before.st_ctime_ns)
+
+    def test_public_tree_does_not_accept_collector_temporary_disappearance(self):
+        target = INSTALL.WEB + '/sls_mass_notify'
+        self.fs.mkdir(target, 0o755, user=True)
+        temporary = self.fs.path(target) / ('.phone-collector-display.json.' + 'f'*32 + '.tmp')
+        temporary.write_bytes(b'private fixture')
+        actual_listdir = os.listdir
+        def disappeared(fd):
+            names = actual_listdir(fd)
+            if temporary.name in names: temporary.unlink()
+            return names
+        with mock.patch.object(INSTALL.os, 'listdir', side_effect=disappeared):
+            with self.assertRaises(FileNotFoundError): self.fs.secure_tree(target, public=True)
+
     def test_event_recovery_evidence_stays_private_during_state_repair(self):
         self.fs.mkdir(INSTALL.DATA + '/event-log-recovery', 0o700, user=True)
         self.fs.write(INSTALL.DATA + '/event-log-recovery/original.backup', b'preserved evidence', 0o600, user=True)
@@ -208,11 +359,14 @@ class PrivilegedInstall(unittest.TestCase):
 
     def test_nested_api_directories_are_traversable_under_restrictive_umask(self):
         # Apache's existing document-root ancestors belong to the platform.
-        for path in ('/', '/var', '/var/www', '/var/www/html', '/var/www/html/api'):
+        for path in ('/', '/var', '/var/www', '/var/www/html'):
             self.fs.mkdir(path, 0o755)
+        self.fs.mkdir(INSTALL.WEB+'/independent-private-app',0o750)
         previous = os.umask(0o077)
         try:
             self.action.prepare()
+            self.assertEqual(stat.S_IMODE(self.fs.path(INSTALL.WEB+'/api').stat().st_mode),0o755)
+            self.assertEqual(stat.S_IMODE(self.fs.path(INSTALL.WEB+'/independent-private-app').stat().st_mode),0o750)
             for path, user in self.action.copy_directories():
                 metadata = self.fs.path(path).stat()
                 self.assertEqual(stat.S_IMODE(metadata.st_mode), 0o755, path)
@@ -261,7 +415,7 @@ class PrivilegedInstall(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(victim.stat().st_mode), 0o600)
         self.assertEqual((links / 'administrator-note').read_bytes(), b'preserved note')
         (links / 'unknown-link').symlink_to(victim)
-        with self.assertRaisesRegex(INSTALL.InstallError, 'unsafe SLS state entry'):
+        with self.assertRaisesRegex(INSTALL.InstallError, 'unsafe SLL state entry'):
             self.action.prepare()
         self.assertTrue((links / 'unknown-link').is_symlink())
     def test_unsafe_existing_file_types_do_not_touch_link_victim(self):
@@ -288,15 +442,45 @@ class PrivilegedInstall(unittest.TestCase):
     def test_state_hardlink_never_changes_outside_owner_or_permissions(self):
         victim = self.base / 'victim'; victim.write_bytes(b'private'); victim.chmod(0o600)
         path = self.fs.path(INSTALL.DATA + '/receipt.json'); os.link(victim,path)
-        with self.assertRaisesRegex(INSTALL.InstallError,'unsafe SLS state'): self.action.prepare()
+        with self.assertRaisesRegex(INSTALL.InstallError,'unsafe SLL state'): self.action.prepare()
         self.assertEqual(victim.stat().st_uid,0)
         self.assertEqual(stat.S_IMODE(victim.stat().st_mode),0o600)
+    def test_state_permission_repair_rejects_nested_bind_mount_before_mutation(self):
+        outside=self.base/'outside-state';outside.mkdir(mode=0o700)
+        sentinel=outside/'private';sentinel.write_bytes(b'preserved external state');sentinel.chmod(0o600)
+        target=self.fs.path(INSTALL.DATA+'/mounted-state');target.mkdir(mode=0o750)
+        before=(outside.stat().st_uid,outside.stat().st_gid,stat.S_IMODE(outside.stat().st_mode),
+                sentinel.stat().st_uid,sentinel.stat().st_gid,stat.S_IMODE(sentinel.stat().st_mode),sentinel.read_bytes())
+        self.bind_mount(outside,target)
+        with self.assertRaisesRegex(INSTALL.InstallError,'mount boundary'):
+            self.fs.secure_tree(INSTALL.DATA)
+        after=(outside.stat().st_uid,outside.stat().st_gid,stat.S_IMODE(outside.stat().st_mode),
+               sentinel.stat().st_uid,sentinel.stat().st_gid,stat.S_IMODE(sentinel.stat().st_mode),sentinel.read_bytes())
+        self.assertEqual(after,before)
+    def test_runtime_prune_rejects_nested_bind_mount_before_deletion(self):
+        self.fs.mkdir(INSTALL.RUNTIME,0o755)
+        outside=self.base/'outside-runtime';outside.mkdir(mode=0o700)
+        sentinel=outside/'preserved';sentinel.write_bytes(b'preserved external runtime');sentinel.chmod(0o600)
+        target=self.fs.path(INSTALL.RUNTIME+'/mounted-runtime');target.mkdir(mode=0o755)
+        before=(sentinel.stat().st_uid,stat.S_IMODE(sentinel.stat().st_mode),sentinel.read_bytes())
+        self.bind_mount(outside,target)
+        with self.assertRaisesRegex(INSTALL.InstallError,'mount boundary'):
+            self.fs.prune(INSTALL.RUNTIME,set())
+        self.assertTrue(sentinel.exists())
+        self.assertEqual((sentinel.stat().st_uid,stat.S_IMODE(sentinel.stat().st_mode),sentinel.read_bytes()),before)
     def test_unrelated_service_configuration_is_not_overwritten(self):
         for path in (INSTALL.SERVICE_PATH,INSTALL.APACHE_PATH,INSTALL.LOGROTATE_PATH):
             self.fs.write(path,b'administrator unrelated content',0o644)
             with self.assertRaisesRegex(INSTALL.InstallError,'unrelated'): self.action.prepare()
             self.assertEqual(self.fs.read(path),b'administrator unrelated content')
             self.fs.path(path).unlink()
+    def test_rebrand_upgrades_legacy_managed_web_config_and_collector_without_losing_state(self):
+        legacy_apache = INSTALL.APACHE.replace('# SLL Mass Notify Server\n', '# Southland Servers Mass Notifications Server\n')
+        self.fs.write(INSTALL.APACHE_PATH, legacy_apache.encode(), 0o644)
+        self.fs.write(INSTALL.SERVICE_PATH, INSTALL.UNIT.encode(), 0o644)
+        self.action.prepare()
+        self.assertTrue(self.fs.read(INSTALL.APACHE_PATH).startswith(b'# SLL Mass Notify Server\n'))
+        self.assertEqual(self.fs.read(INSTALL.CONFIG), self.configuration)
     def test_dependencies_reject_changed_runtime_before_execution(self):
         self.action.prepare(); self.services.calls.clear()
         self.fs.path(INSTALL.RUNTIME + '/sls_mass_notify_install_piper_voices.sh').write_bytes(b'untrusted')

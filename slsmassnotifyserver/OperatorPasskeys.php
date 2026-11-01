@@ -5,7 +5,7 @@ require_once __DIR__.'/PasskeyConfig.php';
 require_once __DIR__.'/AdvertisedAddress.php';
 require_once __DIR__.'/api/sls-mass-notify/security.php';
 
-/** Optional verified-user second factor for the SLS operator portal only. */
+/** Optional verified-user second factor for the SLL operator portal only. */
 final class OperatorPasskeys
 {
     private static function serializer(): \Symfony\Component\Serializer\SerializerInterface
@@ -41,7 +41,7 @@ final class OperatorPasskeys
         $descriptors=array_map(static fn($row)=>['type'=>'public-key','id'=>$row['credential_id']],$keys);
         $options=['challenge'=>$challenge,'timeout'=>120000];
         if($purpose==='register'){
-            $options+=['rp'=>['name'=>'SLS Mass Notify','id'=>$origin['rp_id']],
+            $options+=['rp'=>['name'=>'SLL Mass Notify Server','id'=>$origin['rp_id']],
                 'user'=>['name'=>$account['username'],'displayName'=>$account['name'],'id'=>self::encoded(self::handle($account))],
                 'pubKeyCredParams'=>[['type'=>'public-key','alg'=>-7],['type'=>'public-key','alg'=>-257]],
                 'attestation'=>'none','excludeCredentials'=>$descriptors,'authenticatorSelection'=>['userVerification'=>'required','residentKey'=>'discouraged']];

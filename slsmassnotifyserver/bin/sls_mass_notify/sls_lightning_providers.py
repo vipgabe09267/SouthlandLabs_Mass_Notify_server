@@ -65,7 +65,7 @@ def distance(center, lat, lon):
 
 def request(url, headers=None, opener=None):
     client = opener or urllib.request.build_opener(NoRedirect())
-    req=urllib.request.Request(url,headers={'User-Agent':'SLS-Mass-Notify/0.1.8-beta', 'Accept':'application/json, application/xml', **(headers or {})})
+    req=urllib.request.Request(url,headers={'User-Agent':'SLL-Mass-Notify/0.1.9-beta', 'Accept':'application/json, application/xml', **(headers or {})})
     # Transport errors must not expose credential-bearing URLs or headers.
     try:
         with client.open(req,timeout=20) as response:
@@ -79,7 +79,11 @@ def request(url, headers=None, opener=None):
 
 def xml(body):
     if b'<!DOCTYPE' in body.upper() or b'<!ENTITY' in body.upper(): raise ValueError('lightning_provider_xml_entities_rejected')
-    try: return ET.fromstring(body)
+    # The parser sees declarations after decoding, including UTF-16 input.
+    class NoDocumentTypes(ET.TreeBuilder):
+        def doctype(self, name, public_id, system_id):
+            raise ValueError('lightning_provider_xml_entities_rejected')
+    try: return ET.fromstring(body, parser=ET.XMLParser(target=NoDocumentTypes()))
     except ET.ParseError: raise ValueError('lightning_provider_invalid_xml') from None
 
 def normalized(provider, center, radius, values):

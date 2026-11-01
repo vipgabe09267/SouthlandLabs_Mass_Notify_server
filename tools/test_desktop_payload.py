@@ -214,13 +214,15 @@ class DesktopPayloadTests(unittest.TestCase):
             self.assertEqual(result.stderr, "")
             return json.loads(result.stdout)
 
-    def test_configured_https_port_is_preserved_and_unconfigured_port_uses_host(self):
+    def test_configured_https_port_is_preserved_and_phone_fields_are_stripped(self):
         path = "/sls_mass_notify/announcement_20260920235959_" + "a" * 24 + ".png"
         settings = {"public_pbx_host": "pbx.example.test", "sipnotify": {"base_url": "https://pbx.example.test:9443/api/sipnotify"}}
         event = {"image_url": "http://pbx.example.test:8080" + path, "xml": "phone unchanged", "description": "Full text"}
         for host in ("pbx.example.test:8443", "PBX.EXAMPLE.TEST:8443"):
             result = self.public_payload(settings, event, {"HTTP_HOST": host, "SERVER_PORT": "443", "HTTPS": "on"})
-            self.assertEqual(result, {**event, "image_url": "https://pbx.example.test:9443" + path, "is_test": False})
+            self.assertEqual(result, {"image_url": "https://pbx.example.test:9443" + path,
+                                      "description": "Full text", "is_test": False})
+            self.assertNotIn("xml", result)
         forwarded = {"public_pbx_host":"pbx.example.test","sipnotify":{"base_url":"https://pbx.example.test:8443/api/sipnotify"}}
         self.assertEqual(self.public_payload(forwarded,event,{"HTTP_HOST":"pbx.example.test","HTTPS":"on"})['image_url'],"https://pbx.example.test:8443"+path)
         no_port = {"public_pbx_host":"pbx.example.test","sipnotify":{"base_url":"https://pbx.example.test/api/sipnotify"}}

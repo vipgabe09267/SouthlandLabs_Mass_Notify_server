@@ -23,7 +23,7 @@ from sls_weather_payload import strict_json, validate_collection
 DATA = Path("/var/lib/asterisk/SLS_Mass_Notifications_Plugin")
 MAX_BODY = 10 * 1024 * 1024
 MAX_CACHE = 32 * 1024 * 1024
-USER_AGENT = "SouthlandServers-Mass-Notifications-Server (https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server)"
+USER_AGENT = "SouthlandLabs-Mass-Notify-Server (https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server)"
 
 
 def validated(raw: bytes) -> bytes:

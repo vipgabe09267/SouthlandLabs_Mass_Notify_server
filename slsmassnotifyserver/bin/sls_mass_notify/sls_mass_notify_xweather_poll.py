@@ -9,6 +9,7 @@ import math
 import os
 import pwd
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -45,6 +46,7 @@ from sls_notification_destinations import (
     queue_external_delivery,
     retry_external_deliveries,
     weather_source_validity,
+    validate_external_weather,
 )
 
 
@@ -75,7 +77,7 @@ CURRENT_GROUP_ID = ""
 CURRENT_GROUP_NAME = ""
 CURRENT_GROUP_INDEX = 0
 CURRENT_GROUP_LEGACY = False
-NWS_USER_AGENT = "SouthlandServers-Mass-Notifications-Server/0.1.8-beta (https://southlandservers.xyz)"
+NWS_USER_AGENT = "SouthlandLabs-Mass-Notify-Server/0.1.9-beta (https://southlandlabs.dev)"
 NWS_FORECAST_CACHE_SECONDS = 10 * 60
 NWS_FORECAST_STALE_SECONDS = 30 * 60
 NWS_POINT_CACHE_SECONDS = 24 * 60 * 60
@@ -318,7 +320,7 @@ def fetch_payload(xweather):
         "client_secret": xweather["client_secret"],
     }
     url = "https://data.api.xweather.com/lightning/closest?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "SouthlandServers-Mass-Notifications-Server/0.1.8-beta"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "SouthlandLabs-Mass-Notify-Server/0.1.9-beta"})
     last_error = None
     maximum_attempts = 1 if xweather.get("_bounded_gate_fallback") else 3
     for attempt in range(maximum_attempts):
@@ -914,6 +916,56 @@ def safe_tone(name):
     return path if name and path.is_file() else None
 
 
+def _new_media_output(parent, label):
+    from sls_nws_delivery_claims import _secure_file_metadata
+    for _ in range(32):
+        name = f'.{label}.{secrets.token_hex(16)}.wav'
+        try:
+            descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent)
+        except FileExistsError:
+            continue
+        try:
+            _secure_file_metadata(descriptor)
+            return descriptor, name
+        except BaseException:
+            os.close(descriptor)
+            try: os.unlink(name, dir_fd=parent)
+            except FileNotFoundError: pass
+            raise
+    raise RuntimeError('Lightning media workspace could not be allocated safely.')
+
+
+def _commit_media_output(parent, descriptor, temporary, target):
+    from sls_nws_delivery_claims import _identity
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,180}\.wav', target):
+        raise RuntimeError('Lightning media target name is invalid.')
+    captured = os.fstat(descriptor)
+    named = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+    if (_identity(captured) != _identity(named) or not stat.S_ISREG(captured.st_mode)
+            or captured.st_nlink != 1 or not 44 <= captured.st_size <= 128 * 1024 * 1024):
+        raise RuntimeError('Lightning media output changed before its atomic commit.')
+    os.fsync(descriptor)
+    os.replace(temporary, target, src_dir_fd=parent, dst_dir_fd=parent)
+    os.fsync(parent)
+
+
+def _open_media_source(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        metadata = os.fstat(descriptor)
+        asterisk = pwd.getpwnam('asterisk')
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid not in (0, asterisk.pw_uid)
+                or metadata.st_gid not in (0, asterisk.pw_gid)
+                or metadata.st_mode & 0o022 or not 44 <= metadata.st_size <= 128 * 1024 * 1024):
+            raise RuntimeError('Lightning media input has unsafe ownership, permissions or size.')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def spoken_location(location):
     """Return a natural TTS label without reading latitude/longitude aloud."""
     value = re.sub(r"\s+", " ", str(location or "")).strip()
@@ -941,7 +993,8 @@ def build_spoken_message(event_kind, is_test, radius_miles, location, nearest_mi
 
 def generate_audio(config, xweather, message, alert_id):
     TTS_DIR.mkdir(parents=True, exist_ok=True)
-    sources = []
+    if not isinstance(alert_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', alert_id):
+        raise RuntimeError('Lightning media identity is invalid.')
     opening_name = xweather.get("opening_tone", "opening_Lightning_alert")
     closing_name = xweather.get("closing_tone", "")
     # Pre-0.0.7 used a shared Weather-tone sentinel. Keep upgrades safe while
@@ -952,16 +1005,21 @@ def generate_audio(config, xweather, message, alert_id):
         closing_name = ""
     opening = safe_tone(opening_name)
     closing = safe_tone(closing_name)
-    if opening:
-        sources.append(opening)
     voice = Path(str(config.get("nws_piper_voice") or DATA_DIR / "piper/voices/en_US-amy-low.onnx"))
     if not PIPER_BIN.is_file() or not os.access(PIPER_BIN, os.X_OK) or not voice.is_file():
         raise RuntimeError("Piper runtime or selected weather voice is unavailable")
-    descriptor, name = tempfile.mkstemp(prefix="sls_xweather_", suffix=".wav", dir="/tmp")
-    os.close(descriptor)
-    raw = Path(name)
+    raw = None
     tts = TTS_DIR / f"xweather_tts_{alert_id}.wav"
+    from sls_nws_delivery_claims import _open_directory, _validate_parent_directory
+    parent = None
+    tts_descriptor = raw_descriptor = silence_descriptor = sequence_descriptor = None
+    tts_temporary = silence_name = sequence_temporary = ''
     try:
+        parent = _open_directory(TTS_DIR)
+        _validate_parent_directory(parent)
+        descriptor, name = tempfile.mkstemp(prefix="sls_xweather_", suffix=".wav", dir="/tmp")
+        os.close(descriptor)
+        raw = Path(name)
         maximum = max(1, min(600, int(config.get("tts_max_seconds", 30) or 30)))
         synthesis = subprocess.run(["/usr/bin/timeout", str(min(900, maximum * 2 + 30) + 65), "/usr/bin/python3", "-I", str(Path(__file__).with_name("sls_speech_admission.py")), "--max-seconds", str(maximum), "--", str(PIPER_BIN), "--model", str(voice), "--volume", "1.00", "--output-file", str(raw)], input=message + "\n", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if synthesis.returncode == 65:
@@ -970,48 +1028,60 @@ def generate_audio(config, xweather, message, alert_id):
             raise RuntimeError(f"Lightning speech generation failed (exit code {synthesis.returncode}). Check the selected voice, speech queue and Storage diagnostics; no speech was queued.")
         volume_value = xweather.get("tts_volume", config.get("nws_tts_volume", 25))
         volume = min(2.0, max(0.01, int(volume_value) / 100))
-        subprocess.run(["/usr/bin/sox", "-v", f"{volume:.2f}", str(raw), "-r", "8000", "-c", "1", "-b", "16", str(tts)], check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        raw_descriptor = _open_media_source(raw)
+        tts_descriptor, tts_temporary = _new_media_output(parent, 'xweather-tts')
+        subprocess.run(["/usr/bin/sox", "-v", f"{volume:.2f}", '-t', 'wav', f'/proc/self/fd/{raw_descriptor}',
+            "-r", "8000", "-c", "1", "-b", "16", '-t', 'wav', f'/proc/self/fd/{tts_descriptor}'],
+            check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            pass_fds=(raw_descriptor, tts_descriptor))
+        os.lseek(tts_descriptor, 0, os.SEEK_SET)
         try:
-            with wave.open(str(tts), "rb") as generated:
+            with os.fdopen(os.dup(tts_descriptor), 'rb') as audio_handle, wave.open(audio_handle, "rb") as generated:
                 duration = generated.getnframes() / generated.getframerate()
             if not math.isfinite(duration) or duration <= 0:
                 raise ValueError("invalid_duration")
         except (OSError, EOFError, ValueError, wave.Error) as exc:
-            tts.unlink(missing_ok=True)
             raise RuntimeError("Lightning speech duration could not be measured; no speech was queued.") from exc
         if duration > maximum:
-            tts.unlink(missing_ok=True)
             raise RuntimeError(f"Lightning speech lasts {duration:.2f} seconds; the configured maximum is {maximum} seconds. Increase the speech limit to fit the complete message; no speech was queued.")
-    finally:
-        raw.unlink(missing_ok=True)
-    sources.append(tts)
-    if closing:
-        sources.append(closing)
-    if not sources:
-        return ""
-    descriptor, name = tempfile.mkstemp(prefix="sls_silence_", suffix=".wav", dir="/tmp")
-    os.close(descriptor)
-    silence = Path(name)
-    target = TTS_DIR / f"xweather_sequence_{alert_id}.wav"
-    try:
-        reserve = 2 * (16044 + sum(path.stat().st_size for path in sources))
-        subprocess.run(["/usr/bin/python3", "-I", str(Path(__file__).with_name("sls_speech_admission.py")), "--reserve-media-bytes", str(reserve)], check=True, timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["/usr/bin/sox", "-n", "-r", "8000", "-c", "1", "-b", "16", str(silence), "trim", "0", "1"], check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(["/usr/bin/sox", str(silence), *map(str, sources), "-r", "8000", "-c", "1", "-b", "16", str(target)], check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    finally:
-        silence.unlink(missing_ok=True)
-    from sls_nws_delivery_claims import _open_directory, _validate_parent_directory, _secure_file_metadata
-    parent = _open_directory(TTS_DIR)
-    try:
-        _validate_parent_directory(parent)
-        descriptor = os.open(target.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        _commit_media_output(parent, tts_descriptor, tts_temporary, tts.name)
+        tts_temporary = ''
+
+        source_descriptors = []
         try:
-            _secure_file_metadata(descriptor)
+            if opening: source_descriptors.append(_open_media_source(opening))
+            source_descriptors.append(os.dup(tts_descriptor))
+            if closing: source_descriptors.append(_open_media_source(closing))
+            reserve = 2 * (16044 + sum(os.fstat(item).st_size for item in source_descriptors))
+            silence_descriptor, silence_name = tempfile.mkstemp(prefix="sls_silence_", suffix=".wav", dir="/tmp")
+            sequence_descriptor, sequence_temporary = _new_media_output(parent, 'xweather-sequence')
+            subprocess.run(["/usr/bin/python3", "-I", str(Path(__file__).with_name("sls_speech_admission.py")), "--reserve-media-bytes", str(reserve)], check=True, timeout=8, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["/usr/bin/sox", "-n", "-r", "8000", "-c", "1", "-b", "16", '-t', 'wav', f'/proc/self/fd/{silence_descriptor}', "trim", "0", "1"],
+                check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(silence_descriptor,))
+            os.lseek(silence_descriptor, 0, os.SEEK_SET)
+            for item in source_descriptors: os.lseek(item, 0, os.SEEK_SET)
+            inputs = [f'/proc/self/fd/{silence_descriptor}', *[f'/proc/self/fd/{item}' for item in source_descriptors]]
+            pass_descriptors = (silence_descriptor, sequence_descriptor, *source_descriptors)
+            subprocess.run(["/usr/bin/sox", *inputs, "-r", "8000", "-c", "1", "-b", "16", '-t', 'wav', f'/proc/self/fd/{sequence_descriptor}'],
+                check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=pass_descriptors)
+            target = TTS_DIR / f"xweather_sequence_{alert_id}.wav"
+            _commit_media_output(parent, sequence_descriptor, sequence_temporary, target.name)
+            sequence_temporary = ''
         finally:
-            os.close(descriptor)
+            for item in source_descriptors:
+                os.close(item)
+        return f"{SOUND_PREFIX}/{target.stem}"
     finally:
-        os.close(parent)
-    return f"{SOUND_PREFIX}/{target.stem}"
+        if raw is not None: raw.unlink(missing_ok=True)
+        if silence_descriptor is not None: os.close(silence_descriptor)
+        if silence_name: Path(silence_name).unlink(missing_ok=True)
+        for descriptor in (raw_descriptor, tts_descriptor, sequence_descriptor):
+            if descriptor is not None: os.close(descriptor)
+        for temporary in (tts_temporary, sequence_temporary):
+            if temporary:
+                try: os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError: pass
+        if parent is not None: os.close(parent)
 
 
 def audio_page_hold_seconds(sound):
@@ -1037,12 +1107,62 @@ def audio_page_hold_seconds(sound):
     return math.ceil(duration) + 2
 
 
-def queue_audio(recipients, sound, archive=False, voicemail_context=None, delivery_report=None):
+def local_source_authority(context):
+    """Pure current-policy read; retain only the original local route identities."""
+    try:
+        if (not isinstance(context, dict)
+                or any(not isinstance(context.get(key), list) or len(context[key]) > 1000
+                       or any(not isinstance(value, str) for value in context[key])
+                       for key in ('phones', 'desktops'))
+                or not isinstance(context.get('desktop_client_ids'), dict)):
+            raise ValueError('invalid_original_local_audience')
+        current, _root = load_config()
+        if not _cluster_guard.runtime_running(current):
+            return 'deferred', 'runtime_stopped', [], []
+        status, reason, group = validate_external_weather(
+            {'source_validity': context.get('source_validity'),
+             'payload': {'event': context.get('event', ''), 'severity': context.get('severity', '')}},
+            current, DATA_DIR)
+        if status != 'eligible' or group is None:
+            return status, reason, [], []
+        allowed_phones = {str(value) for value in group.get('recipients', [])
+                          if re.fullmatch(r'[0-9]{1,20}', str(value))}
+        phones = [value for value in context['phones'] if value in allowed_phones]
+        from sls_weather_channels import authorized_desktops
+        allowed_names = {str(value).lower() for value in group.get('desktop_clients', [])}
+        desktops = authorized_desktops(current,
+            [value for value in context['desktops'] if value.lower() in allowed_names],
+            context['desktop_client_ids'])
+        return 'eligible', '', phones, desktops
+    except Exception:
+        return 'deferred', 'source_authority_unavailable', [], []
+
+
+def queue_audio(recipients, sound, archive=False, voicemail_context=None, delivery_report=None, source_context=None):
     if not sound:
         return 0, [], 0
     page_hold_seconds = audio_page_hold_seconds(sound)
     if recipients:
         wait_for_slot(recipients, page_hold_seconds, sound)
+    suppression = ['', '']
+    removed = []
+    def current_recipients(selected):
+        if source_context is None or archive:
+            return list(selected)
+        status, reason, allowed, _desktops = local_source_authority(source_context)
+        if status != 'eligible':
+            suppression[:] = [status, reason]
+            return []
+        retained = [value for value in selected if value in allowed]
+        removed.extend(value for value in selected if value not in allowed and value not in removed)
+        return retained
+    recipients = current_recipients(recipients)
+    if not recipients and source_context is not None and not archive:
+        if delivery_report is not None:
+            delivery_report.update(accepted_count=0, source_blocked=True,
+                source_decision=suppression[0] or 'cancelled',
+                source_reason=suppression[1] or 'recipient_removed_or_disabled')
+        return 0, [], page_hold_seconds
     from sls_phone_admission import admit_internal
     correlation = os.environ.get('SLS_TEST_DELIVERY_ID', '') if archive else (
         'vm-' + hashlib.sha256((CURRENT_GROUP_ID + '|' + voicemail_context['event_id']).encode()).hexdigest()
@@ -1053,7 +1173,7 @@ def queue_audio(recipients, sound, archive=False, voicemail_context=None, delive
         voicemail_scope=CURRENT_GROUP_ID, voicemail_context=admission_context)
     fallback_targets = admission.get('voicemail_targets', []) if not admission.get('voicemail_failure_code') else []
     accepted = set(admission['targets']) | set(fallback_targets)
-    recipients = admission['targets']
+    recipients = current_recipients(admission['targets'])
     call_wait_seconds = page_hold_seconds + 30
     queued = 0
     archived_results = []
@@ -1064,15 +1184,18 @@ def queue_audio(recipients, sound, archive=False, voicemail_context=None, delive
             os.chown(SPOOL_DONE_DIR, asterisk_account.pw_uid, asterisk_account.pw_gid)
         os.chmod(SPOOL_DONE_DIR, 0o750)
     for extension in recipients:
+        if not current_recipients([extension]):
+            if suppression[0]: break
+            continue
         wait_time = TEST_CALL_WAIT_SECONDS if archive else 180
         body = (
             f"Channel: Local/{extension}@sls-alert-audio/n\n"
             f"Account: slsphone_{admission['token']}\n"
             f"Setvar: __SLS_PHONE_TOKEN={admission['token']}\n"
             f"Setvar: __SLS_PHONE_RECIPIENT={extension}\n"
-            "CallerID: \"SLS Lightning Alert\" <SLS>\n"
+            "CallerID: \"SLL Lightning Alert\" <SLL>\n"
             f"Setvar: SLS_SOUND={sound}\n"
-            "Setvar: SLS_CALLERID_NAME=SLS Lightning Alert\nSetvar: SLS_CALLERID_NUM=SLS\n"
+            "Setvar: SLS_CALLERID_NAME=SLL Lightning Alert\nSetvar: SLS_CALLERID_NUM=SLL\n"
             f"MaxRetries: 0\nRetryTime: 5\nWaitTime: {max(wait_time, call_wait_seconds)}\n"
             + ("Archive: yes\n" if archive else "")
             + f"Application: Wait\nData: {page_hold_seconds}\n"
@@ -1092,13 +1215,21 @@ def queue_audio(recipients, sound, archive=False, voicemail_context=None, delive
             _cluster_guard.fence_legacy()
         except Exception:
             Path(name).unlink(missing_ok=True)
-            raise
+            if source_context is None or archive: raise
+            suppression[:] = ['deferred', 'cluster_authority_unavailable']
+            break
+        if not current_recipients([extension]):
+            Path(name).unlink(missing_ok=True)
+            if suppression[0]: break
+            continue
         os.replace(name, target)
         if archive:
             archived_results.append((SPOOL_DONE_DIR / target.name, extension))
         queued += 1
     if delivery_report is not None:
-        delivery_report.update(accepted_count=len(accepted), voicemail_failure_code=admission.get('voicemail_failure_code'))
+        delivery_report.update(accepted_count=len(accepted), voicemail_failure_code=admission.get('voicemail_failure_code'),
+            source_blocked=bool(suppression[0] or removed), source_decision=suppression[0],
+            source_reason=suppression[1] or ('recipient_removed_or_disabled' if removed else ''))
     return queued, archived_results, page_hold_seconds
 
 
@@ -1144,7 +1275,7 @@ def record_xweather_outcome(is_test, status, message):
     })
 
 
-def send_visual(recipients, desktop_clients, message, is_test=False, phone_delay_seconds=0, desktop_bindings=None):
+def send_visual(recipients, desktop_clients, message, is_test=False, phone_delay_seconds=0, desktop_bindings=None, source_context=None):
     # ImageScreen is reliable on the legacy Yealink T48G where a long
     # TextScreen can produce a phone-side "Layout Error". Other vendors still
     # receive the normal safe text fallback from sls_notify.py.
@@ -1156,8 +1287,27 @@ def send_visual(recipients, desktop_clients, message, is_test=False, phone_delay
     ]
     if is_test is True:
         base_command.append("--is-test")
+    source_input = None
+    if source_context is not None:
+        if is_test or set(source_context) != {'source_validity', 'event', 'severity', 'phones', 'desktops', 'desktop_client_ids'}:
+            raise RuntimeError('Invalid live Lightning source context.')
+        source_input = json.dumps(source_context, separators=(',', ':'), ensure_ascii=True, allow_nan=False)
+        if len(source_input.encode('utf-8')) > 262144:
+            raise RuntimeError('Live Lightning source context exceeds its publication limit.')
+        base_command.append('--lightning-source-context-stdin')
     submitted = False
     failures = []
+    def current_routes():
+        if source_context is None or is_test:
+            return list(recipients), list(desktop_clients)
+        status, reason, phones, desktops = local_source_authority(source_context)
+        if status != 'eligible':
+            raise RuntimeError('Lightning visual submission suppressed: ' + reason)
+        return ([value for value in recipients if value in phones],
+                [value for value in desktop_clients if value in desktops])
+    recipients, desktop_clients = current_routes()
+    if source_context is not None and desktop_bindings is None:
+        desktop_bindings = source_context.get('desktop_client_ids', {})
     # A desktop publication is a durable local journal write, not a live-client
     # presence probe. Publish it first so a sleeping/disconnected laptop is not
     # an error and connected SSE clients do not inherit the handset delay.
@@ -1167,7 +1317,8 @@ def send_visual(recipients, desktop_clients, message, is_test=False, phone_delay
             environment = dict(os.environ)
             if desktop_bindings is not None:
                 environment['SLS_DESKTOP_CLIENT_IDS_SNAPSHOT'] = json.dumps(desktop_bindings, separators=(',', ':'))
-            publication = subprocess.run(command, check=True, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=environment)
+            source_arguments = {} if source_input is None else {'input': source_input}
+            publication = subprocess.run(command, check=True, timeout=30, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=environment, **source_arguments)
             if is_test and os.environ.get('SLS_TEST_DELIVERY_ID'):
                 for line in publication.stdout.splitlines():
                     if line.startswith('SLS_DESKTOP_PUBLICATION '):
@@ -1186,9 +1337,13 @@ def send_visual(recipients, desktop_clients, message, is_test=False, phone_delay
             delay = 0.0
         if delay:
             time.sleep(delay)
+        recipients, _desktops = current_routes()
+        if not recipients:
+            raise RuntimeError('Original Lightning phone visual recipients were removed or disabled.')
         command = [*base_command, "--targets", ",".join(recipients), "--no-api", "--no-retry"]
         try:
-            subprocess.run(command, check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            source_arguments = {} if source_input is None else {'input': source_input, 'text': True}
+            subprocess.run(command, check=True, timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **source_arguments)
         except (OSError, subprocess.SubprocessError) as exc:
             failures.append(f"phone SIP NOTIFY submission failed: {exc}")
         submitted = True
@@ -1198,15 +1353,18 @@ def send_visual(recipients, desktop_clients, message, is_test=False, phone_delay
         raise RuntimeError("; ".join(failures))
 
 
-def submit_local_channels(recipients, desktop_clients, message, sound, is_test=False, preparation_error="", voicemail_context=None):
+def submit_local_channels(recipients, desktop_clients, message, sound, is_test=False, preparation_error="", voicemail_context=None, source_context=None):
     """Attempt independent local channels; never infer display from queue acceptance."""
     errors = [preparation_error] if preparation_error else []
     queued, archived_results, page_hold_seconds = 0, [], 0
     if recipients and sound:
         try:
             delivery_report = {}
+            authority = {} if source_context is None else {'source_context': source_context}
             queued, archived_results, page_hold_seconds = queue_audio(recipients, sound, archive=is_test,
-                voicemail_context=voicemail_context, delivery_report=delivery_report)
+                voicemail_context=voicemail_context, delivery_report=delivery_report, **authority)
+            if delivery_report.get('source_blocked'):
+                errors.append('audio submission suppressed: ' + delivery_report.get('source_reason', 'source_authority_unavailable'))
             accepted = delivery_report.get('accepted_count', queued)
             if accepted < len(set(recipients)):
                 errors.append(f'audio submission: only {accepted} of {len(set(recipients))} selected destinations were admitted for phone audio or pending voicemail; delivery remains unverified')
@@ -1215,8 +1373,9 @@ def submit_local_channels(recipients, desktop_clients, message, sound, is_test=F
         except Exception as exc:
             errors.append(f"audio submission: {exc}")
     try:
+        authority = {} if source_context is None else {'source_context': source_context}
         send_visual(recipients, desktop_clients, message, is_test=is_test,
-                    phone_delay_seconds=2 if queued else 0)
+                    phone_delay_seconds=2 if queued else 0, **authority)
     except Exception as exc:
         errors.append(f"visual submission: {exc}")
     if is_test and archived_results:
@@ -1321,8 +1480,9 @@ def main():
                 "xweather",
                 live=True,
                 preferred_correlation_key=preferred_correlation_key,
-                email_sender=send_branded_email,
-                webhook_dispatcher=dispatch_webhook_destinations,
+                guarded_email_sender=send_branded_email,
+                guarded_webhook_dispatcher=dispatch_webhook_destinations,
+                configuration_reader=lambda: load_config()[0],
             )
             if outcome["pending"]:
                 log(f"{outcome['pending']} durable external delivery record(s) remain pending")
@@ -1612,14 +1772,14 @@ def main():
     location_label = spoken_location(location)
     if event_kind == "clear":
         message = f"No recent lightning has been detected within {settings['radius_miles']} miles of {location_label} during the configured observation period."
-        subject = "Southland Servers PBX: Lightning all clear"
+        subject = "Southland Labs PBX: Lightning all clear"
         event_name = "Lightning All Clear"
         severity = "All Clear"
         state_label = "Outside radius"
     else:
         detected_miles = format_miles(nearest_miles if nearest_miles is not None else settings["radius_miles"])
         message = f"Warning. Lightning has been detected {detected_miles} miles from {location_label}. Please seek shelter now."
-        subject = "Southland Servers PBX: Lightning detected"
+        subject = "Southland Labs PBX: Lightning detected"
         event_name = "Lightning Radius Alert"
         severity = "Warning"
         state_label = "Inside radius"
@@ -1628,7 +1788,7 @@ def main():
             message = f"TEST ONLY. This is a simulated lightning all-clear for the configured {settings['radius_miles']}-mile radius of {location_label}. No actual lightning event is being reported."
         else:
             message = f"TEST ONLY. This is a simulated alert. Lightning has been detected within {settings['radius_miles']} miles of {location_label}. No actual lightning event is being reported."
-        subject = "TEST ONLY: Southland Servers PBX Lightning system test"
+        subject = "TEST ONLY: Southland Labs PBX Lightning system test"
         event_name = "Lightning System Test"
         severity = "Test"
         state_label = "Simulated test"
@@ -1818,6 +1978,17 @@ def main():
     # SIP/Asterisk cannot make endpoint receipt atomic or exactly once.
     local_delivery_outcome = "dry_run" if dry_run else ("submitted" if has_local_destination else "not_requested")
     local_delivery_error = ""
+    source_authority = {}
+    if external_live:
+        from sls_weather_channels import desktop_snapshot
+        source_authority['source_context'] = {
+            'event': event_name, 'severity': severity,
+            'source_validity': weather_source_validity('xweather', CURRENT_GROUP_ID,
+                observed_at=now, event_kind=event_kind, cluster_started=cluster_started,
+                configuration_identity=area_identity),
+            'phones': list(recipients), 'desktops': list(desktop_clients),
+            'desktop_client_ids': desktop_snapshot(config, desktop_clients),
+        }
     try:
         if not dry_run and has_local_destination:
             queued, channel_errors = submit_local_channels(
@@ -1825,7 +1996,7 @@ def main():
                 voicemail_context=None if is_test or config.get('xweather', {}).get('voicemail_enabled', '1') not in (True, 1, '1') else {'event': event_name, 'severity': severity, 'event_id': f'xweather-{alert_id}',
                     'source_validity': weather_source_validity('xweather', CURRENT_GROUP_ID,
                         observed_at=now, event_kind=event_kind, cluster_started=cluster_started,
-                        configuration_identity=area_identity)})
+                        configuration_identity=area_identity)}, **source_authority)
             if channel_errors:
                 raise RuntimeError("; ".join(channel_errors))
     except Exception as exc:
@@ -1866,7 +2037,7 @@ def main():
             log(f"external delivery remains pending because retry state failed: {exc}")
 
     event_status = "dry_run" if dry_run else ("completed" if is_test else ("partial_failure" if external_failures or local_delivery_outcome == "indeterminate" else "queued"))
-    append_event({"event_id": f"xweather-{alert_id}", "logged_at": datetime.now(timezone.utc).astimezone().isoformat(), "type": "xweather", "is_test": is_test, "status": event_status, "system_name": "SLS Mass Notify System", "source_name": {"xweather":"Xweather","tempest":"Tempest","meteomatics":"Meteomatics"}.get(xweather.get("provider","xweather"),"Lightning") + " Lightning API", "trigger_source": "Manual Lightning Test" if test_event else "Xweather API", "trigger_name": os.environ.get("XWEATHER_TEST_TRIGGER_NAME", "")[:80], "trigger_area_id": CURRENT_GROUP_ID, "trigger_area_name": CURRENT_GROUP_NAME, "page_group": ",".join(recipients), "desktop_targets": desktop_clients, "event": event_name, "severity": severity, "message_type": "Lightning", "audio": "Piper TTS" if sound else "None", "audio_sequence": [sound] if sound else [], "body": message, "radius_miles": settings["radius_miles"], "nearest_strike_miles": round(nearest_miles, 1) if nearest_miles is not None else None, "storm_state": state_label, "local_delivery_outcome": local_delivery_outcome, "local_delivery_error": local_delivery_error[:240], "external_destination_failures": external_failures})
+    append_event({"event_id": f"xweather-{alert_id}", "logged_at": datetime.now(timezone.utc).astimezone().isoformat(), "type": "xweather", "is_test": is_test, "status": event_status, "system_name": "SLL Mass Notify Server", "source_name": {"xweather":"Xweather","tempest":"Tempest","meteomatics":"Meteomatics"}.get(xweather.get("provider","xweather"),"Lightning") + " Lightning API", "trigger_source": "Manual Lightning Test" if test_event else "Xweather API", "trigger_name": os.environ.get("XWEATHER_TEST_TRIGGER_NAME", "")[:80], "trigger_area_id": CURRENT_GROUP_ID, "trigger_area_name": CURRENT_GROUP_NAME, "page_group": ",".join(recipients), "desktop_targets": desktop_clients, "event": event_name, "severity": severity, "message_type": "Lightning", "audio": "Piper TTS" if sound else "None", "audio_sequence": [sound] if sound else [], "body": message, "radius_miles": settings["radius_miles"], "nearest_strike_miles": round(nearest_miles, 1) if nearest_miles is not None else None, "storm_state": state_label, "local_delivery_outcome": local_delivery_outcome, "local_delivery_error": local_delivery_error[:240], "external_destination_failures": external_failures})
     delivery_state = event_status
     call_label = "completed" if is_test else "queued"
     if local_delivery_outcome == "not_requested":
@@ -1922,13 +2093,20 @@ def deliver_queued_event(record):
     current_fingerprints = external_destination_fingerprints(config)
     webhook_keys = {key for key in webhook_keys if (snapshot.get('webhook_fingerprints') or {}).get(key) == current_fingerprints.get(key)}
     channels = snapshot.get('channels') or {'voice_recipient_ids':[], 'sms_recipient_ids':[], 'fingerprints':{}}
+    source_context = {'event': record['event_name'], 'severity': record['severity'],
+        'source_validity': weather_source_validity('xweather', CURRENT_GROUP_ID,
+            observed_at=record['observed_at'], event_kind=record['event_kind'],
+            cluster_started=record['cluster_started'], configuration_identity=record['configuration_identity']),
+        'phones': list(snapshot.get('phones', [])), 'desktops': list(snapshot.get('desktops', [])),
+        'desktop_client_ids': snapshot.get('desktop_client_ids') or {}}
     if not recipients and not desktops and not email_recipients and not webhook_keys and not (channels['voice_recipient_ids'] or channels['sms_recipient_ids']):
         return 'cancelled', 'Original Lightning recipients were removed or disabled.'
     errors, sound, queued = [], '', 0
     # Publish the desktop journal before synthesis and any recipient queue wait.
     if desktops:
         try:
-            send_visual([], desktops, record['message'], desktop_bindings=snapshot.get('desktop_client_ids') or {})
+            send_visual([], desktops, record['message'], desktop_bindings=snapshot.get('desktop_client_ids') or {},
+                        source_context=source_context)
         except Exception as exc:
             errors.append('desktop publication: ' + type(exc).__name__)
     if recipients:
@@ -1938,14 +2116,21 @@ def deliver_queued_event(record):
             sound = generate_audio(config, area, spoken, re.sub(r'[^A-Za-z0-9_-]', '', record['alert_id']))
         except Exception as exc:
             errors.append('audio preparation: ' + (str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__))
-        if quiet_hours_active(area):
-            errors.append('Quiet hours began during speech preparation; phone submission was suppressed.')
+        decision, reason, allowed_phones, _desktops = local_source_authority(source_context)
+        remaining_phones = [value for value in recipients if value in allowed_phones]
+        if decision != 'eligible':
+            errors.append('Lightning phone submission suppressed: ' + reason)
+        elif not remaining_phones:
+            errors.append('Original Lightning phone recipients were removed or disabled.')
         else:
-            queued, local_errors = submit_local_channels(recipients, [], record['message'], sound,
+            if remaining_phones != recipients:
+                errors.append('Some original Lightning phone recipients were removed or disabled.')
+            queued, local_errors = submit_local_channels(remaining_phones, [], record['message'], sound,
                 voicemail_context=None if config.get('xweather', {}).get('voicemail_enabled', '1') not in (True, 1, '1') else {'event': record['event_name'], 'severity': record['severity'], 'event_id': 'xweather-' + record['alert_id'],
                     'source_validity': weather_source_validity('xweather', CURRENT_GROUP_ID,
                         observed_at=record['observed_at'], event_kind=record['event_kind'],
-                        cluster_started=record['cluster_started'], configuration_identity=record['configuration_identity'])})
+                        cluster_started=record['cluster_started'], configuration_identity=record['configuration_identity'])},
+                source_context=source_context)
             errors.extend(local_errors)
     fields = [('Trigger Area', CURRENT_GROUP_NAME), ('Storm State', record['state_label']),
               ('Detection Radius', str(area['radius_miles']) + ' miles')]

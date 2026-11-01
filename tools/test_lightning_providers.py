@@ -79,6 +79,27 @@ class Providers(unittest.TestCase):
         with self.assertRaises(ValueError):provider.request('https://api.meteomatics.com/wfs',opener=Transport(b'x'*(provider.MAX_BYTES+1)))
         with self.assertRaises(ValueError):provider.NoRedirect().redirect_request(None,None,None,None,None,None)
 
+    def test_xml_declarations_are_rejected_independently_of_byte_encoding(self):
+        for encoding in ('utf-8', 'utf-16', 'utf-16-le', 'utf-16-be'):
+            xml_encoding={'utf-16-le':'UTF-16LE', 'utf-16-be':'UTF-16BE'}.get(encoding,encoding)
+            for declaration in ('<!DOCTYPE a>', '<!DOCTYPE a [<!ENTITY value "fixture">]>'):
+                with self.subTest(encoding=encoding, declaration=declaration):
+                    value='&value;' if '<!ENTITY' in declaration else '&amp;'
+                    body=('<?xml version="1.0" encoding="'+xml_encoding+'"?>'+declaration+'<a>'+value+'</a>').encode(encoding)
+                    with self.assertRaisesRegex(ValueError, 'lightning_provider_xml_entities_rejected'):
+                        provider.xml(body)
+
+    def test_valid_multibyte_provider_xml_preserves_namespaces_and_strikes(self):
+        for encoding in ('utf-8', 'utf-16', 'utf-16-le', 'utf-16-be'):
+            with self.subTest(encoding=encoding):
+                xml_encoding={'utf-16-le':'UTF-16LE', 'utf-16-be':'UTF-16BE'}.get(encoding,encoding)
+                declaration='<?xml version="1.0" encoding="'+xml_encoding+'"?>'
+                transport=Transport(*[(declaration+body.decode('ascii')).encode(encoding) for body in (SCHEMA,GML)])
+                result=provider.fetch(self.settings('meteomatics'),opener=transport)
+                self.assertEqual(len(result['response']),1)
+                self.assertEqual(result['response'][0]['ob']['timestamp'],1790942400)
+                self.assertEqual(result['response'][0]['ob']['pulse']['type'],'cg')
+
     def test_errors_do_not_expose_credentials(self):
         class Broken:
             def open(self,*args,**kwargs):raise RuntimeError('fixture-secret https://evil.invalid')

@@ -1,5 +1,5 @@
 <?php
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 declare(strict_types=1);
 require_once dirname(__DIR__) . '/sls-mass-notify/security.php';
 require_once dirname(__DIR__) . '/sls-mass-notify/config-crypto.php';
@@ -254,7 +254,7 @@ function api_state_lock($handle, float $deadline, int $operation = LOCK_EX): boo
     return false;
 }
 
-function api_state_transaction(string $path, int $maximum, callable $update, int $waitMilliseconds = 250, bool $sharedRead = false): bool
+function api_state_transaction(string $path, int $maximum, callable $update, int $waitMilliseconds = 250, bool $sharedRead = false, bool $durable = true): bool
 {
     $GLOBALS['sls_api_state_error'] = '';
     $directory = dirname($path);
@@ -337,7 +337,7 @@ function api_state_transaction(string $path, int $maximum, callable $update, int
                 if ($amount === false || $amount === 0) { throw new RuntimeException('state_write_failed'); }
                 $written += $amount;
             }
-            if (!fflush($temporaryHandle) || !function_exists('fsync') || !@fsync($temporaryHandle)) {
+            if (!fflush($temporaryHandle) || ($durable && (!function_exists('fsync') || !@fsync($temporaryHandle)))) {
                 throw new RuntimeException('state_sync_failed');
             }
             clearstatcache(true, $path);
@@ -352,7 +352,7 @@ function api_state_transaction(string $path, int $maximum, callable $update, int
             }
             if (!@rename($temporary, $path)) { throw new RuntimeException('state_replace_failed'); }
             $temporary = '';
-            if (!@fsync($parent)) { throw new RuntimeException('state_directory_sync_failed'); }
+            if ($durable && !@fsync($parent)) { throw new RuntimeException('state_directory_sync_failed'); }
             return !empty($result['allowed']);
         }
     } catch (Throwable $exception) {
@@ -375,7 +375,7 @@ function api_state_transaction(string $path, int $maximum, callable $update, int
     }
     // Release both shared leases, then reread under exclusive locks. Never
     // commit a decision made against a snapshot that another writer can change.
-    return $upgradeRequired && api_state_transaction($path, $maximum, $update, $waitMilliseconds);
+    return $upgradeRequired && api_state_transaction($path, $maximum, $update, $waitMilliseconds, false, $durable);
 }
 
 function api_rate_entries_valid(array $data, int $maximum, bool $desktop): bool
@@ -394,10 +394,18 @@ function api_rate_entries_valid(array $data, int $maximum, bool $desktop): bool
 
 function desktop_authenticated_capacity(array $settings): int
 {
+    $profile=$settings['deployment_profile']??'standard';
+    $configured=$settings['desktop_client_limit']??25;
+    $clients=$settings['desktop_clients']??[];
+    if(!is_string($profile)||!in_array($profile,['standard','lite'],true)||!is_int($configured)
+        ||!is_array($clients)||!array_is_list($clients)||$configured<1||$configured>1000||count($clients)>1000
+        ||($profile==='lite'&&($configured>25||count($clients)>25))){
+        throw new RuntimeException('desktop_capacity_config_invalid');
+    }
     // Preserve already enrolled clients if a legacy configuration's capacity
     // field is absent or lower than its fleet. This is limiter storage sizing,
     // not permission to enroll additional clients beyond resource admission.
-    return min(1000, max(25, (int)($settings['desktop_client_limit'] ?? 25), count((array)($settings['desktop_clients'] ?? []))));
+    return min(1000,max(25,$configured,count($clients)));
 }
 
 function desktop_rate_retry_after(?int $now = null): int
@@ -408,9 +416,63 @@ function desktop_rate_retry_after(?int $now = null): int
 function desktop_auth_attempt_allowed(string $ip, string $username, bool $authenticated = false, ?int $now = null, bool $checkOnly = false, int $authenticatedCapacity = 1000): bool
 {
     $bucket = gmdate('YmdHi', $now ?? time());
-    $sharded=false;$seedCount=0;
-    $allowed=api_state_transaction(DESKTOP_AUTH_RATE_FILE, 524288, static function (array $data) use ($ip, $username, $authenticated, $checkOnly, $authenticatedCapacity, $bucket, &$sharded, &$seedCount): array {
-        $sharded=false;$seedCount=0;
+    if ($authenticated) {
+        $identity=hash('sha256','authenticated:'.$username);
+        $key='ok:'.$identity;
+        $path=DESKTOP_AUTH_RATE_FILE.'.ok-'.substr($identity,0,2).'.json';
+        $capacity=min(1000,max(1,$authenticatedCapacity));
+        $seen=false;
+        // This availability throttle is reached only after successful Basic
+        // authentication. Atomic replacement and strict locking are retained,
+        // but it does not force two disk barriers per poll. Failed-password
+        // budgets below remain durable because they defend authentication.
+        $allowed=api_state_transaction($path,131072,static function(array $data)use($key,$bucket,$checkOnly,&$seen):array{
+            if(!api_rate_entries_valid($data,1000,true)){throw new RuntimeException('state_invalid');}
+            $data=array_filter($data,static fn(array $entry):bool=>$entry['bucket']===$bucket);
+            if(!isset($data[$key])){return ['allowed'=>true,'write'=>false,'data'=>$data];}
+            $seen=true;$entry=$data[$key];
+            if($checkOnly){return ['allowed'=>$entry['count']<120,'write'=>false,'data'=>$data];}
+            $entry['count']=min(120,$entry['count'])+1;$data[$key]=$entry;
+            return ['allowed'=>$entry['count']<=120,'write'=>true,'data'=>$data];
+        },250,true,false);
+        if($seen||!$allowed||!empty($GLOBALS['sls_api_state_error'])){return $allowed;}
+
+        // Carry a current-minute counter forward from pre-shard releases. The
+        // old shared file is read, never enlarged, on a client's first request
+        // in the minute. Every later request touches only its small shard.
+        $seedCount=0;
+        $legacyRead=api_state_transaction(DESKTOP_AUTH_RATE_FILE,524288,static function(array $data)use($ip,$username,$identity,$bucket,&$seedCount):array{
+            if(!api_rate_entries_valid($data,3048,true)){throw new RuntimeException('state_invalid');}
+            $data=array_filter($data,static fn(array $entry):bool=>$entry['bucket']===$bucket);
+            $namespaced='ok:'.$identity;
+            if(isset($data[$namespaced])){$seedCount=min(120,$data[$namespaced]['count']);}
+            $legacy=false;
+            foreach(array_keys($data) as $storedKey){if(strpos($storedKey,':')===false){$legacy=true;break;}}
+            if($legacy){
+                $ipKey=hash('sha256','ip:'.$ip);
+                $accountKey=hash('sha256','account:'.strtolower(substr($username,0,80)));
+                $ipCount=isset($data[$ipKey])?min(120,$data[$ipKey]['count']):0;
+                // Legacy authenticated requests had a 60-request account
+                // allowance. Map its remaining budget into the 120-request
+                // shard without resetting it during an upgrade.
+                $accountCount=isset($data[$accountKey])?min(60,$data[$accountKey]['count']):0;
+                $seedCount=max($seedCount,$ipCount,60+$accountCount);
+            }
+            return ['allowed'=>true,'write'=>false,'data'=>$data];
+        },250,true);
+        if(!$legacyRead||!empty($GLOBALS['sls_api_state_error'])){return false;}
+        return api_state_transaction($path,131072,static function(array $data)use($key,$bucket,$seedCount,$checkOnly,$capacity):array{
+            if(!api_rate_entries_valid($data,1000,true)){throw new RuntimeException('state_invalid');}
+            $data=array_filter($data,static fn(array $entry):bool=>$entry['bucket']===$bucket);
+            if(!isset($data[$key])&&count($data)>=$capacity){return ['allowed'=>false,'write'=>false,'data'=>$data];}
+            $entry=$data[$key]??['bucket'=>$bucket,'count'=>$seedCount];
+            if($checkOnly){return ['allowed'=>max($seedCount,$entry['count'])<120,'write'=>false,'data'=>$data];}
+            $entry['count']=min(120,max($seedCount,$entry['count']))+1;$data[$key]=$entry;
+            return ['allowed'=>$entry['count']<=120,'write'=>true,'data'=>$data];
+        },250,false,false);
+    }
+
+    $allowed=api_state_transaction(DESKTOP_AUTH_RATE_FILE, 524288, static function (array $data) use ($ip, $username, $checkOnly, $bucket): array {
         if (!api_rate_entries_valid($data, 3048, true)) { throw new RuntimeException('state_invalid'); }
         $data = array_filter($data, static function (array $entry) use ($bucket): bool { return $entry['bucket'] === $bucket; });
         $legacy = false;
@@ -435,55 +497,32 @@ function desktop_auth_attempt_allowed(string $ip, string $username, bool $authen
             return ['allowed' => $allowed, 'write' => !$checkOnly, 'data' => $data];
         }
         $namespaceCounts = ['ok:' => 0, 'failed:' => 0];
-        $registryChanged=false;
         foreach (array_keys($data) as $storedKey) {
             $namespaceCounts[strpos($storedKey, 'ok:') === 0 ? 'ok:' : 'failed:']++;
         }
-        // Successful clients behind one NAT have independent user budgets.
-        $identities = $authenticated
-            ? ['authenticated:' . $username => 120]
-            : ['failed-ip:' . $ip => 120, 'failed-pair:' . $ip . ':' . substr($username, 0, 80) => 20];
+        $identities = ['failed-ip:' . $ip => 120, 'failed-pair:' . $ip . ':' . substr($username, 0, 80) => 20];
         foreach ($identities as $identity => $limit) {
-            $namespace = $authenticated ? 'ok:' : 'failed:';
+            $namespace = 'failed:';
             $entryKey = $namespace . hash('sha256', $identity);
             if ($checkOnly) {
                 $allowed = $allowed && ($data[$entryKey]['count'] ?? 0) < $limit;
                 continue;
             }
             if (!isset($data[$entryKey])) {
-                if ($namespaceCounts[$namespace] >= ($authenticated ? min(1000, max(1, $authenticatedCapacity)) : 2048)) {
+                if ($namespaceCounts[$namespace] >= 2048) {
                     $allowed = false;
                     continue;
                 }
                 $namespaceCounts[$namespace]++;
-                $registryChanged=true;
             }
             $entry = $data[$entryKey] ?? ['bucket' => $bucket, 'count' => 0];
-            if($authenticated){
-                // The shared file admits at most the configured fleet once per
-                // minute. Request counters use 256 fixed shards, avoiding a
-                // whole-fleet fsync on every successful poll or receipt.
-                $seedCount=$entry['count'];$sharded=true;
-                $data[$entryKey]=$entry;
-                $allowed=$allowed&&$entry['count']<$limit;
-                continue;
-            }
             $entry['count'] = min($limit, $entry['count']) + 1;
             $data[$entryKey] = $entry;
             $allowed = $allowed && $entry['count'] <= $limit;
         }
-        return ['allowed' => $allowed, 'write' => !$checkOnly&&(!$authenticated||$registryChanged), 'data' => $data];
-    }, 250, $authenticated || $checkOnly);
-    if(!$allowed||!$sharded){return $allowed;}
-    $identity=hash('sha256','authenticated:'.$username);
-    $path=DESKTOP_AUTH_RATE_FILE.'.ok-'.substr($identity,0,2).'.json';
-    return api_state_transaction($path,131072,static function(array $data)use($identity,$bucket,$seedCount):array{
-        if(!api_rate_entries_valid($data,1000,true)){throw new RuntimeException('state_invalid');}
-        $data=array_filter($data,static fn(array $entry):bool=>$entry['bucket']===$bucket);
-        $key='ok:'.$identity;$entry=$data[$key]??['bucket'=>$bucket,'count'=>$seedCount];
-        $entry['count']=min(120,max($seedCount,$entry['count']))+1;$data[$key]=$entry;
-        return ['allowed'=>$entry['count']<=120,'write'=>true,'data'=>$data];
-    });
+        return ['allowed' => $allowed, 'write' => !$checkOnly, 'data' => $data];
+    }, 250, $checkOnly);
+    return $allowed;
 }
 
 function desktop_auth_failure_budget_available(string $ip, string $username, ?int $now = null): bool
@@ -795,7 +834,12 @@ function retained_events(array $settings): array
         $client=$GLOBALS['slsDesktopCurrentClient']??null;
         if(is_array($metadata)&&is_array($client)){
             $indexed=\SLS\MassNotify\DesktopFeedCache::read($eventsFile,$metadata,$settings,$client,retention_days($settings),'desktop_timestamp');
-            if($indexed!==null){return $indexed;}
+            if($indexed!==null){
+                $cachedFingerprint=$fingerprint;
+                $cachedEvents=$indexed;
+                $cachedAt=time();
+                return $cachedEvents;
+            }
         }
         // Release the previous snapshot before allocating a changed journal.
         $cachedEvents = []; $cachedFingerprint = null;
@@ -902,8 +946,13 @@ function desktop_history_event(string $eventId): ?array
     }
 }
 
-function desktop_stream_slot(string $username)
+function desktop_stream_slot(string $username, array $settings = [])
 {
+    $profile = $settings['deployment_profile'] ?? 'standard';
+    if (!is_string($profile) || !in_array($profile, ['standard', 'lite'], true)) {
+        header('Retry-After: 60');
+        respond(503, ['ok' => false, 'error' => 'stream_capacity_unavailable']);
+    }
     $directory = dirname(EVENTS_FILE) . '/stream-slots';
     $parentDirectory = dirname($directory);
     $parentHandle = desktop_private_directory_open($parentDirectory);
@@ -923,7 +972,8 @@ function desktop_stream_slot(string $username)
     }
     $handles = [];
     try {
-      foreach (['client-' . hash('sha256', $username) => 2, 'global' => 32] as $prefix => $limit) {
+      $lite = $profile === 'lite';
+      foreach (['client-' . hash('sha256', $username) => $lite ? 1 : 2, 'global' => $lite ? 4 : 32] as $prefix => $limit) {
         $claimed = false;
         for ($slot = 0; $slot < $limit; $slot++) {
             $path = $directory . '/' . $prefix . '-' . $slot . '.lock';
@@ -1046,7 +1096,10 @@ function desktop_event_routed_to_client(array $event, string $username, ?string 
 
 function desktop_event_public_payload(array $event, array $settings, ?array $client = null): array
 {
-    unset($event['desktop_client_ids']);
+    // Phone routing and vendor XML belong to the PBX-side transport record,
+    // not to authenticated desktop clients. Keep desktop presentation fields.
+    unset($event['desktop_client_ids'], $event['xml'], $event['recipients'],
+        $event['phone_formats'], $event['phone_image_url']);
     if($client!==null){
         // The route already authorized this client. Do not disclose the rest
         // of the fleet in every recipient's payload.
@@ -1377,7 +1430,9 @@ if (!desktop_auth_failure_budget_available($remoteIp, $basicUser)) {
     respond(429, ['ok' => false, 'error' => 'rate_limited', 'retry_after_seconds' => $retryAfter]);
 }
 $client = authorized_desktop_client($settings, $basicUser, $basicPass);
-if (!desktop_auth_attempt_allowed($remoteIp, $basicUser, !empty($client), null, false, desktop_authenticated_capacity($settings))) {
+try{$authenticatedCapacity=desktop_authenticated_capacity($settings);}
+catch(Throwable $error){respond(503,['ok'=>false,'error'=>'config_unavailable']);}
+if (!desktop_auth_attempt_allowed($remoteIp, $basicUser, !empty($client), null, false, $authenticatedCapacity)) {
     if (!empty($GLOBALS['sls_api_state_error'])) {
         header('Retry-After: 2');
         respond(503, ['ok' => false, 'error' => 'rate_limit_storage_unavailable',
@@ -1388,7 +1443,7 @@ if (!desktop_auth_attempt_allowed($remoteIp, $basicUser, !empty($client), null, 
     respond(429, ['ok' => false, 'error' => 'rate_limited', 'retry_after_seconds' => $retryAfter]);
 }
 if (empty($client)) {
-    header('WWW-Authenticate: Basic realm="SLS Mass Notify Desktop"');
+    header('WWW-Authenticate: Basic realm="SLL Mass Notify Server Desktop"');
     respond(401, ['ok' => false, 'error' => 'unauthorized']);
 }
 
@@ -1517,7 +1572,7 @@ if ($streamRequested) {
             'fallback'=>['transport'=>'json_poll', 'path'=>'/api/sipnotify/desktop',
                 'cursor_parameter'=>'last_event_id', 'poll_interval_seconds'=>5]]);
     }
-    $streamSlots = desktop_stream_slot($username);
+    $streamSlots = desktop_stream_slot($username, $settings);
     register_shutdown_function(static function () use (&$streamSlots): void {
         desktop_stream_release_slots($streamSlots);
     });

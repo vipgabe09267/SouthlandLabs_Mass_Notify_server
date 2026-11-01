@@ -334,6 +334,102 @@ class OperationalBackupTests(unittest.TestCase):
         self.assertEqual((self.target/'.incident-replay-blocked.json').read_bytes(),raw)
         self.assertFalse([p for p in self.target.iterdir() if re.fullmatch(r'\.incident-replay-[a-f0-9]{32}',p.name)])
 
+    def sqlite_replay_archive(self, schema, rows=()):
+        path = self.root / ('replay-' + str(len(list(self.root.glob('replay-*.sqlite')))) + '.sqlite')
+        database = sqlite3.connect(path)
+        database.executescript(schema)
+        database.execute('PRAGMA user_version=1')
+        for query, arguments in rows:
+            database.execute(query, arguments)
+        database.commit(); database.close()
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), backup.MAX_FILE)
+        record = {'path':'incidents/archive/reports.sqlite','captured_at':2,'bytes':len(raw),
+                  'sha256':hashlib.sha256(raw).hexdigest(),'base64':base64.b64encode(raw).decode()}
+        body = backup.line({'format':backup.FORMAT,'started_at':1,'policy':'evidence_only_no_replay'})
+        body += backup.line(record) + backup.line({'complete':True,'files':1,'source_bytes':len(raw),'finished_at':2})
+        self.assertTrue(backup.inspect(body)['ok'])
+        return body
+
+    def test_sqlite_views_and_generated_id_columns_refuse_before_evaluation(self):
+        identifier = 'inc_' + 'd' * 32
+        definitions = [
+            "CREATE VIRTUAL TABLE reports USING fts5(id); INSERT INTO reports(id) VALUES('" + identifier + "');",
+            "CREATE TABLE reports(other TEXT);",
+            "CREATE VIEW reports AS SELECT printf('%33554432s','x') AS id;",
+            "CREATE TABLE reports(seed TEXT, id TEXT GENERATED ALWAYS AS (printf('%33554432s',seed)) VIRTUAL); INSERT INTO reports(seed) VALUES('x');",
+            "CREATE TABLE reports(seed TEXT, id TEXT GENERATED ALWAYS AS ('" + identifier + "') STORED); INSERT INTO reports(seed) VALUES('x');",
+            "CREATE TABLE reports(id BLOB PRIMARY KEY); INSERT INTO reports VALUES('" + identifier + "');",
+        ]
+        real_connect = sqlite3.connect
+        for schema in definitions:
+            body = self.sqlite_replay_archive(schema)
+            queries = []
+            def observed(*arguments, **options):
+                database = real_connect(*arguments, **options)
+                database.set_trace_callback(lambda query: queries.append(query) if re.search(r'FROM\s+(?:main\.)?reports\b', query, re.I) else None)
+                return database
+            self.file.write_bytes(body); self.file.chmod(0o600)
+            before = {p.relative_to(self.target):p.read_bytes() for p in self.target.rglob('*') if p.is_file()}
+            with self.subTest(schema=schema), mock.patch.object(backup.sqlite3, 'connect', side_effect=observed):
+                with self.assertRaises(backup.RecoveryError): backup.archive(self.file, self.target)
+                self.assertEqual(queries, [], 'Untrusted schema evaluated a reports query before rejection')
+                self.assertEqual({p.relative_to(self.target):p.read_bytes() for p in self.target.rglob('*') if p.is_file()}, before)
+                self.assertFalse((self.target/'recovery-archives').exists())
+                self.assertEqual(self.file.read_bytes(), body)
+
+    def test_sqlite_identity_projection_bounds_invalid_stored_values(self):
+        real_connect = sqlite3.connect
+        for value in ('x' * (2 * 1024 * 1024), b'x' * (2 * 1024 * 1024), 1234, None):
+            body = self.sqlite_replay_archive('CREATE TABLE reports(id TEXT);', [('INSERT INTO reports VALUES (?)',(value,))])
+            observed_sizes = []
+            class Cursor:
+                def __init__(self, cursor, query): self.cursor, self.query = cursor, query
+                def __getattr__(self, name): return getattr(self.cursor, name)
+                def fetchall(self):
+                    rows = self.cursor.fetchall()
+                    if re.search(r'FROM\s+(?:main\.)?reports\b', self.query, re.I):
+                        observed_sizes.extend(len(row[0]) for row in rows if isinstance(row[0], (str,bytes)))
+                    return rows
+            class Database:
+                def __init__(self, *arguments, **options): self.database = real_connect(*arguments, **options)
+                def __getattr__(self, name): return getattr(self.database, name)
+                def execute(self, query, *arguments): return Cursor(self.database.execute(query, *arguments), query)
+            with self.subTest(type=type(value).__name__), mock.patch.object(backup.sqlite3, 'connect', side_effect=Database):
+                with self.assertRaises(backup.RecoveryError): backup.incident_replay_ids(body)
+                self.assertTrue(all(size <= 36 for size in observed_sizes), observed_sizes)
+
+    def test_sqlite_real_native_schema_and_large_encoded_report_body_remain_compatible(self):
+        import gzip
+        source = (ROOT/'slsmassnotifyserver/IncidentArchive.php').read_text()
+        match = re.search(r"exec\('(CREATE TABLE reports .*?PRAGMA user_version=1;)'\)", source, re.S)
+        self.assertIsNotNone(match)
+        identifier = 'inc_' + 'd' * 32
+        raw_report = backup.line({'id':identifier,'message':base64.b64encode(os.urandom(1024*1024)).decode()})
+        packed = gzip.compress(raw_report)
+        self.assertGreater(len(packed), 1024 * 1024)
+        body = self.sqlite_replay_archive(match[1], [('INSERT INTO reports VALUES (?,?,?,?,?,?,?,?)',
+            (identifier,'2026-10-01T00:00:00+00:00','2026-10-02T00:00:00+00:00',packed,
+             hashlib.sha256(raw_report).hexdigest(),len(raw_report),len(packed),'retained native report'))])
+        self.assertEqual(backup.incident_replay_ids(body), {identifier})
+        self.file.write_bytes(body); self.file.chmod(0o600)
+        report = backup.archive(self.file, self.target)
+        self.assertTrue(report['ok'])
+        self.assertEqual(backup.inspect_replay_guard((self.target/'.incident-replay-blocked.json').read_bytes()),{identifier})
+        self.assertFalse((self.target/'incidents/archive').exists())
+        self.assertEqual(backup.archive(self.file,self.target), report)
+
+    def test_sqlite_identity_limit_and_invalid_rows_refuse_without_losing_other_ids(self):
+        identifier = 'inc_' + 'd' * 32
+        body = self.sqlite_replay_archive('CREATE TABLE reports(id TEXT);',
+            [('INSERT INTO reports VALUES (?)',(identifier,)),('INSERT INTO reports VALUES (?)',('invalid',))])
+        with self.assertRaises(backup.RecoveryError): backup.incident_replay_ids(body)
+        rows = [('INSERT INTO reports VALUES (?)',('inc_'+format(i,'032x'),)) for i in range(20001)]
+        body = self.sqlite_replay_archive('CREATE TABLE reports(id TEXT PRIMARY KEY);',rows)
+        with self.assertRaises(backup.RecoveryError): backup.incident_replay_ids(body)
+        body = self.sqlite_replay_archive('CREATE TABLE reports(id TEXT PRIMARY KEY);',rows[:20000])
+        self.assertEqual(len(backup.incident_replay_ids(body)), 20000)
+
     def test_corrupt_incomplete_duplicate_and_unapproved_path_archives_fail(self):
         original = self.snapshot(); rows = list(map(json.loads, original.splitlines()))
         for mutation in ('path', 'bytes', 'hash', 'base64', 'count', 'duplicate', 'truncated', 'time'):

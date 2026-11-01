@@ -37,7 +37,7 @@ def open_directory(path, owner):
             info = os.fstat(descriptor)
             sticky = info.st_uid == 0 and part == 'tmp' and info.st_mode & stat.S_ISVTX
             # FreePBX may give its asterisk group write access to a core
-            # ancestor. The final SLS journal directory remains private.
+            # ancestor. The final SLL journal directory remains private.
             group_write = info.st_mode & 0o020 and (index == len(parts)-1 or info.st_gid not in (0, group))
             if (info.st_uid not in (0, os.geteuid(), owner)
                     or not sticky and (info.st_mode & 0o002 or group_write)):
@@ -295,4 +295,4 @@ if __name__ == '__main__':
             data.update(patch)
         print('{"ok":true}')
     except Exception:
-        raise SystemExit('SLS status update failed. Preserve its journal and review permissions, storage and the permanent status lock.') from None
+        raise SystemExit('SLL status update failed. Preserve its journal and review permissions, storage and the permanent status lock.') from None

@@ -219,7 +219,7 @@ PYVOICECACHE
     for ((attempt = 0; attempt < 2; attempt++)); do
       if /usr/bin/timeout --signal=TERM --kill-after=5 95 /usr/bin/curl -fL --proto '=https' --proto-redir '=https' \
         --max-filesize "$expected_bytes" --connect-timeout 20 --max-time 90 \
-        -A "SouthlandServers-Mass-Notifications-Server/0.1.8-beta" \
+        -A "SouthlandLabs-Mass-Notify-Server/0.1.9-beta" \
         -o - "$url" | bounded_voice_stream "$tmp" "$expected_bytes"; then
         downloaded=1
         break
@@ -453,7 +453,7 @@ EOF
       wrapper_hash="${wrapper_hash%% *}"
       case "$wrapper_hash" in
         "$expected_hash"|97792a8e4ca9f3f48be0be0c24202921008807da030ac85438b58034f21130e4|4c6c0dfe69c1b59b8650c0c5a9d38adf5a9c6cbe311c283a929a7fc5580015c0) ;;
-        *) printf '%s\n' '/usr/local/bin/piper is not a recognized SLS wrapper; refusing to overwrite it.' >&2; return 1 ;;
+        *) printf '%s\n' '/usr/local/bin/piper is not a recognized SLL wrapper; refusing to overwrite it.' >&2; return 1 ;;
       esac
     fi
   fi
@@ -567,6 +567,14 @@ temporary = ""
 def descend(parent_fd, component):
     return os.open(component, directory_flags, dir_fd=parent_fd)
 
+def mount_id(descriptor):
+    with open('/proc/self/fdinfo/' + str(descriptor), encoding='ascii') as details:
+        for line in details:
+            if line.startswith('mnt_id:'):
+                value = line.split(':', 1)[1].strip()
+                if value.isdigit(): return int(value)
+    raise RuntimeError('Piper compatibility mount boundary could not be verified')
+
 def bounded_entries(descriptor, limit):
     names = set()
     with os.scandir(descriptor) as entries:
@@ -584,12 +592,15 @@ try:
             os.close(current)
         current = next_fd
     piper_fd = current
+    managed_mount = mount_id(piper_fd)
     entries = bounded_entries(piper_fd, 128)
     if "venv" not in entries:
         os.mkdir("venv", 0o755, dir_fd=piper_fd)
         changed = True
     venv_fd = descend(piper_fd, "venv")
     try:
+        if mount_id(venv_fd) != managed_mount:
+            raise RuntimeError("Piper compatibility path crosses a mount boundary")
         entries = bounded_entries(venv_fd, 4)
         if entries - {"bin"}:
             raise RuntimeError("Piper compatibility path contains an unexpected entry")
@@ -598,6 +609,8 @@ try:
             changed = True
         bin_fd = descend(venv_fd, "bin")
         try:
+            if mount_id(bin_fd) != managed_mount:
+                raise RuntimeError("Piper compatibility path crosses a mount boundary")
             entries = bounded_entries(bin_fd, 4)
             if entries - {"piper"}:
                 raise RuntimeError("Piper compatibility path contains an unexpected entry")
@@ -660,8 +673,17 @@ import time
 
 root = Path(os.environ['PIPER_PERMISSION_ROOT'])
 flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
+file_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 count = 0
 deadline = time.monotonic() + 15
+
+def mount_id(descriptor):
+    with open('/proc/self/fdinfo/' + str(descriptor), encoding='ascii') as details:
+        for line in details:
+            if line.startswith('mnt_id:'):
+                value = line.split(':', 1)[1].strip()
+                if value.isdigit(): return int(value)
+    raise RuntimeError('Piper runtime mount boundary could not be verified')
 
 def protected(info, label):
     if info.st_uid != 0 or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
@@ -687,7 +709,7 @@ def system_python(path):
         finally: os.close(parent)
     raise RuntimeError('Piper interpreter link cycle')
 
-def visit(fd, relative=''):
+def visit(fd, tree_mount, relative=''):
     global count
     protected(os.fstat(fd), relative or 'runtime directory')
     with os.scandir(fd) as entries:
@@ -706,11 +728,21 @@ def visit(fd, relative=''):
                     current = os.fstat(child)
                     if (current.st_dev,current.st_ino) != (info.st_dev,info.st_ino):
                         raise RuntimeError('Piper runtime directory changed')
-                    visit(child,rel)
+                    if mount_id(child) != tree_mount:
+                        raise RuntimeError('Piper runtime crosses a mount boundary: ' + rel)
+                    visit(child,tree_mount,rel)
                 finally: os.close(child)
             elif stat.S_ISREG(info.st_mode):
                 if info.st_nlink != 1:
                     raise RuntimeError('Piper runtime contains a hard-linked file: ' + rel)
+                child = os.open(name, file_flags, dir_fd=fd)
+                try:
+                    current = os.fstat(child)
+                    if (current.st_dev,current.st_ino) != (info.st_dev,info.st_ino):
+                        raise RuntimeError('Piper runtime file changed')
+                    if mount_id(child) != tree_mount:
+                        raise RuntimeError('Piper runtime crosses a mount boundary: ' + rel)
+                finally: os.close(child)
             elif stat.S_ISLNK(info.st_mode):
                 target = os.readlink(name, dir_fd=fd)
                 if link_rel == 'venv/lib64' and target == 'lib': continue
@@ -727,7 +759,7 @@ try:
         child = os.open(part,flags,dir_fd=fd)
         os.close(fd); fd=child
         protected(os.fstat(fd), 'runtime ancestor')
-    visit(fd)
+    visit(fd,mount_id(fd))
 finally: os.close(fd)
 PYGUARD
 }
@@ -743,6 +775,14 @@ import re
 root = os.environ["PIPER_PERMISSION_ROOT"]
 flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
 root_fd = os.open(root, flags)
+def mount_id(descriptor):
+    with open('/proc/self/fdinfo/' + str(descriptor), encoding='ascii') as details:
+        for line in details:
+            if line.startswith('mnt_id:'):
+                value = line.split(':', 1)[1].strip()
+                if value.isdigit(): return int(value)
+    raise RuntimeError('Piper runtime mount boundary could not be verified')
+root_mount = mount_id(root_fd)
 def secure_tree(fd, relative=""):
     for name in os.listdir(fd):
         before = os.stat(name,dir_fd=fd,follow_symlinks=False)
@@ -756,6 +796,8 @@ def secure_tree(fd, relative=""):
                     or (info.st_dev,info.st_ino) != (current.st_dev,current.st_ino)
                     or info.st_uid != 0 or info.st_mode & 0o022):
                 raise RuntimeError('Piper runtime entry changed during permission repair')
+            if mount_id(child) != root_mount:
+                raise RuntimeError('Piper runtime crosses a mount boundary: ' + rel)
             if stat.S_ISDIR(info.st_mode): secure_tree(child,rel)
             elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
                 os.fchmod(child,0o600 if rel == '.replacement.lock' else (0o755 if re.sub(r'^\.replacement-[a-f0-9]{24}/', '', rel).startswith('venv/bin/') else 0o644))
@@ -782,6 +824,13 @@ if account.pw_uid<=0 or root!="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/p
     raise RuntimeError("Unexpected Piper voice repair path or owner")
 root_fd=os.open("/",flags)
 children=[]
+def mount_id(descriptor):
+    with open('/proc/self/fdinfo/' + str(descriptor), encoding='ascii') as details:
+        for line in details:
+            if line.startswith('mnt_id:'):
+                value=line.split(':',1)[1].strip()
+                if value.isdigit(): return int(value)
+    raise RuntimeError("Piper voice mount boundary could not be verified")
 try:
     for part in root.strip("/").split("/"):
         child=os.open(part,flags,dir_fd=root_fd)
@@ -790,6 +839,7 @@ try:
         if (info.st_uid not in (0,account.pw_uid) or info.st_mode&0o002
                 or info.st_mode&0o020 and info.st_gid not in (0,account.pw_gid)):
             raise RuntimeError("Unsafe Piper voice repair ancestor")
+    root_mount=mount_id(root_fd)
     names=[]
     with os.scandir(root_fd) as entries:
         for entry in entries:
@@ -806,6 +856,8 @@ try:
         opened=os.fstat(child)
         if (opened.st_dev,opened.st_ino,opened.st_nlink)!=(before.st_dev,before.st_ino,1):
             raise RuntimeError("Piper voice entry changed during repair")
+        if mount_id(child)!=root_mount:
+            raise RuntimeError("Piper voice tree crosses a mount boundary")
     for name,child,before in children:
         current=os.stat(name,dir_fd=root_fd,follow_symlinks=False)
         opened=os.fstat(child)
@@ -925,6 +977,7 @@ declare -A hashes=(
 optional_records="$(/usr/bin/python3 -I - <<'SLS_OPTIONAL_VOICES'
 import json,re,sys
 from pathlib import Path
+sys.dont_write_bytecode = True
 sys.path.insert(0,'/usr/local/bin/sls_mass_notify')
 from sls_config_crypto import read_config
 path=Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config')

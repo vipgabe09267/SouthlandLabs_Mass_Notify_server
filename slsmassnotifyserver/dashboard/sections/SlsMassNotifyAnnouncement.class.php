@@ -11,7 +11,7 @@ class SlsMassNotifyAnnouncement
 	{
 		$order = is_array($order) ? $order : [];
 		return [[
-			'title' => _('SLS Mass Notify Announcements'),
+			'title' => _('SLL Mass Notify Server Announcements'),
 			'group' => _('Announcements'),
 			'width' => '680px',
 			'order' => $order['sls_mass_notify_announcement'] ?? '50',
@@ -27,7 +27,7 @@ class SlsMassNotifyAnnouncement
 		try {
 			$module = \FreePBX::Slsmassnotifyserver();
 			if (!$module->operatorPageAllowed('slsmassnotifyserver')) {
-				return '<div class="alert alert-info">Use <a href="/mass-notify/" target="_blank" rel="noopener noreferrer">SLS Operations</a> for your assigned sites and audiences.</div>';
+				return '<div class="alert alert-info">Use <a href="/mass-notify/" target="_blank" rel="noopener noreferrer">SLL Operations</a> for your assigned sites and audiences.</div>';
 			}
 			$setupComplete = $module->isSetupWizardComplete();
 			$moduleDirectory = dirname((new \ReflectionClass($module))->getFileName());
@@ -80,7 +80,7 @@ class SlsMassNotifyAnnouncement
 		} catch (\Throwable $e) {
 			return '<div class="alert alert-warning">'
 				. htmlspecialchars(
-					_('Unable to load SLS Mass Notify announcement controls.'),
+					_('Unable to load SLL Mass Notify Server announcement controls.'),
 					ENT_QUOTES | ENT_SUBSTITUTE,
 					'UTF-8'
 				)

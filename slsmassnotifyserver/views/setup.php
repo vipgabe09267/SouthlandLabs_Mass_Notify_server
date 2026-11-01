@@ -1,6 +1,8 @@
 <?php
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 $settings = is_array($settings ?? null) ? $settings : [];
+$deploymentProfile = (($settings['deployment_profile'] ?? 'standard') === 'lite') ? 'lite' : 'standard';
+$liteMode = $deploymentProfile === 'lite';
 $saveResult = $save_result ?? null;
 $extensions = is_array($available_extensions ?? null) ? $available_extensions : [];
 $desktopClients = array_values(array_filter((array)($available_desktop_clients ?? []), 'is_array'));
@@ -99,14 +101,14 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 		<div class="col-sm-12">
 			<h2><i class="fa fa-magic text-primary" aria-hidden="true"></i> <?php echo _('Setup Wizard'); ?></h2>
 			<p class="text-muted">
-				<?php echo _('Thank you for installing the Southland Servers Mass Notification System. Complete this wizard before using the Mass Notifications module.'); ?>
+				<?php echo _('Thank you for installing the SLL Mass Notify Server. Complete this wizard before using the Mass Notifications module.'); ?>
 			</p>
 			<p>
-				<a href="<?php echo htmlspecialchars($project_url ?? 'https://southlandservers.xyz/projects'); ?>" target="_blank" rel="noopener"><?php echo _('Project'); ?></a>
+				<a href="<?php echo htmlspecialchars($project_url ?? 'https://southlandlabs.dev/projects'); ?>" target="_blank" rel="noopener"><?php echo _('Project'); ?></a>
 				|
-				<a href="<?php echo htmlspecialchars($discord_url ?? 'https://southlandservers.xyz/discord'); ?>" target="_blank" rel="noopener"><?php echo _('Discord'); ?></a>
+				<a href="<?php echo htmlspecialchars($discord_url ?? 'https://southlandlabs.dev/discord'); ?>" target="_blank" rel="noopener"><?php echo _('Discord'); ?></a>
 				|
-				<a href="<?php echo htmlspecialchars($github_url ?? 'https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server'); ?>" target="_blank" rel="noopener"><?php echo _('GitHub'); ?></a>
+				<a href="<?php echo htmlspecialchars($github_url ?? 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server'); ?>" target="_blank" rel="noopener"><?php echo _('GitHub'); ?></a>
 			</p>
 
 			<?php if (is_array($saveResult)) { ?>
@@ -146,7 +148,7 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 				<div class="panel panel-default">
 					<div class="panel-heading"><?php echo _('AGPL-3.0 License Notice'); ?></div>
 					<div class="panel-body" style="max-height: 180px; overflow: auto;">
-						<p><?php echo _('Southland Servers Mass Notifications Server is intended to be licensed under the GNU Affero General Public License version 3. Network users must be able to receive the corresponding source code under the AGPL terms.'); ?></p>
+						<p><?php echo _('SLL Mass Notify Server is intended to be licensed under the GNU Affero General Public License version 3. Network users must be able to receive the corresponding source code under the AGPL terms.'); ?></p>
 						<p><a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener"><?php echo _('Read the AGPL-3.0 license'); ?></a></p>
 					</div>
 				</div>
@@ -282,7 +284,7 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 				<div class="form-group">
 					<label for="sls-setup-host"><i class="fa fa-globe text-primary" aria-hidden="true"></i> <?php echo _('Advertised PBX hostname'); ?></label>
 					<input id="sls-setup-host" name="advertised_pbx_host" class="form-control" maxlength="253" value="<?php echo htmlspecialchars($setupAddress['host'], ENT_QUOTES, 'UTF-8'); ?>" disabled>
-					<p class="help-block"><?php echo _('SLS saves this address in the .config file. A later DNS or operating-system hostname change does not update it automatically.'); ?></p>
+					<p class="help-block"><?php echo _('SLL saves this address in the .config file. A later DNS or operating-system hostname change does not update it automatically.'); ?></p>
 					<label class="checkbox-inline"><input id="sls-setup-address-change" name="sls_address_change" type="checkbox" value="1" aria-controls="sls-setup-ports"> <?php echo _('Set hostname or forwarded ports'); ?></label>
 					<fieldset id="sls-setup-ports" disabled hidden>
 						<div class="row">
@@ -290,7 +292,7 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 							<div class="col-sm-4 form-group"><label for="sls-setup-port-<?php echo $kind; ?>"><?php echo $label; ?></label><input id="sls-setup-port-<?php echo $kind; ?>" class="form-control" name="advertised_<?php echo $kind; ?>_port" type="number" min="1" max="65535" step="1" required value="<?php echo (int)$setupAddress[$kind.'_port']; ?>"></div>
 							<?php } ?>
 						</div>
-						<p class="help-block"><?php echo _('Enter the external ports your clients use. HTTPS normally uses 443; HTTP phone images normally use 80. Router forwarding and proxy ports may differ from the PBX listener. SLS saves the advertised URLs without changing the firewall, router, DNS or certificates.'); ?></p>
+						<p class="help-block"><?php echo _('Enter the external ports your clients use. HTTPS normally uses 443; HTTP phone images normally use 80. Router forwarding and proxy ports may differ from the PBX listener. SLL saves the advertised URLs without changing the firewall, router, DNS or certificates.'); ?></p>
 					</fieldset>
 					<div id="sls-setup-address-preview" class="well well-sm" style="white-space:pre-line;overflow-wrap:anywhere" aria-live="polite"><?php echo htmlspecialchars(_('Desktop API:').' '.($settings['sipnotify']['base_url'] ?? '')."\n"._('Control API:').' '.($settings['control_api']['base_url'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></div>
 				</div>
@@ -317,12 +319,13 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 				<h3><i class="fa fa-volume-up text-success" aria-hidden="true"></i> <?php echo _('Audio Profiles and TTS'); ?></h3>
 				<div class="alert alert-info"><i class="fa fa-random" aria-hidden="true"></i> <?php echo _('Regular paging, Weather Alerts, and Lightning Alerts use independent tones and volume settings. The installer includes the recommended default sounds for all three profiles.'); ?></div>
 				<?php
-				$missingVoices = array_filter($voices, static function ($voice) {
-					return empty($voice['available']);
+				$selectedSetupVoices = [(string)($settings['announcement_piper_voice'] ?? ''), (string)($settings['nws_piper_voice'] ?? '')];
+				$missingVoices = array_filter($voices, static function ($voice) use ($selectedSetupVoices) {
+					return empty($voice['available']) && (empty($voice['optional']) || in_array((string)($voice['path'] ?? ''), $selectedSetupVoices, true));
 				});
 				if (!empty($missingVoices)) { ?>
 					<div class="alert alert-warning">
-						<?php echo _('One or more Piper voice files are not present yet. The installer attempts to download them during install; if TTS fails, check internet access and rerun module install or install Piper voices manually.'); ?>
+						<?php echo _('A required or selected speech voice is unavailable. Install the missing voice files or select an installed voice before using TTS.'); ?>
 					</div>
 				<?php } ?>
 				<?php $audioProfiles = [
@@ -375,11 +378,12 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 					<?php $selectedTimezone = ($settings['pbx_timezone'] ?? '') ?: ($pbx_timezone ?? date_default_timezone_get()); foreach (\DateTimeZone::listIdentifiers(\DateTimeZone::ALL_WITH_BC) as $zone) { ?><option value="<?php echo htmlspecialchars($zone, ENT_QUOTES, 'UTF-8'); ?>" <?php echo $zone === $selectedTimezone ? 'selected' : ''; ?>><?php echo htmlspecialchars($zone, ENT_QUOTES, 'UTF-8'); ?></option><?php } ?>
 					</select><p class="help-block"><?php echo _('A timezone change is applied by protected maintenance when notifications are idle. Review scheduled times and quiet hours after changing it.'); ?></p></div>
 					<h3 id="sls-setup-capacity-title"><i class="fa fa-server text-primary" aria-hidden="true"></i> <?php echo _('Device capacity'); ?></h3>
-					<p class="help-block"><?php echo _('New installations start with 25 desktops and 25 simultaneous phone contacts. Increasing either limit requires sufficient CPU, RAM and dedicated SLS free space; setup rejects increases the PBX cannot support. An extension with multiple registered phones uses multiple phone slots.'); ?></p>
+					<?php if ($liteMode) { ?><div class="alert alert-info"><i class="fa fa-leaf" aria-hidden="true"></i> <strong><?php echo _('Lite mode'); ?></strong> <?php echo _('The signed installer selected the 2 GiB profile. It supports at most 25 desktops and 25 phone contacts and uses reduced speech and live-stream concurrency. Enterprise Labs and enterprise SSO are unavailable; saved Enterprise configuration is retained.'); ?></div><?php } ?>
+					<p class="help-block"><?php echo _('New installations start with 25 desktops and 25 simultaneous phone contacts. Increasing either limit requires sufficient CPU, RAM and dedicated SLL free space; setup rejects increases the PBX cannot support. An extension with multiple registered phones uses multiple phone slots.'); ?></p>
 					<div class="row">
-						<div class="col-sm-6 form-group"><label for="sls-setup-desktop-capacity"><?php echo _('Desktop capacity'); ?></label><input id="sls-setup-desktop-capacity" class="form-control" name="desktop_client_limit" type="number" min="1" max="1000" step="1" required value="<?php echo (int)($settings['desktop_client_limit'] ?? 25); ?>"></div>
-						<div class="col-sm-6 form-group"><label for="sls-setup-phone-capacity"><?php echo _('Simultaneous phone contacts'); ?></label><input id="sls-setup-phone-capacity" class="form-control" name="phone_device_limit" type="number" min="1" max="1000" step="1" required value="<?php echo (int)($settings['phone_device_limit'] ?? 25); ?>"></div>
-						<p class="help-block col-sm-12"><?php echo _('On a new installation, phone capacity starts at 25 or the detected internal phone count rounded up to the next 50, whichever is higher. You can adjust it here; increases require sufficient resources.'); ?></p>
+						<div class="col-sm-6 form-group"><label for="sls-setup-desktop-capacity"><?php echo _('Desktop capacity'); ?></label><input id="sls-setup-desktop-capacity" class="form-control" name="desktop_client_limit" type="number" min="1" max="<?php echo $liteMode ? 25 : 1000; ?>" step="1" required value="<?php echo (int)($settings['desktop_client_limit'] ?? 25); ?>"></div>
+						<div class="col-sm-6 form-group"><label for="sls-setup-phone-capacity"><?php echo _('Simultaneous phone contacts'); ?></label><input id="sls-setup-phone-capacity" class="form-control" name="phone_device_limit" type="number" min="1" max="<?php echo $liteMode ? 25 : 1000; ?>" step="1" required value="<?php echo (int)($settings['phone_device_limit'] ?? 25); ?>"></div>
+						<p class="help-block col-sm-12"><?php echo $liteMode ? _('Lite mode requires no more than 25 detected phone contacts. Use Standard mode for a larger PBX.') : _('On a new installation, phone capacity starts at 25 or the detected internal phone count rounded up to the next 50, whichever is higher. You can adjust it here; increases require sufficient resources.'); ?></p>
 					</div>
 				</section>
 				<section class="sls-setup-section" aria-labelledby="sls-setup-next-title">

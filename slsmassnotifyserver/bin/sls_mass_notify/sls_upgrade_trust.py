@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Prepare upgrade approvals from signed packages, without changing live trust.
 
-Only authenticated upstream bytes, authenticated SLS overlays and explicitly
+Only authenticated upstream bytes, authenticated SLL overlays and explicitly
 reviewed protected inventories establish expectations. Unknown live differences
 are reported for review; their hashes never become an approval automatically.
 """
@@ -14,6 +14,7 @@ import types
 import io
 import json
 import os
+import pwd
 from pathlib import Path
 import re
 import stat
@@ -86,10 +87,13 @@ def write_json(path, data):
 
 
 def identity(web, module):
+    class NoDocumentTypes(ET.TreeBuilder):
+        def doctype(self, name, public_id, system_id):
+            raise UpgradeError('Unsupported module XML declarations: ' + module)
     body = TRUST.read(web / 'admin/modules' / module / 'module.xml', 1024 * 1024)
     if b'<!DOCTYPE' in body.upper() or b'<!ENTITY' in body.upper():
         raise UpgradeError('Unsupported module XML declarations: ' + module)
-    xml = ET.fromstring(body)
+    xml = ET.fromstring(body, parser=ET.XMLParser(target=NoDocumentTypes()))
     value = xml.findtext('version', '')
     pattern = SLS_VERSION if module == 'slsmassnotifyserver' else VERSION
     if xml.findtext('rawname') != module or not pattern.fullmatch(value):
@@ -112,11 +116,11 @@ class Redirects(urllib.request.HTTPRedirectHandler):
 
 def download(url, destination, limit):
     upstream = r'https://mirror\.freepbx\.org/modules/packages/(dashboard|framework)/\1-(17\.[0-9]+(?:\.[0-9]+){1,3})\.tgz\.gpg'
-    sls = (r'https://github\.com/vipgabe09267/SouthlandServers_Mass_Notify_server/releases/download/'
+    sls = (r'https://github\.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'
            r'slsmassnotifyserver-([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(?:slsmassnotifyserver-\1\.tgz|release-manifest\.(?:json|sig))')
     if not re.fullmatch(upstream, url) and not re.fullmatch(sls, url):
         raise UpgradeError('Unsupported upgrade package URL')
-    request = urllib.request.Request(url, headers={'User-Agent': 'SLS-Upgrade-Inventory', 'Accept-Encoding': 'identity'})
+    request = urllib.request.Request(url, headers={'User-Agent': 'SLL-Upgrade-Inventory', 'Accept-Encoding': 'identity'})
     opener = urllib.request.build_opener(Redirects())
     deadline = time.monotonic() + 180
     try:
@@ -150,14 +154,27 @@ def upstream_contents(package, module, version, workspace):
     key = TRUST.read(HERE / 'freepbx-mirror-signing.pub', 16384, protected=True)
     if TRUST.digest(key) != UPSTREAM_KEY_SHA256:
         raise UpgradeError('Bundled FreePBX mirror verification key changed')
-    with tempfile.TemporaryDirectory(prefix='.upstream-gpg-', dir=workspace) as temporary:
+    # Persistent transaction paths can exceed GPG's Unix-socket path limit.
+    # Keep its isolated keyring in a short, root-controlled temporary tree;
+    # the authenticated recovery workspace and all signature checks stay intact.
+    temporary_root = Path(os.environ.get('TMPDIR') or '/tmp')
+    if str(temporary_root) not in ('/tmp', '/var/tmp'):
+        raise UpgradeError('GPG verification requires a qualified short /tmp or /var/tmp directory')
+    temporary_meta = temporary_root.lstat()
+    if (temporary_root.resolve() != temporary_root or not stat.S_ISDIR(temporary_meta.st_mode)
+            or temporary_meta.st_uid != 0
+            or temporary_meta.st_mode & 0o022 and not temporary_meta.st_mode & stat.S_ISVTX):
+        raise UpgradeError('GPG verification requires a canonical root-controlled temporary directory')
+    with tempfile.TemporaryDirectory(prefix='sls-upstream-gpg-', dir=temporary_root) as temporary:
         private = Path(temporary)
         (private / 'key.asc').write_bytes(key)
         (private / 'package.gpg').write_bytes(signed)
         command = ['/usr/bin/gpg', '--no-options', '--homedir', str(private), '--batch', '--no-tty', '--no-auto-key-retrieve', '--no-autostart']
         subprocess.run(command + ['--import', str(private / 'key.asc')], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
         plain = private / 'package.tgz'
-        result = subprocess.run(command + ['--status-fd', '1', '--output', str(plain), '--decrypt', str(private / 'package.gpg')],
+        # Compressed OpenPGP can expand before GPG authenticates its signature.
+        # Enforce the package limit while writing, not after decryption ends.
+        result = subprocess.run(command + ['--max-output', str(TRUST.MAX_ARCHIVE), '--status-fd', '1', '--output', str(plain), '--decrypt', str(private / 'package.gpg')],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=90)
         lines = result.stdout.decode('ascii', errors='strict').splitlines()
         valid = [line.split() for line in lines if line.startswith('[GNUPG:] VALIDSIG ')]
@@ -244,7 +261,7 @@ def bootstrap_dashboard(workspace, version):
     """Stage only an absent Dashboard from an independently signed stock package.
 
     FreePBX registration/hooks are subsequently run as its service account by
-    the shell installer. This is a stock prerequisite, not SLS trust enrollment.
+    the shell installer. This is a stock prerequisite, not SLL trust enrollment.
     """
     if not VERSION.fullmatch(version): raise UpgradeError('Choose an exact supported 17.x Dashboard version')
     modules = WEB / 'admin/modules'
@@ -318,7 +335,7 @@ def bootstrap_dashboard(workspace, version):
 def authenticated_generation(root):
     data, generation = TRUST.load(root, 'slsmassnotifyserver')
     if data['source']['kind'] != 'publisher-ed25519':
-        raise UpgradeError('Previous SLS generation lacks publisher authentication')
+        raise UpgradeError('Previous SLL generation lacks publisher authentication')
     publisher = helper('sls_release_trust')
     manifest = publisher.authenticate_manifest(TRUST.read(generation / 'release-manifest.json', 16384, protected=True),
                                                TRUST.read(generation / 'release-manifest.sig', 64, protected=True),
@@ -447,9 +464,9 @@ def previous_root_approval(data, contents, *, prefix=Path('/'), cron=None):
     recovery = helper('sls_installer_recovery')
     jobs = [line for line in cron.splitlines() if any(marker.encode() in line for marker in recovery.CRON_MARKERS)]
     if any(not ROOT_JOB.fullmatch(line) for line in jobs) or len(jobs) != len(set(jobs)):
-        raise UpgradeError('Previous SLS root schedule needs independent review; no maintenance was disabled')
+        raise UpgradeError('Previous SLL root schedule needs independent review; no maintenance was disabled')
     if any(b'/sls_cron_runner.py ' in line for line in jobs) and RUNTIME + '/sls_cron_runner.py' not in expected:
-        raise UpgradeError('Previous SLS cron runner lacks publisher-authenticated source approval')
+        raise UpgradeError('Previous SLL cron runner lacks publisher-authenticated source approval')
     return {'schema': 1, 'source': 'publisher-verified-previous-release', 'version': data['version'],
             'archive_sha256': data['source']['archive_sha256'], 'files': expected,
             'missing_files': sorted(missing), 'quarantine_caches': caches,
@@ -622,6 +639,146 @@ def verify_previous(workspace):
     print(json.dumps({'ok': True, 'previous_web_approval_verified': True}))
 
 
+def previous_sls_approval(workspace):
+    approved = json.loads(TRUST.read(workspace / 'previous-web-approval.json',
+                                    TRUST.MAX_MANIFEST * 4, protected=True))
+    if type(approved) is not dict or 'slsmassnotifyserver' not in approved:
+        raise UpgradeError('The prior SLL module approval is unavailable')
+    data = approved['slsmassnotifyserver']
+    if data is not None:
+        TRUST.parse_manifest(json.dumps(data).encode())
+        if data['module'] != 'slsmassnotifyserver':
+            raise UpgradeError('The prior SLL module approval has the wrong identity')
+    return data
+
+
+def verify_previous_sls_tree(data, path):
+    """Verify a moved SLL tree against prior approval, never observed live hashes."""
+    actual = TRUST.inventory_tree(path, 'slsmassnotifyserver')
+    if actual != set(data['files']):
+        raise TRUST.TrustError('Previous SLL module inventory differs from its approval')
+    total = 0
+    for name, entry in data['files'].items():
+        if entry['target'] != 'admin/modules/slsmassnotifyserver/' + name or 'link_target' in entry:
+            raise UpgradeError('The prior SLL module approval contains an external target')
+        body = TRUST.read(path / name, TRUST.MAX_ARCHIVE)
+        total += len(body)
+        if total > 1024 * 1024 * 1024:
+            raise UpgradeError('Previous SLL module exceeds the inspection byte limit')
+        if TRUST.digest(body) != entry['sha256']:
+            raise TRUST.TrustError('Previous SLL module differs from its approval: ' + name)
+
+
+def recover_native_backup_permissions(data, backup, backup_fd):
+    """Reseal only the old public-filesystem layout after approved-byte checks.
+
+    FreePBX boot-time chown can normalize an older installer's private sibling
+    directory. Its changed metadata grants no authority: the original module
+    must first match the protected pre-install inventory. No observed digest is
+    enrolled, and no program from this directory is executed as root.
+    """
+    info = os.fstat(backup_fd)
+    if info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o700:
+        return
+    account = pwd.getpwnam('asterisk')
+    if (backup.parent != WEB / 'admin/modules'
+            or not re.fullmatch(r'\.sls-mass-notify-recovery\.[A-Za-z0-9]{6}', backup.name)
+            or info.st_uid not in (0, account.pw_uid) or info.st_gid not in (0, account.pw_gid)
+            or stat.S_IMODE(info.st_mode) not in (0o755, 0o775)):
+        raise UpgradeError('Unsafe module recovery directory')
+    names = set(os.listdir(backup_fd))
+    if names - {'slsmassnotifyserver', 'failed-module', 'candidate', 'module-swap-complete'}:
+        raise UpgradeError('Unknown contents in native-normalized module recovery directory')
+    for name in names:
+        entry = os.stat(name, dir_fd=backup_fd, follow_symlinks=False)
+        if name == 'module-swap-complete':
+            valid = (stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1 and entry.st_size == 0
+                     and stat.S_IMODE(entry.st_mode) in (0o600, 0o640, 0o644, 0o664))
+        else:
+            valid = stat.S_ISDIR(entry.st_mode) and not entry.st_mode & 0o7002
+        if not valid or entry.st_uid not in (0, account.pw_uid) or entry.st_gid not in (0, account.pw_gid):
+            raise UpgradeError('Unsafe native-normalized module recovery entry: ' + name)
+    if 'slsmassnotifyserver' in names:
+        if data is None:
+            raise UpgradeError('Unexpected prior module backup')
+        verify_previous_sls_tree(data, backup / 'slsmassnotifyserver')
+    elif data is not None:
+        verify_previous_sls_tree(data, WEB / 'admin/modules/slsmassnotifyserver')
+    parent = TRUST.directory(backup.parent)
+    try:
+        def same_name():
+            named = os.stat(backup.name, dir_fd=parent, follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+                raise UpgradeError('Module recovery directory changed during native permission recovery')
+        same_name()
+        os.fchown(backup_fd, 0, 0)
+        os.fchmod(backup_fd, 0o700)
+        os.fsync(backup_fd); os.fsync(parent)
+        same_name()
+        # The normal restore below checks approved bytes again after sealing,
+        # including a writer which already held an open file descriptor.
+    finally:
+        os.close(parent)
+
+
+def restore_previous_module(workspace, backup, existed):
+    """Resume either directory move without replacing recovery evidence."""
+    data = previous_sls_approval(workspace)
+    if type(existed) is not bool or existed != (data is not None):
+        raise UpgradeError('The prior module existence flag disagrees with its approval')
+    # FreePBX owns the public modules parent. The recovery directory itself is
+    # root-only, and all restored bytes must match the protected prior approval.
+    # Reject path links without requiring FreePBX's ancestors to be root-owned.
+    backup_fd = TRUST.directory(backup)
+    web_fd = -1
+    try:
+        recover_native_backup_permissions(data, backup, backup_fd)
+        web_fd = TRUST.directory(WEB / 'admin/modules')
+
+        def present(parent, name):
+            try:
+                value = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            if not stat.S_ISDIR(value.st_mode):
+                raise UpgradeError('Unsafe module recovery tree: ' + name)
+            return True
+
+        original = present(backup_fd, 'slsmassnotifyserver')
+        failed = present(backup_fd, 'failed-module')
+        live = present(web_fd, 'slsmassnotifyserver')
+        if original:
+            if not existed:
+                raise UpgradeError('Unexpected prior module backup')
+            verify_previous_sls_tree(data, backup / 'slsmassnotifyserver')
+            if live and failed:
+                raise UpgradeError('Module recovery is ambiguous; preserve all three trees')
+            if live:
+                os.rename('slsmassnotifyserver', 'failed-module', src_dir_fd=web_fd, dst_dir_fd=backup_fd)
+                # Persist each move separately so recovery can resume after a
+                # power loss between moving the failed and previous releases.
+                os.fsync(web_fd)
+                os.fsync(backup_fd)
+            os.rename('slsmassnotifyserver', 'slsmassnotifyserver', src_dir_fd=backup_fd, dst_dir_fd=web_fd)
+        elif existed:
+            if not live:
+                raise UpgradeError('Both the previous module and its restored tree are missing')
+            verify_previous_sls_tree(data, WEB / 'admin/modules/slsmassnotifyserver')
+        elif live:
+            if failed:
+                raise UpgradeError('Fresh module recovery is ambiguous; preserve both trees')
+            os.rename('slsmassnotifyserver', 'failed-module', src_dir_fd=web_fd, dst_dir_fd=backup_fd)
+        os.fsync(web_fd)
+        os.fsync(backup_fd)
+        if existed:
+            verify_previous_sls_tree(data, WEB / 'admin/modules/slsmassnotifyserver')
+        print(json.dumps({'ok': True, 'previous_sls_module_restored': True}))
+    finally:
+        if web_fd >= 0:
+            os.close(web_fd)
+        os.close(backup_fd)
+
+
 def compare_stock(data, prior, web, candidate):
     """Return all mismatches, keeping observed hashes out of expected inventories."""
     module = data['module']
@@ -681,30 +838,30 @@ def prepare(args):
         if pointer.exists() or pointer.is_symlink():
             previous_data, previous = authenticated_generation(args.trust_root)
             if previous_data['version'] != version:
-                raise UpgradeError('Installed SLS version differs from protected prior approval; retain recovery files and review before retrying')
+                raise UpgradeError('Installed SLL version differs from protected prior approval; retain recovery files and review before retrying')
         else:
             release = workspace / 'previous-release'
             release.mkdir(mode=0o700)
             paths = [os.environ.get('SLS_MASS_NOTIFY_PREVIOUS_' + key, '') for key in ('TGZ', 'MANIFEST', 'MANIFEST_SIGNATURE')]
             names = ['slsmassnotifyserver-' + version + '.tgz', 'release-manifest.json', 'release-manifest.sig']
             if any(paths) and not all(paths):
-                raise UpgradeError('Supply all three previous SLS package, manifest and signature paths')
+                raise UpgradeError('Supply all three previous SLL package, manifest and signature paths')
             for source, name, limit in zip(paths, names, (TRUST.MAX_ARCHIVE, 16384, 64)):
                 if source:
                     TRUST.atomic(release / name, TRUST.read(Path(source), limit, protected=True))
                 else:
-                    download('https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/releases/download/slsmassnotifyserver-' + version + '/' + name, release / name, limit)
+                    download('https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-' + version + '/' + name, release / name, limit)
             prior_registry = workspace / 'previous-registry'
             TRUST.enroll_sls(prior_registry, release / names[0], release / names[1], release / names[2])
             previous_data, previous = authenticated_generation(prior_registry)
             if previous_data['version'] != version:
-                raise UpgradeError('Previous signed SLS package has the wrong installed version')
+                raise UpgradeError('Previous signed SLL package has the wrong installed version')
         actual = TRUST.inventory_tree(sls_path, 'slsmassnotifyserver')
         if actual != set(previous_data['files']):
-            raise UpgradeError('Installed previous SLS file list differs from its signed release; review local changes before upgrading')
+            raise UpgradeError('Installed previous SLL file list differs from its signed release; review local changes before upgrading')
         for name, entry in previous_data['files'].items():
             if TRUST.digest(TRUST.read(sls_path / name, TRUST.MAX_ARCHIVE)) != entry['sha256']:
-                raise UpgradeError('Installed previous SLS file differs from its signed release: ' + name + '. Review the change before upgrading; no maintenance was disabled.')
+                raise UpgradeError('Installed previous SLL file differs from its signed release: ' + name + '. Review the change before upgrading; no maintenance was disabled.')
     approved = {}
     prior = {}
     issues = []
@@ -856,7 +1013,7 @@ def carry_reviewed_overlays(previous, previous_base, candidate):
 
 
 def reconcile_stock(workspace, root, *, web=WEB, packages=None, online=False):
-    """Approve independent current stock plus authenticated SLS overlays, never observed hashes."""
+    """Approve independent current stock plus authenticated SLL overlays, never observed hashes."""
     TRUST.prepare_root(workspace)
     sls,contents=authenticated_generation(root)
     TRUST.check(root,'slsmassnotifyserver',web)
@@ -882,13 +1039,13 @@ def reconcile_stock(workspace, root, *, web=WEB, packages=None, online=False):
             write_json(workspace/'review-required.json',{'schema':1,'approved':False,'differences':issues})
             raise UpgradeError('Unreviewed '+module+' differences remain. Review '+str(workspace/'review-required.json')+'; no active approval was replaced.')
     # Detect an intervening SLS/stock update before publishing any authority.
-    if authenticated_generation(root)[0]!=sls:raise UpgradeError('SLS changed during stock review; retry without approving new live hashes')
+    if authenticated_generation(root)[0]!=sls:raise UpgradeError('SLL changed during stock review; retry without approving new live hashes')
     for module in approvals:
         if identity(web,module)!=approvals[module]['version'] or TRUST.read(root/(module+'.active.json'),1024,protected=True)!=references[module]:
             raise UpgradeError('Stock installation or approval changed during review; retry')
         if compare_stock(approvals[module],approvals[module],web,contents):raise UpgradeError('Stock files changed during final review; prior authority retained')
     cache_stock_packages(workspace,root)
-    if authenticated_generation(root)[0]!=sls:raise UpgradeError('SLS changed while retaining recovery packages; prior stock authority retained')
+    if authenticated_generation(root)[0]!=sls:raise UpgradeError('SLL changed while retaining recovery packages; prior stock authority retained')
     TRUST.check(root,'slsmassnotifyserver',web)
     for module in approvals:
         if identity(web,module)!=approvals[module]['version'] or TRUST.read(root/(module+'.active.json'),1024,protected=True)!=references[module] or compare_stock(approvals[module],approvals[module],web,contents):
@@ -922,7 +1079,7 @@ def coordination_lock(path, inherited=None):
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1 or opened.st_uid!=0 or opened.st_mode&0o077 or opened.st_size:
             raise UpgradeError('Unsafe stock-reconciliation coordination lock')
         try:fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except BlockingIOError:raise UpgradeError('SLS installation or maintenance is active. Retry stock reconciliation after it finishes.') from None
+        except BlockingIOError:raise UpgradeError('SLL installation or maintenance is active. Retry stock reconciliation after it finishes.') from None
         current=path.lstat()
         if (opened.st_dev,opened.st_ino,opened.st_mode,opened.st_uid,opened.st_nlink)!=(current.st_dev,current.st_ino,current.st_mode,current.st_uid,current.st_nlink):
             raise UpgradeError('Stock-reconciliation coordination lock changed')
@@ -938,6 +1095,9 @@ def main():
     parser.add_argument('--manifest', type=Path)
     parser.add_argument('--signature', type=Path)
     parser.add_argument('--verify-previous', action='store_true')
+    parser.add_argument('--restore-previous-module', action='store_true')
+    parser.add_argument('--module-backup', type=Path)
+    parser.add_argument('--had-existing-module', choices=('0', '1'))
     parser.add_argument('--normalize-runtime', action='store_true')
     parser.add_argument('--bootstrap-dashboard-version')
     parser.add_argument('--cache-stock',action='store_true')
@@ -950,8 +1110,12 @@ def main():
     if os.geteuid() != 0:
         raise UpgradeError('Upgrade trust preparation requires root')
     TRUST.read(HERE / 'sls_upgrade_trust.py', TRUST.MAX_ARCHIVE, protected=True)
-    if sum(bool(item) for item in (args.verify_previous, args.normalize_runtime, args.bootstrap_dashboard_version,args.cache_stock,args.reconcile_stock)) > 1:
+    if sum(bool(item) for item in (args.verify_previous, args.restore_previous_module, args.normalize_runtime, args.bootstrap_dashboard_version,args.cache_stock,args.reconcile_stock)) > 1:
         parser.error('Select only one recovery action')
+    if args.restore_previous_module != (args.module_backup is not None and args.had_existing_module is not None):
+        parser.error('Module restoration requires --module-backup and --had-existing-module')
+    if not args.restore_previous_module and (args.module_backup is not None or args.had_existing_module is not None):
+        parser.error('Module restoration options require --restore-previous-module')
     if (args.online or args.upstream_packages) and not args.reconcile_stock:parser.error('Stock package options require --reconcile-stock')
     if args.coordination_fd is not None and (not (args.reconcile_stock or args.cache_stock) or not 3<=args.coordination_fd<=65535):parser.error('A stock action requires a valid inherited coordination descriptor')
     if args.cache_stock:
@@ -968,6 +1132,8 @@ def main():
         normalize_previous_runtime(args.workspace)
     elif args.verify_previous:
         verify_previous(args.workspace)
+    elif args.restore_previous_module:
+        restore_previous_module(args.workspace, args.module_backup, args.had_existing_module == '1')
     else:
         if args.archive is None or args.manifest is None or args.signature is None:
             parser.error('Signed candidate archive, manifest and signature are required')
@@ -978,5 +1144,5 @@ if __name__ == '__main__':
     try:
         main()
     except (UpgradeError, TRUST.TrustError, OSError, ValueError, KeyError, ET.ParseError, tarfile.TarError, subprocess.SubprocessError) as error:
-        print('SLS upgrade preflight: ' + str(error), file=sys.stderr)
+        print('SLL upgrade preflight: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

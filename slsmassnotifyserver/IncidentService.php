@@ -486,13 +486,13 @@ final class IncidentService
                             }
                         }
                         unset($operation);
-                        foreach ($changed as $requestId) { $this->event($record, 'interrupted_submission_uncertain', ['identity' => 'SLS incident worker', 'source' => 'incident_policy'], ['request_id' => $requestId]); }
+                        foreach ($changed as $requestId) { $this->event($record, 'interrupted_submission_uncertain', ['identity' => 'SLL incident worker', 'source' => 'incident_policy'], ['request_id' => $requestId]); }
                         return $record;
                     });
                 }
                 if ($record['state'] !== 'planned' && ($record['state'] !== 'open' || !$record['template']['escalation']['enabled'] || $record['opened_at'] === '')) { continue; }
                 $this->store->transaction($id, function (array $record) use (&$claimed, &$result): array {
-                    $actor = ['identity' => 'SLS incident worker', 'source' => 'incident_policy'];
+                    $actor = ['identity' => 'SLL incident worker', 'source' => 'incident_policy'];
                     if (isset($record['created_by']['credential_id'])) { $actor['credential_id'] = $record['created_by']['credential_id']; }
                     elseif (($record['created_by']['source'] ?? '') === 'control_api') { throw new \RuntimeException('Incident policy lacks its originating revocable API identity.'); }
                     if (isset($record['created_by']['automation_context'])) { $actor['automation_context']=$record['created_by']['automation_context']; }

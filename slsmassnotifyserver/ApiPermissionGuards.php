@@ -11,7 +11,9 @@ final class ApiPermissionGuards
         $phones = array_values(array_unique(array_map('strval', $phones)));
         $id = $context['api_credential_id'] ?? '';
         if ($id === '') { return ['extensions' => $phones, 'outbound_targets' => $outbound, 'removed' => ['phones' => [], 'voice_recipient_ids' => []]]; }
-        $principal = is_string($id) ? ApiSecurity::currentCredential($settings, $id) : null;
+        $revision = $context['api_credential_revision'] ?? null;
+        $principal = is_string($id) && ($revision === null || is_string($revision))
+            ? ApiSecurity::currentCredential($settings, $id, $revision) : null;
         $allowed = ['phones' => [], 'voice_recipient_ids' => []];
         if (is_array($principal) && ApiSecurity::permits($principal, 'send')) {
             $allowed = ($principal['audience']['unrestricted'] ?? false) === true
@@ -27,8 +29,10 @@ final class ApiPermissionGuards
 
     public static function weatherContext(array $settings, ?array $principal, array $zoneIds, array $phones, array $desktops): ?array
     {
-        if ($principal === null || ($principal['id'] ?? '') === 'legacy') { return null; }
-        $current = ApiSecurity::currentCredential($settings, (string)($principal['id'] ?? ''));
+        if ($principal === null) { return null; }
+        $revision = $principal['authority_revision'] ?? null;
+        $current = ApiSecurity::currentCredential($settings, (string)($principal['id'] ?? ''),
+            is_string($revision) ? $revision : null);
         $zoneIds = array_values(array_unique(array_map('strval', $zoneIds)));
         if (!$current || !ApiSecurity::permitsTest($current, ['zone_scope' => 'selected', 'zone_ids' => $zoneIds], $settings)) {
             throw new \DomainException('The API credential was revoked or no longer permits the selected Weather zones. No test was started.');
@@ -40,14 +44,19 @@ final class ApiPermissionGuards
             }
         }
         if (array_diff($desktops, array_keys($identities))) { throw new \DomainException('A selected Weather test desktop is no longer enabled. No test was started.'); }
-        return ['schema' => 1, 'credential_id' => $current['id'], 'zone_ids' => $zoneIds,
+        $context = ['schema' => 1, 'credential_id' => $current['id'], 'zone_ids' => $zoneIds,
             'phones' => array_values(array_unique(array_map('strval', $phones))), 'desktops' => $identities];
+        if (($current['id'] ?? '') === 'legacy') { $context['credential_revision'] = $current['authority_revision']; }
+        return $context;
     }
 
     public static function weather(array $settings, array $context): array
     {
         if (($context['schema'] ?? null) !== 1 || !is_string($context['credential_id'] ?? null)
-            || !preg_match('/^api_[a-f0-9]{24}$/D', $context['credential_id'])
+            || (!preg_match('/^api_[a-f0-9]{24}$/D', $context['credential_id']) && $context['credential_id'] !== 'legacy')
+            || ($context['credential_id'] === 'legacy'
+                ? (!is_string($context['credential_revision'] ?? null) || !preg_match('/^[a-f0-9]{64}$/D', $context['credential_revision']))
+                : array_key_exists('credential_revision', $context))
             || !is_array($context['zone_ids'] ?? null) || !array_is_list($context['zone_ids'])
             || !is_array($context['phones'] ?? null) || !array_is_list($context['phones'])
             || !is_array($context['desktops'] ?? null) || count($context['phones']) > 1000 || count($context['desktops']) > 1000 || count($context['zone_ids']) > 1000) {
@@ -58,7 +67,8 @@ final class ApiPermissionGuards
         foreach ($context['desktops'] as $username => $id) {
             if ((!is_string($username) && !is_int($username)) || !preg_match('/^[A-Za-z0-9_.@-]{1,80}$/D', (string)$username) || !is_string($id) || strlen($id) > 80) { throw new \DomainException('Invalid Weather test desktop identity.'); }
         }
-        $principal = ApiSecurity::currentCredential($settings, $context['credential_id']);
+        $principal = ApiSecurity::currentCredential($settings, $context['credential_id'],
+            $context['credential_revision'] ?? null);
         $phones = []; $desktops = [];
         if ($principal && ApiSecurity::permits($principal, 'test') && !empty($settings['enabled'])) {
             $zones = ($principal['audience']['unrestricted'] ?? false) === true ? $context['zone_ids']

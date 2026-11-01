@@ -51,9 +51,11 @@ final class EnterpriseIdentityOidc
     {
         if(($tx['protocol']??'')!=='oidc'||($tx['provider_id']??'')!==$p['id']||!hash_equals($tx['revision']??'',EnterpriseIdentityConfig::revision($p))
             || !is_string($code)||$code===''||strlen($code)>4096){throw new \DomainException('OIDC transaction expired or its registration changed.',self::REJECT_TRANSACTION);}
-        $d=$tx['discovery'];$form=['grant_type'=>'authorization_code','code'=>$code,'redirect_uri'=>$p['callback_url'],'code_verifier'=>$tx['verifier'],'client_id'=>$p['client_id']];$headers=['Accept: application/json'];
-        if($p['token_auth']==='client_secret_basic'){$headers[]='Authorization: Basic '.base64_encode(rawurlencode($p['client_id']).':'.rawurlencode($p['client_secret']));}
-        elseif($p['token_auth']==='client_secret_post'){$form['client_secret']=$p['client_secret'];}
+        $d=$tx['discovery'];$form=['grant_type'=>'authorization_code','code'=>$code,'redirect_uri'=>$p['callback_url'],'code_verifier'=>$tx['verifier']];$headers=['Accept: application/json'];
+        if($p['token_auth']==='client_secret_basic'){$headers[]='Authorization: Basic '.base64_encode(urlencode($p['client_id']).':'.urlencode($p['client_secret']));}
+        elseif($p['token_auth']==='client_secret_post'){$form['client_id']=$p['client_id'];$form['client_secret']=$p['client_secret'];}
+        elseif($p['token_auth']==='none'){$form['client_id']=$p['client_id'];}
+        else{throw new \DomainException('OIDC token authentication method is invalid.',self::REJECT_TRANSACTION);}
         $tokens=($this->http)($d['token_endpoint'],EnterpriseIdentityHttp::networkPolicy($p),'POST',$form,$headers);
         if(!is_string($tokens['id_token']??null)||strlen($tokens['id_token'])>16384){throw new \DomainException('OIDC token response lacks a bounded ID token.',self::REJECT_PROVIDER_RESPONSE);}
         $jwks=($this->http)($d['jwks_uri'],EnterpriseIdentityHttp::networkPolicy($p),'GET',[],[]);

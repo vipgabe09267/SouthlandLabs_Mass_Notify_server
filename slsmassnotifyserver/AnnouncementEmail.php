@@ -85,7 +85,7 @@ trait SlsAnnouncementEmail
     {
         $recipients = $this->getAnnouncementEmailRecipients($settings);
         if (!$recipients) { return []; }
-        $name = $settings['mail_from_name'] ?? 'SLS Mass Notification System';
+        $name = $settings['mail_from_name'] ?? 'SLL Mass Notify Server';
         if (!is_string($name) || trim($name) === '' || strlen($name) > 320 || !preg_match('//u', $name) || preg_match('/[\x00-\x1f\x7f]/', $name)) {
             throw new \DomainException(_('Configure a valid email sender name before sending announcements.'));
         }

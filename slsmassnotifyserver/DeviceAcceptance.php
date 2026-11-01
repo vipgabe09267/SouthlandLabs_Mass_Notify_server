@@ -91,7 +91,7 @@ final class DeviceAcceptance
             }
             $records[] = $observation + ['id' => $row['id'], 'target_label' => self::text($row['target_label'] ?? '', 200, 'Destination label'),
                 'recorded_at' => $row['recorded_at'], 'recorded_by' => self::text($row['recorded_by'] ?? '', 100, 'Recording operator'),
-                'module_version' => self::text($row['module_version'] ?? '', 64, 'SLS version'), 'configuration_fingerprint' => $row['configuration_fingerprint']];
+                'module_version' => self::text($row['module_version'] ?? '', 64, 'SLL version'), 'configuration_fingerprint' => $row['configuration_fingerprint']];
             $seen[$row['id']] = true;
         }
         $result = ['schema' => 1, 'records' => $records, 'retired_records' => $value['retired_records'] ?? 0];
@@ -107,7 +107,7 @@ final class DeviceAcceptance
             $build=self::buildIdentity();
             if ($build!==null) { return self::$requestSoftwareIdentity=$build['inventory_sha256']; }
         }
-        if (realpath($directory) !== $directory || is_link($directory)) { throw new \DomainException('The installed SLS payload cannot be identified safely.'); }
+        if (realpath($directory) !== $directory || is_link($directory)) { throw new \DomainException('The installed SLL payload cannot be identified safely.'); }
         $files = []; $bytes = 0;
         $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS));
         foreach ($iterator as $file) {
@@ -118,13 +118,13 @@ final class DeviceAcceptance
             $meta = lstat($path);
             if (!$meta || ($meta['mode'] & 0170000) !== 0100000 || $meta['nlink'] !== 1
                 || $meta['size'] > 8388608 || ($bytes += $meta['size']) > 67108864 || count($files) >= 5000) {
-                throw new \DomainException('The installed SLS payload contains an unsafe file or exceeds its identification bounds.');
+                throw new \DomainException('The installed SLL payload contains an unsafe file or exceeds its identification bounds.');
             }
             $digest = hash_file('sha256', $path);
             clearstatcache(true, $path); $after = lstat($path);
             if (!is_string($digest) || !$after || array_intersect_key($meta, array_flip(['dev', 'ino', 'size', 'mtime', 'ctime']))
                 !== array_intersect_key($after, array_flip(['dev', 'ino', 'size', 'mtime', 'ctime']))) {
-                throw new \DomainException('SLS software changed while its test record was being checked. Reload before continuing.');
+                throw new \DomainException('SLL software changed while its test record was being checked. Reload before continuing.');
             }
             $files[$name] = $digest;
         }

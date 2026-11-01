@@ -34,7 +34,7 @@ class Preparation(unittest.TestCase):
             harness = r'''
 source "$1"
 fixture="$2"; CONFIG_FILE="$fixture/config"; SLS_MASS_NOTIFY_INVENTORY_ONLY=1
-bootstrap_resource_capacity() { printf '{"requirements":{}}'; }
+bootstrap_resource_capacity() { printf '{"requirements":{},"deployment_profile":"standard","profile_selection":{"standard_memory_eligible":true,"lite_memory_eligible":false}}'; }
 select_install_temp_root() { INSTALL_TEMP_ROOT="$fixture"; }
 download_tgz() { DOWNLOAD_DIR="$fixture/download"; mkdir "$DOWNLOAD_DIR"; printf 'download\n' >>"$fixture/trace"; }
 verify_tgz() { printf 'verified\n' >>"$fixture/trace"; }
@@ -67,7 +67,7 @@ main
             harness = r'''
 source "$1"
 fixture="$2"; CONFIG_FILE="$fixture/config"; SLS_MASS_NOTIFY_INVENTORY_ONLY=1
-bootstrap_resource_capacity() { printf '{"requirements":{}}'; }
+bootstrap_resource_capacity() { printf '{"requirements":{},"deployment_profile":"standard","profile_selection":{"standard_memory_eligible":true,"lite_memory_eligible":false}}'; }
 select_install_temp_root() { INSTALL_TEMP_ROOT="$fixture"; }
 download_tgz() { DOWNLOAD_DIR="$fixture/download"; mkdir "$DOWNLOAD_DIR"; }
 verify_tgz() { :; }

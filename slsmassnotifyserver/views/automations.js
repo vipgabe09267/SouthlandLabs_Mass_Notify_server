@@ -86,7 +86,7 @@
             if (draft.kind === 'cap') {
                 field('feed_url','Trusted CAP URL','Public HTTPS on port 443; direct CAP 1.2 or inline CAP Atom feed. Redirects and private addresses are rejected.',{max:2048});
                 field('sender','Trusted CAP sender','Must exactly match the CAP sender field. Feed wording never changes recipients or severity.',{max:200});
-                field('language','CAP language','Use a language tag such as en, en-US or es. Matching source text includes instructions and affected areas; SLS does not translate it.',{max:35});
+                field('language','CAP language','Use a language tag such as en, en-US or es. Matching source text includes instructions and affected areas; SLL does not translate it.',{max:35});
             }
             if (draft.kind === 'emergency_call') {
                 field('callers_text','Authorized internal callers','Comma-separated existing PJSIP extensions. Assign callers at one reviewed location.',{max:2100});
@@ -102,10 +102,10 @@
             field('max_age_seconds','Maximum event age (seconds)','Late or expired source events are rejected; accepted work retains an absolute deadline.',{type:'number',min:30,max:600});
             field('cooldown_seconds','Minimum interval (seconds)','Limits repeated activation from this one source; duplicate event IDs remain idempotent.',{type:'number',min:10,max:3600});
         } else if (draft.kind === 'script') {
-            if(!draft.execution_mode)draft.execution_mode='trusted';
-            field('execution_mode','Execution boundary','Restricted mode (Labs) requires bubblewrap and working user namespaces. It has no host data mounts or network. It refuses to run if isolation is unavailable. Approved scripts remain trusted code.',{choices:[['trusted','Trusted runtime account'],['restricted','Restricted filesystem and network · Labs']]});
+            if(!draft.execution_mode)draft.execution_mode='restricted';
+            field('execution_mode','Execution boundary','Restricted mode requires bubblewrap and working user namespaces. It cannot access PBX data or the network and fails closed when isolation is unavailable. Trusted mode gives the approved script the PBX runtime account’s access.',{choices:[['restricted','Restricted filesystem and network'],['trusted','Trusted PBX runtime account']]});
             field('path','Absolute script path','Use a root-owned .sh or .js file and protected parent directories, for example /usr/local/lib/sls-mass-notify/actions/alert.sh. Scripts run as asterisk, with its permissions, for at most 10 seconds.',{max:512,wide:true});
-            check('approve_script','I reviewed and approve the current script file','SLS records the exact file fingerprint. Editing or replacing it requires approval again. Event JSON arrives on standard input; arbitrary shell command strings are not accepted.');
+            check('approve_script','I reviewed and approve the current script file','SLL records the exact file fingerprint. Editing or replacing it requires approval again. Event JSON arrives on standard input; arbitrary shell command strings are not accepted.');
         } else {
             field('host','Device IPv4 address','Private unicast address on your managed device network.',{max:15});
             field('port','Port','Match the receiver configuration.',{type:'number',min:1,max:65535});

@@ -30,7 +30,7 @@ function rejectEffectInput(string $payload): void {
     if (!is_resource($process)) { throw new RuntimeException('Cluster effect rejection fixture could not start.'); }
     fwrite($pipes[0],$payload);fclose($pipes[0]);$stdout=stream_get_contents($pipes[1]);$stderr=stream_get_contents($pipes[2]);fclose($pipes[1]);fclose($pipes[2]);$exit=proc_close($process);
     check($exit===1&&$stdout==="{\"ok\":false,\"error\":\"cluster_effect_fenced_or_uncertain\"}\n"
-        &&$stderr==="SLS cluster: effect fenced or receipt uncertain.\n",'Malformed cluster effect input crossed the fixed pre-configuration boundary.');
+        &&$stderr==="SLL cluster: effect fenced or receipt uncertain.\n",'Malformed cluster effect input crossed the fixed pre-configuration boundary.');
 }
 $temporary=sys_get_temp_dir().'/sls-enterprise-unit-'.bin2hex(random_bytes(8)); mkdir($temporary,0700);
 register_shutdown_function(static function() use($temporary): void {

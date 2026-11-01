@@ -41,6 +41,14 @@ WORKER_EXIT_SAFETY_SECONDS = 2.0
 MAX_BRANDED_LOGO = 2 * 1024 * 1024
 
 
+class MailSubmissionSuppressed(RuntimeError):
+    """A supplied authority guard rejected this message before sendmail starts."""
+    def __init__(self, decision='deferred', reason='source_authority_unavailable'):
+        self.decision = decision if decision in {'deferred', 'cancelled'} else 'deferred'
+        self.reason = reason if isinstance(reason, str) and re.fullmatch(r'[a-z][a-z0-9_]{0,95}', reason) else 'source_authority_unavailable'
+        super().__init__(self.reason)
+
+
 def normalized_sender_domain(value):
     domain = str(value or "").strip().lower()
     if domain.startswith("@"):
@@ -129,7 +137,7 @@ def alert_profile(subject, body, event="", severity="", *, is_test=False):
 def body_sections(body):
     lines = [line.strip() for line in str(body).splitlines()]
     nonempty = [line for line in lines if line]
-    lead = nonempty[0] if nonempty else "An alert was issued by the SLS Mass Notification System."
+    lead = nonempty[0] if nonempty else "An alert was issued by the SLL Mass Notify Server."
     details = []
     notes = []
     for line in nonempty[1:]:
@@ -200,15 +208,15 @@ def build_html(subject, body, event="", severity="", *, profile=None, full_body=
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef2f7;padding:28px 12px"><tr><td align="center">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:720px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 8px 28px rgba(15,23,42,.14)">
 <tr><td style="padding:18px 24px;background:#111827"><table role="presentation" width="100%"><tr>
-<td style="width:78px"><img src="cid:sls-mass-notify-logo" alt="Southland Servers Group" width="64" height="64" style="display:block;border-radius:10px;background:#fff"></td>
-<td><div style="color:#fbbf24;font-size:12px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase">Southland Servers Group</div><div style="color:#fff;font-size:20px;font-weight:700;margin-top:4px">SLS Mass Notification System</div></td>
+<td style="width:78px"><img src="cid:sls-mass-notify-logo" alt="Southland Labs" width="64" height="64" style="display:block;border-radius:10px;background:#fff"></td>
+<td><div style="color:#fbbf24;font-size:12px;font-weight:700;letter-spacing:1.4px;text-transform:uppercase">Southland Labs</div><div style="color:#fff;font-size:20px;font-weight:700;margin-top:4px">SLL Mass Notify Server</div></td>
 </tr></table></td></tr>
 <tr><td style="height:8px;background:{color}"></td></tr>
 <tr><td style="padding:26px 28px 10px"><span style="display:inline-block;padding:7px 11px;border-radius:999px;background:{pale};color:{color};font-size:12px;font-weight:800;letter-spacing:.7px">{icon} {html.escape(urgency)}</span>
 <h1 style="margin:16px 0 10px;color:#111827;font-size:25px;line-height:1.25">{html.escape(subject)}</h1>
 <div style="padding:16px 18px;border-left:5px solid {color};background:{pale};border-radius:7px;color:#111827;font-size:17px;font-weight:600;line-height:1.55{";white-space:pre-wrap" if full_body else ""}">{html.escape(lead)}</div>
 {details_html}{notes_html}</td></tr>
-<tr><td style="padding:22px 28px 26px"><div style="border-top:1px solid #e5e7eb;padding-top:18px;color:#64748b;font-size:12px;line-height:1.5">Sent by the <strong>SLS Mass Notification System</strong><br>Southland Servers Group &bull; PBX-integrated alert delivery</div></td></tr>
+<tr><td style="padding:22px 28px 26px"><div style="border-top:1px solid #e5e7eb;padding-top:18px;color:#64748b;font-size:12px;line-height:1.5">Sent by the <strong>SLL Mass Notify Server</strong><br>Southland Labs &bull; PBX-integrated alert delivery</div></td></tr>
 </table></td></tr></table></body></html>"""
 
 
@@ -254,7 +262,7 @@ def read_logo(paths, maximum=262144):
     return None
 
 
-def send_branded_email(config, subject, body, event="", severity="", recipients_override=None, *, is_test=False):
+def send_branded_email(config, subject, body, event="", severity="", recipients_override=None, *, is_test=False, submission_guard=None):
     if type(is_test) is not bool:
         raise ValueError('email_test_flag_invalid')
     recipient_source = config.get("system_notification_emails", "") if recipients_override is None else recipients_override
@@ -274,7 +282,7 @@ def send_branded_email(config, subject, body, event="", severity="", recipients_
     sendmail = Path("/usr/sbin/sendmail")
     if not sendmail.is_file() or not os.access(sendmail, os.X_OK):
         raise RuntimeError("sendmail is unavailable")
-    from_name = re.sub(r"[\r\n]+", " ", str(config.get("mail_from_name") or "SLS Mass Notification System"))[:80]
+    from_name = re.sub(r"[\r\n]+", " ", str(config.get("mail_from_name") or "SLL Mass Notify Server"))[:80]
     from_addr = sender_address(config)
     _, _, subject_icon, _ = alert_profile(subject, body, event, severity)
     message = EmailMessage()
@@ -286,9 +294,17 @@ def send_branded_email(config, subject, body, event="", severity="", recipients_
     message.add_alternative(build_html(subject, body, event, severity, is_test=is_test), subtype="html", charset="utf-8")
     logo = read_logo(LOGO_PATHS, MAX_BRANDED_LOGO)
     if logo is not None:
-        message.get_payload()[1].add_related(logo, maintype="image", subtype="png", cid="<sls-mass-notify-logo>", filename="Southland-Servers-Group.png", disposition="inline")
+        message.get_payload()[1].add_related(logo, maintype="image", subtype="png", cid="<sls-mass-notify-logo>", filename="Southland-Labs.png", disposition="inline")
     _cluster_guard.fence_legacy(config)
     _mail_admission.reserve('system' if event == 'System Fault' else 'alert', len(recipients))
+    if submission_guard is not None:
+        try:
+            permitted = submission_guard() is True
+        except Exception:
+            raise MailSubmissionSuppressed() from None
+        if not permitted:
+            raise MailSubmissionSuppressed(getattr(submission_guard, 'decision', 'deferred'),
+                                           getattr(submission_guard, 'reason', 'source_authority_unavailable'))
     subprocess.run(
         [str(sendmail), "-oi", "-t", "-f", from_addr],
         input=message.as_bytes(),
@@ -311,7 +327,7 @@ def main():
         return 0
     sent = send_branded_email(
         config,
-        os.environ.get("SLS_EMAIL_SUBJECT", "Southland Servers Mass Notification"),
+        os.environ.get("SLS_EMAIL_SUBJECT", "SLL Mass Notify Server"),
         os.environ.get("SLS_EMAIL_BODY", "A notification was issued."),
         os.environ.get("SLS_EMAIL_EVENT", ""),
         os.environ.get("SLS_EMAIL_SEVERITY", ""),

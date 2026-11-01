@@ -300,7 +300,7 @@ try {
     if (($environment['agi_request'] ?? '') === '') { exit(64); }
     if (($argv[1] ?? '') === '--ready') {
         $result = $agi->callerReadyCue($environment);
-        $pagingLog('SLS live paging caller cue: ' . $result);
+        $pagingLog('SLL live paging caller cue: ' . $result);
         exit(0);
     }
     $directory = '/var/lib/asterisk/SLS_Mass_Notifications_Plugin';
@@ -315,7 +315,7 @@ try {
     $result = $session->run();
     // Deliberately omit entered digits, PIN hashes, config contents and AGI
     // responses. Asterisk-wide AGI/DTMF debug must stay off for secret input.
-    $pagingLog('SLS live paging: ' . (string)$result['status']
+    $pagingLog('SLL live paging: ' . (string)$result['status']
         . (isset($result['phone_admission_error']) ? '; phone_error=' . $result['phone_admission_error'] : '')
         . (isset($result['text_notification']) ? '; text=' . (string)($result['text_notification']['status'] ?? 'unknown')
             . '; text_requested=' . (int)($result['text_notification']['requested'] ?? 0) : '')
@@ -336,7 +336,7 @@ try {
         'json_storage_duplicate_key', 'json_storage_write_failed', 'json_storage_commit_uncertain'];
     $category = $error instanceof \JsonException ? 'json_storage_invalid'
         : (in_array($error->getMessage(), $known, true) ? $error->getMessage() : 'unexpected_failure');
-    $pagingLog('SLS live paging: ' . $category . '; review live paging configuration, prepared prompts and PBX health.');
+    $pagingLog('SLL live paging: ' . $category . '; review live paging configuration, prepared prompts and PBX health.');
     if (str_starts_with($category, 'json_storage_')) {
         try {
             $current = \SLS\MassNotify\LivePagingSession::loadSettings($directory . '/mass-notifications.config');

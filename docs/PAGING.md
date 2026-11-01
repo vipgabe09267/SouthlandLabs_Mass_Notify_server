@@ -42,7 +42,7 @@ recipient phone must be registered.
 
 Save and Apply Config after changing the preference. Asterisk's native voicemail
 application handles mailbox storage and message-waiting indication. Mailbox
-length/capacity limits still apply; SLS does not create a mailbox, expand its limits
+length/capacity limits still apply; SLL does not create a mailbox, expand its limits
 or alter ordinary PBX call handling. Interrupted or uncertain deposit attempts are
 not automatically replayed. Receiving a voicemail does not confirm listening.
 
@@ -57,10 +57,10 @@ TTS announcements and external carrier voicemail are unchanged.
 3. Add **Approved external caller numbers**, one per line, including `+` and the
    country code. For example, `+15125550123`. Save a group PIN, even if internal
    callers do not need one. Each group supports up to 100 approved numbers.
-4. Save and Apply Config. SLS adds the exact paging extension to each selected
+4. Save and Apply Config. SLL adds the exact paging extension to each selected
    IVR's generated dialplan context; it does not change the IVR database row or
    create a general inbound-route/from-trunk entry. For a single-key entry, select
-   **SLS external paging · group PIN required** as that key's destination.
+   **SLL external paging · group PIN required** as that key's destination.
 
 The allowlist contains **calling phone numbers**, such as a cell phone, rather
 than the inbound DID that reaches the PBX. An empty list grants no external access.
@@ -85,7 +85,7 @@ numbers are rejected. Incoming presentation may use `+countrycode`, country
 code without `+`, or an international `00` prefix. An explicitly saved `+1` NANP
 number also matches its complete ten-digit presentation when its area and
 exchange codes are valid. Other national formats need normalization at the
-inbound trunk; SLS does not guess their country or match only a suffix.
+inbound trunk; SLL does not guess their country or match only a suffix.
 
 The phone-admission helper receives the exact approved international number
 after the AGI verifies the caller and PIN. It rechecks the saved group before
@@ -96,9 +96,9 @@ PINs and external caller numbers are withheld from redacted configuration export
 ## Ready tone
 
 After choosing a group and entering its PIN, wait for the ready tone before
-speaking. SLS keeps caller input muted while the admitted phone contacts connect.
+speaking. SLL keeps caller input muted while the admitted phone contacts connect.
 The tone plays only to the caller, after those contacts have joined or finished
-their connection attempts. SLS opens the microphone and ends the tone as it
+their connection attempts. SLL opens the microphone and ends the tone as it
 returns to the intercom, so you can speak as soon as the tone stops.
 
 A phone that does not answer within the configured answer window is omitted from
@@ -121,7 +121,7 @@ Per-handset ordering requires Asterisk's PJSIP NOTIFY URI routing and a configur
 default outbound endpoint. Unavailable URI routing is reported as a live-text
 failure. The companion does not send an endpoint-wide popup to ringing contacts.
 
-When the page ends, SLS replaces its own submitted popups with **Paging ended**,
+When the page ends, SLL replaces its own submitted popups with **Paging ended**,
 using a quiet one-second expiry. A newer announcement retains its popup. Delivery
 and screen clearing still depend on the handset's supported SIP NOTIFY behavior.
 
@@ -152,7 +152,7 @@ or missing IVR never becomes an authorized return destination.
 A live page ends when the paging caller hangs up or reaches the maximum duration.
 Its phone text is then replaced by a quiet “Paging ended.” popup with a one-second
 expiry. Yealink’s XML Timeout uses whole seconds, so 0.5 seconds is unsupported.
-A per-extension ownership check protects newer SLS notifications and makes repeated
+A per-extension ownership check protects newer SLL notifications and makes repeated
 cleanup harmless. A finite original timeout also limits stale progress popups if
 the PBX or paging process fails. Other vendors’ timeout behavior needs device acceptance.
 

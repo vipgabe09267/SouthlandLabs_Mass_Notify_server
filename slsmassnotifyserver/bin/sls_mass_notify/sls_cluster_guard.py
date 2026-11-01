@@ -28,18 +28,18 @@ class ClusterFenced(RuntimeError):
 def runtime_running(settings):
     value = settings.get('runtime_enabled', True)
     if type(value) is not bool:
-        raise ClusterFenced('Invalid SLS runtime policy; notification admission is blocked')
+        raise ClusterFenced('Invalid SLL runtime policy; notification admission is blocked')
     return value
 
 
 def require_running(settings):
     if not runtime_running(settings):
-        raise ClusterFenced('SLS notifications are stopped; run sudo slsconsole start to resume')
+        raise ClusterFenced('SLL notifications are stopped; run sudo slsconsole start to resume')
 
 
 def labs_enabled(settings):
     value = settings.get('enterprise_labs', {})
-    return isinstance(value, dict) and not set(value).difference({'enabled'}) and value.get('enabled') is True
+    return settings.get('deployment_profile', 'standard') == 'standard' and isinstance(value, dict) and not set(value).difference({'enabled'}) and value.get('enabled') is True
 
 
 def enabled(settings=None):
@@ -125,5 +125,5 @@ if __name__ == '__main__':
     try:
         fence_legacy(_crypto.read_config(Path(sys.argv[2])))
     except Exception:
-        print('SLS notification admission is blocked. Check slsconsole status, protected configuration and cluster authority; no external action was submitted.', file=sys.stderr)
+        print('SLL notification admission is blocked. Check slsconsole status, protected configuration and cluster authority; no external action was submitted.', file=sys.stderr)
         raise SystemExit(79)

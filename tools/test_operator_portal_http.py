@@ -54,13 +54,21 @@ class FreePBX {
  static function Config(){return new class{function get($name){return $name==='SESSION_TIMEOUT'?120:'';}};}
 }
 class PortalFixtureModule {
- use \\FreePBX\\modules\\SlsOperators;
+ use \\FreePBX\\modules\\SlsOperators {portalAccount as private fixturePortalAccount;}
  const SETTINGS_JSON=FIXTURE.'/settings.json'; const PENDING_SETTINGS_JSON=FIXTURE.'/pending.json';
- function getActiveSettings(){return json_decode(file_get_contents(self::SETTINGS_JSON),true);}
+ private function getActiveSettings(){return json_decode(file_get_contents(self::SETTINGS_JSON),true);}
  private function acquireSettingsLock(...$args){$f=fopen(FIXTURE.'/config.lock','c+b');if(!flock($f,LOCK_EX))throw new RuntimeException('fixture lock');return $f;}
  private function releaseSettingsLock($f){fclose($f);}
  private function loadSettingsFile($p){return json_decode(file_get_contents($p),true);}
  private function writeSettingsFileUnlocked($p,$v,$active){file_put_contents($p.'.tmp',json_encode($v));chmod($p.'.tmp',0640);rename($p.'.tmp',$p);}
+ function portalAccount(string $username,string $source='portal'):?array{
+  $account=$this->fixturePortalAccount($username,$source);
+  if(file_exists(FIXTURE.'/revoke-federation-after-account')){
+   unlink(FIXTURE.'/revoke-federation-after-account');$settings=$this->getActiveSettings();
+   $settings['enterprise_identity']['grants'][0]['enabled']=false;$this->writeSettingsFileUnlocked(self::SETTINGS_JSON,$settings,true);
+  }
+  return $account;
+ }
  function operatorSecurityEvent($action,$account=null,$ok=true,$actor=null):bool{if(file_exists(FIXTURE.'/audit-failure'))return false;file_put_contents(FIXTURE.'/audit.jsonl',json_encode(['action'=>$action,'username'=>$account['username']??'','ok'=>$ok])."\\n",FILE_APPEND|LOCK_EX);return true;}
  protected function sendOperatorRecoveryEmail($settings,$recipient,$subject,$body):string{file_put_contents(FIXTURE.'/mail.jsonl',json_encode(compact('recipient','subject','body'))."\\n",FILE_APPEND|LOCK_EX);return 'accepted';}
  function renderOperationsPage($cursor,$endpoint,$csrf){
@@ -97,7 +105,7 @@ if(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH)!=='/mass-notify/'){http_respo
         (cls.root/'settings.json').write_text(json.dumps(value));(cls.root/'settings.json').chmod(0o640)
     def setUp(self):
         self.write_settings(self.original)
-        for name in ['rate.json','mfa-rate.json','action.json','pending.json','failures.json','recovery-rate.json','reset-rate.json','audit.jsonl','mail.jsonl','audit-failure']:
+        for name in ['rate.json','mfa-rate.json','action.json','pending.json','failures.json','recovery-rate.json','reset-rate.json','audit.jsonl','mail.jsonl','audit-failure','revoke-federation-after-account']:
             (self.root/name).unlink(missing_ok=True)
             # Each case starts a new private installation with no active requests.
             (self.root/(name+'.lock')).unlink(missing_ok=True)
@@ -127,6 +135,69 @@ if(parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH)!=='/mass-notify/'){http_respo
         status,_,_=self.request('POST',{'portal_action':'totp','portal_csrf':token,'code':self.otp()},cookie);self.assertEqual(status,303)
         status,h,_=self.request(cookie=cookie);self.assertEqual(status,303);cookie=self.cookie(h,cookie)
         self.assertEqual(self.request(cookie=cookie)[0],200);return cookie
+    def federated_pending(self):
+        settings=json.loads((self.root/'settings.json').read_text())
+        provider_id='idp_'+'a'*24
+        account=next(row for row in settings['operator_access']['accounts'] if row['username']=='owner')
+        settings['control_api']={'base_url':'https://pbx.example.test/api/sls-mass-notify'}
+        settings['enterprise_identity']={'schema':1,'enabled':True,'providers':[{
+            'id':provider_id,'vendor':'okta','protocol':'oidc','name':'Fixture provider','enabled':True,
+            'issuer':'https://idp.example.test','callback_url':'https://pbx.example.test/mass-notify/sso.php',
+            'discovery_url':'https://idp.example.test/.well-known/openid-configuration',
+            'client_id':'fixture-client','client_secret':'fixture-secret','token_auth':'client_secret_basic',
+            'endpoint_hosts':['idp.example.test'],'hosted_domain':''}],
+            'grants':[{'provider_id':provider_id,'subject':'fixture-owner','operator_account_id':account['id'],'enabled':True}]}
+        self.write_settings(settings)
+        status,headers,body=self.request();self.assertEqual(status,200)
+        cookie=self.cookie(headers);session_id=cookie.split('=',1)[1]
+        # Seed only the verified assertion boundary. The real OIDC/SAML adapters
+        # have separate HTTP/signature fixtures; this exercises their handoff
+        # through the actual portal controller and local MFA, without an IdP.
+        code=r'''require $argv[1].'/OperatorPortal.php';
+session_save_path($argv[2]);session_name(\SLS\MassNotify\OperatorPortal::COOKIE);session_id($argv[3]);session_start();
+$settings=json_decode(file_get_contents($argv[4]),true,64,JSON_THROW_ON_ERROR);
+$account=$settings['operator_access']['accounts'][0];$now=time();
+$grant=\SLS\MassNotify\EnterpriseIdentity::grant($settings,['provider_id'=>$argv[5],'subject'=>'fixture-owner','authenticated_at'=>$now,'expires_at'=>$now+300]);
+$_SESSION['portal_pending']=['id'=>$account['id'],'username'=>$account['username'],'identity'=>\SLS\MassNotify\OperatorAuth::identity($account),'started_at'=>$now,'mfa_passed'=>false,'enterprise_identity'=>$grant['binding']];
+session_write_close();'''
+        subprocess.run(['php','-r',code,str(MODULE),str(self.root/'sessions'),session_id,
+                        str(self.root/'settings.json'),provider_id],check=True,capture_output=True,text=True)
+        status,_,body=self.request(cookie=cookie);self.assertEqual(status,200)
+        self.assertIn('Verify your identity',body)
+        return cookie,self.token(body)
+    def test_federated_login_completes_after_local_mfa_with_private_settings(self):
+        cookie,token=self.federated_pending()
+        self.assertNotIn('sls-operations-data',self.request(cookie=cookie)[2])
+        status,_,_=self.request('POST',{'portal_action':'totp','portal_csrf':token,'code':self.otp()},cookie)
+        self.assertEqual(status,303)
+        status,headers,body=self.request(cookie=cookie)
+        self.assertEqual(status,303,(self.root/'server.log').read_text()[-1400:])
+        cookie=self.cookie(headers,cookie)
+        self.assertIn('sls-operations-data',self.request(cookie=cookie)[2])
+        audit=[json.loads(row) for row in (self.root/'audit.jsonl').read_text().splitlines()]
+        self.assertEqual(sum(row['action']=='operator_sign_in_completed' for row in audit),1)
+    def test_federated_grant_revocation_before_completion_blocks_login(self):
+        cookie,token=self.federated_pending()
+        self.assertEqual(self.request('POST',{'portal_action':'totp','portal_csrf':token,'code':self.otp()},cookie)[0],303)
+        settings=json.loads((self.root/'settings.json').read_text())
+        settings['enterprise_identity']['grants'][0]['enabled']=False;self.write_settings(settings)
+        status,_,body=self.request(cookie=cookie)
+        self.assertEqual(status,401);self.assertNotIn('sls-operations-data',body)
+        audit_path=self.root/'audit.jsonl'
+        audit=[json.loads(row) for row in audit_path.read_text().splitlines()] if audit_path.exists() else []
+        self.assertFalse(any(row['action']=='operator_sign_in_completed' for row in audit))
+    def test_federated_grant_is_rechecked_when_the_session_is_created(self):
+        cookie,token=self.federated_pending()
+        self.assertEqual(self.request('POST',{'portal_action':'totp','portal_csrf':token,'code':self.otp()},cookie)[0],303)
+        (self.root/'revoke-federation-after-account').write_text('fixture revocation')
+        status,_,body=self.request(cookie=cookie)
+        self.assertEqual(status,400)
+        self.assertIn('Enterprise sign-in expired or changed',body)
+        self.assertNotIn('sls-operations-data',body)
+        self.assertFalse((self.root/'revoke-federation-after-account').exists())
+        audit_path=self.root/'audit.jsonl'
+        audit=[json.loads(row) for row in audit_path.read_text().splitlines()] if audit_path.exists() else []
+        self.assertFalse(any(row['action']=='operator_sign_in_completed' for row in audit))
     def test_origin_https_cookie_and_wrong_login(self):
         status,h,body=self.request();self.assertEqual(status,200);self.assertEqual(h['Referrer-Policy'],'same-origin')
         self.assertIn('secure',h['Set-Cookie'].lower());self.assertIn('HttpOnly',h['Set-Cookie']);self.assertIn('SameSite=Strict',h['Set-Cookie']);self.assertIn('path=/mass-notify/',h['Set-Cookie'].lower());self.assertIn('no-store',h['Cache-Control'])

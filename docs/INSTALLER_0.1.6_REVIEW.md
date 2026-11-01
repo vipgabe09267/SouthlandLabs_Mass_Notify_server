@@ -25,7 +25,7 @@ This tracks the installer and paging findings from the October 6 audit. Changes 
 | Verification | Add regression cases for the reported RAM, separate mounts, sparse recovery, inodes, stale collectors, service states and real paging admission. |
 | Legacy permissions | Authenticate the previous release before descriptor-based mode recovery; preserve lock inodes and admission/configuration bytes, protect them from native recursive chown and verify the collector before acquiring installation guards. |
 | Offline uninstall | Use included authenticated helpers even when the operational installer helper is missing; drain notification workers and refuse active phone delivery before teardown. Preserve history by default, distinguish completed removal from failed reload and support exact approved partial-teardown states. Refuse unexpected cron reads/writes without replacing unrelated jobs. |
-| Mail | Apply shared durable limits and bounded Postfix queue checks; fence uncertain email handoffs. Keep all SLS cron output in bounded private diagnostics rather than cron mail. |
+| Mail | Apply shared durable limits and bounded Postfix queue checks; fence uncertain email handoffs. Keep all SLL cron output in bounded private diagnostics rather than cron mail. |
 | Beta notice | Require administrator/session-bound acceptance after five seconds, preserve encrypted settings and prevent dismissal or stacked safety dialogs. |
 
 Unsupported operating systems or relocated runtime layouts require a qualified adapter. The installer must explain those limits before changing the host; it must not guess paths, adopt unknown live hashes, disable authorization, or overwrite administrator settings.

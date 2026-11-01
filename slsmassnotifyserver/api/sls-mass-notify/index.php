@@ -1,5 +1,5 @@
 <?php
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 declare(strict_types=1);
 ini_set('display_errors', '0');
@@ -34,7 +34,7 @@ if (($_GET['sls_installer_runtime'] ?? '') === '1'
     header('Cache-Control: no-store');
     header('X-Content-Type-Options: nosniff');
     echo json_encode(['probe' => 'sls_served_php_v1', 'ok' => !$missing, 'missing' => $missing,
-        'module_version'=>'0.1.8-beta',
+        'module_version'=>'0.1.9-beta',
         'php_version'=>PHP_VERSION, 'php_sapi'=>PHP_SAPI, 'runtime_account_ok'=>$runtimeAccountOk,
         'extensions'=>$extensions, 'functions'=>$functions]);
     exit;
@@ -332,7 +332,7 @@ function api_state_lock($handle, float $deadline, int $operation = LOCK_EX): boo
     return false;
 }
 
-function api_state_transaction(string $path, int $maximum, callable $update, int $waitMilliseconds = 250, bool $sharedRead = false): bool
+function api_state_transaction(string $path, int $maximum, callable $update, int $waitMilliseconds = 250, bool $sharedRead = false, bool $durable = true): bool
 {
     $GLOBALS['sls_api_state_error'] = '';
     $directory = dirname($path);
@@ -415,7 +415,7 @@ function api_state_transaction(string $path, int $maximum, callable $update, int
                 if ($amount === false || $amount === 0) { throw new RuntimeException('state_write_failed'); }
                 $written += $amount;
             }
-            if (!fflush($temporaryHandle) || !function_exists('fsync') || !@fsync($temporaryHandle)) {
+            if (!fflush($temporaryHandle) || ($durable && (!function_exists('fsync') || !@fsync($temporaryHandle)))) {
                 throw new RuntimeException('state_sync_failed');
             }
             clearstatcache(true, $path);
@@ -430,7 +430,7 @@ function api_state_transaction(string $path, int $maximum, callable $update, int
             }
             if (!@rename($temporary, $path)) { throw new RuntimeException('state_replace_failed'); }
             $temporary = '';
-            if (!@fsync($parent)) { throw new RuntimeException('state_directory_sync_failed'); }
+            if ($durable && !@fsync($parent)) { throw new RuntimeException('state_directory_sync_failed'); }
             return !empty($result['allowed']);
         }
     } catch (Throwable $exception) {
@@ -453,7 +453,7 @@ function api_state_transaction(string $path, int $maximum, callable $update, int
     }
     // Release both shared leases, then reread under exclusive locks. Never
     // commit a decision made against a snapshot that another writer can change.
-    return $upgradeRequired && api_state_transaction($path, $maximum, $update, $waitMilliseconds);
+    return $upgradeRequired && api_state_transaction($path, $maximum, $update, $waitMilliseconds, false, $durable);
 }
 
 function api_rate_entries_valid(array $data, int $maximum, bool $desktop): bool
@@ -574,7 +574,7 @@ function audit_control_api(string $ip, string $action, int $status, bool $ok): v
         header('X-SLS-Audit-Status: unavailable');
         header('X-SLS-Audit-Error: ' . $error);
     }
-    error_log('SLS Control API audit storage or forwarding could not be confirmed: ' . $error . '. The action response is unchanged; review storage diagnostics.');
+    error_log('SLL Control API audit storage or forwarding could not be confirmed: ' . $error . '. The action response is unchanged; review storage diagnostics.');
 }
 
 function read_json_file(string $path): array
@@ -846,7 +846,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             audit_control_api($clientIp, 'get_readiness', 503, false);
             respond(503, ['ok'=>false, 'error'=>'readiness_unavailable', 'message'=>'The PBX readiness report could not be generated. Check the module diagnostics and PHP error log.']);
         }
-        if (!\SLS\MassNotify\ApiSecurity::permits($principal, 'read')) {
+        if (($principal['audience']['unrestricted'] ?? false) !== true || !\SLS\MassNotify\ApiSecurity::permits($principal, 'read')) {
             $report = array_intersect_key($report, array_flip(['schema','check_schema_version','generated_at','version','operational_ready','attention_count','unknown_count','checks']));
             $report['checks'] = array_map(static fn($row)=>array_intersect_key($row, array_flip(['id','code','state','reason_code','age_seconds','maximum_age_seconds'])), $report['checks'] ?? []);
         }
@@ -880,7 +880,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             audit_control_api($clientIp, 'get_config', !empty($result['success']) ? 200 : 400, !empty($result['success']));
             respond(!empty($result['success']) ? 200 : 400, ['ok' => !empty($result['success']), 'resource' => 'config'] + $result);
         } catch (\Throwable $exception) {
-            error_log('SLS Mass Notify Control API config read failure: ' . $exception->getMessage());
+            error_log('SLL Mass Notify Server Control API config read failure: ' . $exception->getMessage());
             audit_control_api($clientIp, 'get_config', 500, false);
             respond(500, ['ok' => false, 'error' => 'internal_error']);
         }
@@ -986,6 +986,11 @@ if (in_array($action,['send_announcement','preview_announcement','rehearse_annou
         respond(403,['ok'=>false,'error'=>'labs_audience_not_permitted','message'=>'Browser and connector delivery requires a named sender with explicit permission.']);
     }
 }
+if ($action === 'send_announcement' && request_header_value('Idempotency-Key') === '') {
+    audit_control_api($clientIp,$action,400,false);
+    respond(400,['ok'=>false,'error'=>'idempotency_key_required',
+        'message'=>'Send requests require an Idempotency-Key header between 16 and 128 characters.']);
+}
 try {
     $module = freepbx_module();
     if ($action === 'enterprise_template_start') {
@@ -1031,7 +1036,7 @@ try {
 
     if (in_array($action,['send_announcement','preview_announcement','rehearse_announcement'],true)) {
         $idempotencyKey=request_header_value('Idempotency-Key');
-        if ($action==='send_announcement' && $idempotencyKey!=='') {
+        if ($action==='send_announcement') {
             try {
                 require_once dirname(__DIR__, 2) . '/admin/modules/slsmassnotifyserver/ControlIdempotency.php';
                 $result=(new \SLS\MassNotify\ControlIdempotency('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/control-idempotency'))
@@ -1043,7 +1048,7 @@ try {
                 audit_control_api($clientIp,$action,409,false);
                 respond(409,['ok'=>false,'error'=>'idempotency_conflict','message'=>$error->getMessage()]);
             } catch (Throwable $error) {
-                error_log('SLS announcement idempotency storage failure: '.$error->getMessage());
+                error_log('SLL announcement idempotency storage failure: '.$error->getMessage());
                 audit_control_api($clientIp,$action,503,false);
                 respond(503,['ok'=>false,'error'=>'idempotency_storage_unavailable','retryable'=>false,
                     'message'=>'Submission could not be confirmed. Check delivery history before sending with a different key.']);
@@ -1081,7 +1086,7 @@ try {
     audit_control_api($clientIp, $action ?: 'unsupported_action', 400, false);
     respond(400, ['ok' => false, 'error' => 'unsupported_action']);
 } catch (\Throwable $exception) {
-    error_log('SLS Mass Notify Control API failure: ' . $exception->getMessage());
+    error_log('SLL Mass Notify Server Control API failure: ' . $exception->getMessage());
     audit_control_api($clientIp, $action ?: 'internal_error', 500, false);
     respond(500, ['ok' => false, 'error' => 'internal_error']);
 }

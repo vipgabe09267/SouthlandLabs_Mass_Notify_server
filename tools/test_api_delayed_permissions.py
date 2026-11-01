@@ -111,6 +111,44 @@ class DelayedPermissions(unittest.TestCase):
         self.assertEqual(result[1]['extensions'], [])
         self.assertEqual(result[1]['outbound_targets'], [])
 
+    def test_legacy_rotation_and_disable_revoke_delayed_audio_and_weather(self):
+        result = self.php('''
+          $control=['enabled'=>true,'api_key'=>'legacy-fixture-key-before-rotation'];
+          $settings=['enabled'=>true,'control_api'=>$control,
+            'nws_zones'=>[['id'=>'zone_a','extensions'=>['1000'],'desktop_clients'=>['alice']]],
+            'desktop_clients'=>[['client_id'=>'device_a','username'=>'alice','enabled'=>true]]];
+          $principal=\\SLS\\MassNotify\\ApiSecurity::authenticate($control,$control['api_key']);
+          $revision=$principal['authority_revision']??null;
+          $current=\\SLS\\MassNotify\\ApiSecurity::currentCredential($settings,'legacy',$revision);
+          $audioContext=['api_credential_id'=>'legacy','api_credential_revision'=>$revision];
+          $audio=\\SLS\\MassNotify\\ApiPermissionGuards::audio($settings,$audioContext,['1000'],[]);
+          $weatherContext=\\SLS\\MassNotify\\ApiPermissionGuards::weatherContext(
+            $settings,$principal,['zone_a'],['1000'],['alice']);
+          $weather=\\SLS\\MassNotify\\ApiPermissionGuards::weather($settings,$weatherContext);
+          $settings['control_api']['api_key']='legacy-fixture-key-after-rotation';
+          $rotatedCurrent=\\SLS\\MassNotify\\ApiSecurity::currentCredential($settings,'legacy',$revision);
+          $rotatedAudio=\\SLS\\MassNotify\\ApiPermissionGuards::audio($settings,$audioContext,['1000'],[]);
+          $rotatedWeather=\\SLS\\MassNotify\\ApiPermissionGuards::weather($settings,$weatherContext);
+          $settings['control_api']['api_key']=$control['api_key'];
+          $settings['control_api']['enabled']=false;
+          $disabledCurrent=\\SLS\\MassNotify\\ApiSecurity::currentCredential($settings,'legacy',$revision);
+          echo json_encode(compact('revision','current','audio','weatherContext','weather',
+            'rotatedCurrent','rotatedAudio','rotatedWeather','disabledCurrent'));
+        ''')
+        self.assertRegex(result['revision'], r'^[a-f0-9]{64}$')
+        self.assertEqual(result['current']['id'], 'legacy')
+        self.assertEqual(result['audio']['extensions'], ['1000'])
+        self.assertEqual(result['weather']['phones'], ['1000'])
+        self.assertEqual(result['weather']['desktops'], ['alice'])
+        self.assertEqual(result['weatherContext']['credential_id'], 'legacy')
+        self.assertEqual(result['weatherContext']['credential_revision'], result['revision'])
+        self.assertIsNone(result['rotatedCurrent'])
+        self.assertEqual(result['rotatedAudio']['extensions'], [])
+        self.assertEqual(result['rotatedAudio']['removed']['phones'], ['1000'])
+        self.assertEqual(result['rotatedWeather']['phones'], [])
+        self.assertEqual(result['rotatedWeather']['desktops'], [])
+        self.assertIsNone(result['disabledCurrent'])
+
 
 if __name__ == '__main__':
     unittest.main()

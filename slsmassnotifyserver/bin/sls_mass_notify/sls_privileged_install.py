@@ -1,14 +1,16 @@
 #!/usr/bin/python3
-"""Fixed SLS installation operations; no FreePBX/PHP bootstrap runs as root.
+"""Fixed SLL installation operations; no FreePBX/PHP bootstrap runs as root.
 
-Executable and web bytes come only from the authenticated, protected SLS
+Executable and web bytes come only from the authenticated, protected SLL
 release generation. Configuration supplies a bounded retention integer and an optional verified IANA
 timezone, never commands, paths, service names or executable contents. No operations run on import.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
@@ -44,7 +46,7 @@ CRON_LINES = (
 )
 UNIT = '''# Managed by SLS Mass Notify Server
 [Unit]
-Description=SLS Mass Notify phone outcome collector
+Description=SLL Mass Notify Server phone outcome collector
 After=network.target asterisk.service freepbx.service
 StartLimitIntervalSec=0
 
@@ -74,7 +76,12 @@ LockPersonality=yes
 [Install]
 WantedBy=multi-user.target
 '''
-APACHE = '''# Southland Servers Mass Notifications Server
+APACHE = '''# SLL Mass Notify Server
+<DirectoryMatch "^/var/www/html/admin/modules/\\.sls-mass-notify-recovery(?:\\.[A-Za-z0-9]{6,12})?(?:/|$)">
+    Require all denied
+    AllowOverride None
+    Options -Indexes
+</DirectoryMatch>
 <Directory /var/www/html/api/sipnotify>
     Require all granted
     Options -Indexes
@@ -150,6 +157,19 @@ class Files:
             raise InstallError('filesystem root must be absolute')
         self.account = pwd.getpwnam('asterisk')
 
+    @staticmethod
+    def mount_id(descriptor):
+        """Return the kernel mount identity for an already opened object."""
+        try:
+            with open(f'/proc/self/fdinfo/{descriptor}', encoding='ascii') as details:
+                for line in details:
+                    if line.startswith('mnt_id:'):
+                        value = line.split(':', 1)[1].strip()
+                        if value.isdigit(): return int(value)
+        except (OSError, ValueError) as error:
+            raise InstallError('unable to verify managed mount boundary') from error
+        raise InstallError('unable to verify managed mount boundary')
+
     def path(self, path):
         path = Path(path)
         if not path.is_absolute() or '..' in path.parts:
@@ -162,14 +182,24 @@ class Files:
         fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             for part in target.parts[1:]:
+                created = False
                 if create:
-                    try: os.mkdir(part, 0o755, dir_fd=fd)
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                        created = True
                     except FileExistsError: pass
                 child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
                 os.close(fd); fd = child
                 info = os.fstat(fd)
                 if protected and (info.st_uid != 0 or info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
                     raise InstallError('privileged destination ancestor is writable outside root: ' + str(target))
+                if created:
+                    if info.st_uid != os.geteuid():
+                        raise InstallError('new destination ancestor changed ownership: ' + str(target))
+                    # mkdir applies the caller's private umask. Honor the
+                    # declared traversal mode only for ancestors we created;
+                    # existing platform/private directories retain their mode.
+                    os.fchmod(fd, 0o755)
             result, fd = fd, -1
             return result
         finally:
@@ -407,9 +437,70 @@ class Files:
                 os.close(descriptor)
             os.close(parent)
 
+    def state_metadata(self, descriptor, mode):
+        """Do not change ctime when the requested metadata is already correct."""
+        info = os.fstat(descriptor)
+        if (info.st_uid, info.st_gid) != (self.account.pw_uid, self.account.pw_gid):
+            os.fchown(descriptor, self.account.pw_uid, self.account.pw_gid)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != mode:
+            os.fchmod(descriptor, mode)
+
+    @staticmethod
+    def collector_entry(name):
+        """Return only the fixed collector writer mutex and temporary layout."""
+        if name in ('phone-admission.json', 'phone-admission.lock', '.phone-admission-required'):
+            return 'phone-admission.lock', b'', False
+        if re.fullmatch(r'\.phone-admission-[a-f0-9]{32}', name):
+            return 'phone-admission.lock', b'', True
+        for cache in ('phone-collector-heartbeat.json', 'phone-collector-display.json'):
+            temporary = re.fullmatch(r'\.' + re.escape(cache) + r'\.[a-f0-9]{32}\.tmp', name) is not None
+            if name in (cache, cache + '.lock') or temporary:
+                return cache + '.lock', b'SLS_JSON_V1\n', temporary
+        return None
+
+    @contextmanager
+    def collector_mutex(self, parent, name, marker, root_mount):
+        """Lease the existing permanent writer inode; never invent a lost lock."""
+        try:
+            lock = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        except FileNotFoundError:
+            raise InstallError('collector state is missing its permanent mutex: ' + name) from None
+        try:
+            before = os.fstat(lock)
+            def checked():
+                info = os.fstat(lock)
+                named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (not self.regular(info) or info.st_uid not in (0, self.account.pw_uid)
+                        or info.st_gid not in (0, self.account.pw_gid)
+                        or stat.S_IMODE(info.st_mode) not in (0o600, 0o640, 0o644)
+                        or info.st_size > len(marker)
+                        or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                        or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
+                        or self.mount_id(lock) != root_mount):
+                    raise InstallError('unsafe collector writer mutex: ' + name)
+            checked()
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise InstallError('collector writer mutex remained busy: ' + name) from None
+                    time.sleep(.01)
+            checked()
+            if not marker.startswith(os.read(lock, len(marker) + 1)):
+                raise InstallError('collector writer mutex marker is malformed: ' + name)
+            self.state_metadata(lock, 0o640)
+            yield
+            checked()
+        finally:
+            os.close(lock)
+
     def secure_tree(self, path, *, public=False):
-        """Repair only ordinary SLS state; never traverse dependency links."""
+        """Repair only ordinary SLL state; never traverse dependency links."""
         root = self.directory(path)
+        root_mount = self.mount_id(root)
         visited = 0
         private_roots = ('event-log-recovery', 'sms', 'recovery-archives', 'enterprise-state',
                          'control-idempotency', 'enterprise-operations', 'enterprise-integrations',
@@ -430,44 +521,57 @@ class Files:
             for name in os.listdir(fd):
                 visited += 1
                 if visited > 25000:
-                    raise InstallError('SLS state exceeds safe entry limit')
+                    raise InstallError('SLL state exceeds safe entry limit')
                 rel = relative + '/' + name if relative else name
-                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                if not public and rel == 'piper/venv':
-                    if not stat.S_ISDIR(before.st_mode) or before.st_uid != 0 or before.st_gid != 0 or before.st_mode & 0o022:
-                        raise InstallError('unsafe Piper compatibility directory')
-                    continue
-                flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-                if stat.S_ISDIR(before.st_mode): flags |= os.O_DIRECTORY
-                elif not self.regular(before):
-                    raise InstallError('unsafe SLS state entry: ' + rel)
-                child = os.open(name, flags, dir_fd=fd)
-                try:
-                    opened = os.fstat(child)
-                    current = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                    if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-                            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-                            or opened.st_uid not in (0, self.account.pw_uid)):
-                        raise InstallError('SLS state changed during permission repair: ' + rel)
-                    if stat.S_ISDIR(opened.st_mode): visit(child, rel)
-                    else:
-                        if not self.regular(opened): raise InstallError('unsafe SLS state file: ' + rel)
-                        os.fchown(child, self.account.pw_uid, self.account.pw_gid)
-                        mode = 0o644 if public or rel.startswith(('sounds/', 'piper/voices/')) else 0o640
-                        if not public and private(rel):
-                            mode = 0o600
-                        os.fchmod(child, mode)
-                finally: os.close(child)
-            os.fchown(fd, self.account.pw_uid, self.account.pw_gid)
+                collector = self.collector_entry(name) if not public and str(path) == DATA and not relative else None
+                lease = self.collector_mutex(fd, collector[0], collector[1], root_mount) if collector else nullcontext()
+                with lease:
+                    try:
+                        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if collector and not self.regular(before):
+                            raise InstallError('unsafe collector state entry: ' + rel)
+                        if not public and rel == 'piper/venv':
+                            if not stat.S_ISDIR(before.st_mode) or before.st_uid != 0 or before.st_gid != 0 or before.st_mode & 0o022:
+                                raise InstallError('unsafe Piper compatibility directory')
+                            continue
+                        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+                        if stat.S_ISDIR(before.st_mode): flags |= os.O_DIRECTORY
+                        elif not self.regular(before):
+                            raise InstallError('unsafe SLL state entry: ' + rel)
+                        child = os.open(name, flags, dir_fd=fd)
+                        try:
+                            opened = os.fstat(child)
+                            current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                            if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                                    or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                                    or opened.st_uid not in (0, self.account.pw_uid)):
+                                raise InstallError('SLL state changed during permission repair: ' + rel)
+                            if self.mount_id(child) != root_mount:
+                                raise InstallError('SLL state crosses a managed mount boundary: ' + rel)
+                            if stat.S_ISDIR(opened.st_mode): visit(child, rel)
+                            else:
+                                if not self.regular(opened): raise InstallError('unsafe SLL state file: ' + rel)
+                                mode = 0o644 if public or rel.startswith(('sounds/', 'piper/voices/')) else 0o640
+                                if not public and private(rel):
+                                    mode = 0o600
+                                self.state_metadata(child, mode)
+                        finally: os.close(child)
+                    except FileNotFoundError:
+                        # A failed writer closes its mutex before unlinking its
+                        # uncommitted temporary. No canonical/unknown/public
+                        # name receives this exception.
+                        if not collector or not collector[2]:
+                            raise
             mode = 0o755 if public or relative not in ('', 'sipnotify', 'config-backups', 'piper', 'cron-diagnostics') else 0o750
             if not public and private(relative):
                 mode = 0o700
-            os.fchmod(fd, mode)
+            self.state_metadata(fd, mode)
         try: visit(root)
         finally: os.close(root)
 
     def prune(self, path, expected, *, preserve=()):
         root = self.directory(path)
+        root_mount = self.mount_id(root)
         count = 0
         def visit(fd, prefix=''):
             nonlocal count
@@ -482,13 +586,31 @@ class Files:
                     continue
                 if stat.S_ISDIR(info.st_mode):
                     child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-                    try: visit(child, rel + '/')
+                    try:
+                        opened = os.fstat(child)
+                        if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                                or self.mount_id(child) != root_mount):
+                            raise InstallError('managed runtime crosses a mount boundary: ' + rel)
+                        visit(child, rel + '/')
                     finally: os.close(child)
                     if not any(item.startswith(rel + '/') for item in expected):
+                        current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                            raise InstallError('managed runtime changed before pruning: ' + rel)
                         os.rmdir(name, dir_fd=fd)
                 elif not self.regular(info):
                     raise InstallError('unsafe managed runtime entry: ' + rel)
                 elif rel not in expected:
+                    child = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                    try:
+                        opened = os.fstat(child)
+                        if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                                or self.mount_id(child) != root_mount):
+                            raise InstallError('managed runtime crosses a mount boundary: ' + rel)
+                        current = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+                            raise InstallError('managed runtime changed before pruning: ' + rel)
+                    finally: os.close(child)
                     os.unlink(name, dir_fd=fd)
         try: visit(root)
         finally: os.close(root)
@@ -564,7 +686,7 @@ class PrivilegedInstall:
         self.files = files or Files(); self.run = run
         data, generation = trust.load(self.trust_root, 'slsmassnotifyserver')
         if data['source']['kind'] != 'publisher-ed25519':
-            raise InstallError('SLS privileged installation requires a publisher-verified generation')
+            raise InstallError('SLL privileged installation requires a publisher-verified generation')
         self.data = data; self.source = generation / 'module'
         actual = trust.inventory_tree(self.source, 'slsmassnotifyserver')
         if actual != set(data['files']):
@@ -726,7 +848,8 @@ class PrivilegedInstall:
         self.files.secure_tree(DATA)
         self.files.secure_tree(WEB + '/sls_mass_notify', public=True)
         self.files.write(SERVICE_PATH, UNIT.encode(), 0o644, managed_prefix=b'# Managed by SLS Mass Notify Server\n[Unit]\n')
-        self.files.write(APACHE_PATH, APACHE.encode(), 0o644, managed_prefix=b'# Southland Servers Mass Notifications Server\n')
+        self.files.write(APACHE_PATH, APACHE.encode(), 0o644, managed_prefix=(
+            b'# SLL Mass Notify Server\n', b'# Southland Servers Mass Notifications Server\n'))
         self.files.write(LOGROTATE_PATH, self.rotation(), 0o644, managed_prefix=b'/var/log/sls_mass_notify.log {\n')
         self.admit()
 
@@ -744,11 +867,11 @@ class PrivilegedInstall:
                     raise InstallError('Piper wrapper link is unrecognized; it was not followed or changed')
                 return True
             if (not self.files.regular(wrapper) or wrapper.st_uid != 0 or wrapper.st_mode & 0o022):
-                raise InstallError('Piper wrapper must be a root-owned regular SLS wrapper; no existing executable was followed')
+                raise InstallError('Piper wrapper must be a root-owned regular SLL wrapper; no existing executable was followed')
             script = self.contents['bin/sls_mass_notify_install_piper_voices.sh']
             match = re.search(rb"expected=\"\$\(cat <<'EOF'\n(.*?)\nEOF\n\)\"", script, re.S)
             if match is None or self.files.read('/usr/local/bin/piper', 16384) != match.group(1) + b'\n':
-                raise InstallError('Piper wrapper differs from its authenticated SLS implementation; preserve it and review before upgrading')
+                raise InstallError('Piper wrapper differs from its authenticated SLL implementation; preserve it and review before upgrading')
         return True
 
     def admit(self):
@@ -852,5 +975,5 @@ def main():
 if __name__ == '__main__':
     try: main()
     except (InstallError, OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
-        print('SLS protected installation: ' + str(error), file=sys.stderr)
+        print('SLL protected installation: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

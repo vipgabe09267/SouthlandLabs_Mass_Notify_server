@@ -10,7 +10,7 @@ use SLS\MassNotify\ApiSecurity;
 use SLS\MassNotify\IncidentConfig;
 use SLS\MassNotify\LocationDirectory;
 
-/** FreePBX sessions authenticate people; .config grants their SLS authority. */
+/** FreePBX sessions authenticate people; .config grants their SLL authority. */
 trait SlsOperators
 {
     use SlsOperatorRecovery;
@@ -50,8 +50,9 @@ trait SlsOperators
         $principal = OperatorAccess::byUsername($settings, $user->username);
         if (!$principal || !OperatorAccess::localIdentityCurrent($principal)
             || ($identity['mode'] ?? '') !== $principal['source']
-            || !hash_equals($principal['identity'], OperatorAccess::identity($identity))) {
-            throw new \DomainException('This PBX account is not currently authorized for SLS Operations. Ask an SLS administrator to review its role and login identity.');
+            || !hash_equals($principal['identity'], OperatorAccess::identity($identity))
+            || !OperatorAccess::activeAccount($principal)) {
+            throw new \DomainException('This PBX account is not currently authorized for SLL Operations. Ask an SLL administrator to review its role and login identity.');
         }
         return $principal;
     }
@@ -72,7 +73,7 @@ trait SlsOperators
         if ($this->operatorPageAllowed($page)) { return; }
         \SLS\MassNotify\AdminResponse::requireClearBuffers();
         http_response_code(403); header('Cache-Control: private, no-store');
-        $message = 'Your current SLS role does not allow this page. Use Operations for your assigned sites and audiences.';
+        $message = 'Your current SLL role does not allow this page. Use Operations for your assigned sites and audiences.';
         if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             header('Content-Type: application/json; charset=utf-8'); echo json_encode(['success'=>false, 'message'=>$message]);
         } else {
@@ -86,7 +87,7 @@ trait SlsOperators
     public function operatorDirectory(): array
     {
         $principal = $this->currentOperator();
-        if ($principal['operator_role'] !== 'administrator') { throw new \DomainException('Only an SLS administrator can review the PBX account directory.'); }
+        if ($principal['operator_role'] !== 'administrator') { throw new \DomainException('Only an SLL administrator can review the PBX account directory.'); }
         $candidates = []; $errors = [];
         try {
             $statement = $this->FreePBX->Database()->prepare('SELECT username FROM ampusers ORDER BY username LIMIT 501');
@@ -167,6 +168,13 @@ trait SlsOperators
             if (strcasecmp($account['username'],$username)===0 && $account['source']===$source && $account['enabled'] && OperatorAccess::activeAccount($account)) { return $account; }
         }
         return null;
+    }
+
+    /** Recheck federation at session creation without exposing central settings. */
+    public function operatorEnterpriseIdentityCurrent(array $binding, string $accountId, int $now): bool
+    {
+        require_once __DIR__.'/EnterpriseIdentity.php';
+        return \SLS\MassNotify\EnterpriseIdentity::current($this->getActiveSettings(), $binding, $accountId, $now);
     }
 
     /** Caller holds the central settings lock. */
@@ -665,7 +673,7 @@ trait SlsOperators
                     ])); } finally { $this->operatorScheduleOrigin = null; }
                 }
                 return $this->withOperator($principal, fn(): array => $this->sendSipNotifyAnnouncement($delivery['extensions'], $message, true,
-                    in_array($delivery['audio_mode'], ['tts', 'tones_tts'], true), [], $delivery + ['title'=>$title, 'preview'=>$action === 'preview', 'trigger_source'=>'SLS Operator Portal']));
+                    in_array($delivery['audio_mode'], ['tts', 'tones_tts'], true), [], $delivery + ['title'=>$title, 'preview'=>$action === 'preview', 'trigger_source'=>'SLL Operator Portal']));
             }
             if ($action === 'remove_schedule') {
                 if (!OperatorAccess::may($principal, 'schedule') || array_diff(array_keys($input), ['schedule_id']) || !is_string($input['schedule_id'] ?? null)) { throw new \DomainException('Select one of your saved schedules.'); }
@@ -674,7 +682,7 @@ trait SlsOperators
                 return $this->deleteScheduledAnnouncement($input['schedule_id']);
             }
             if ($action === 'roll_call') {
-                if (!OperatorAccess::may($principal, 'roll_call')) { throw new \DomainException('Only an assigned warden or SLS administrator can record roll call.'); }
+                if (!OperatorAccess::may($principal, 'roll_call')) { throw new \DomainException('Only an assigned warden or SLL administrator can record roll call.'); }
                 $id = $input['incident_id'] ?? ''; unset($input['incident_id']);
                 if (!is_string($id)) { throw new \DomainException('Select an incident.'); }
                 $activity = $this->acquireAnnouncementActivityLock(false, 30);

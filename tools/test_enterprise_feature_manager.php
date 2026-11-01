@@ -131,4 +131,19 @@ $dependency['subscriber_browser']['push']['subject']='mailto:admin@example.test'
 $features=array_fill_keys(array_keys($state['config']['features']),false);$features['browser_push']=true;
 $derived=Manager::changes($dependency,true,$features);
 fmcheck($derived['subscriber_browser']['enabled']&&$derived['subscriber_browser']['push']['enabled'],'Browser push did not derive its subscriber parent.');
+$racedBytes='';
+$module->race=static function()use(&$racedBytes):void{
+    $value=SlsConfigCrypto::readFile(FeatureManagerFixture::SETTINGS_JSON);
+    $value['deployment_profile']='lite';$value['enterprise_identity']['enabled']=false;
+    $racedBytes=SlsConfigCrypto::encode($value);
+    file_put_contents(FeatureManagerFixture::SETTINGS_JSON,$racedBytes);
+};
+try {
+    $module->rawSave(['enterprise_operations'=>EnterpriseOperationsConfig::defaults()]);
+    throw new RuntimeException('An Enterprise save bypassed a deployment profile change while acquiring the settings lock.');
+} catch(DomainException $error) {
+    fmcheck(str_contains($error->getMessage(),'Lite'),'The concurrent Lite conversion failed for an unrelated reason.');
+}
+fmcheck(file_get_contents(FeatureManagerFixture::SETTINGS_JSON)===$racedBytes,
+    'A rejected Enterprise save rewrote the concurrent Lite configuration.');
 echo "Enterprise feature manager: administrator/receipt/footer gates, strict selections, default off, master-only activation, derived parents, configuration prerequisites, stale-save refusal, active/pending rollback, secret preservation, runtime disable and independent SSO/paging passed.\n";

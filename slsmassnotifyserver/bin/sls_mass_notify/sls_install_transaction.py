@@ -132,6 +132,113 @@ def atomic(path, value):
         os.close(parent)
 
 
+def sync_recovery_inputs(transaction, recovery, config_snapshot='', pending_snapshot=''):
+    """Flush protected rollback inputs before a journal may authorize mutation."""
+    transaction = Path(transaction)
+    parent = directory(transaction)
+    handles = []; recovery_fd = -1
+    try:
+        info = os.fstat(parent)
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise TransactionError('Recovery input directory must remain root-private')
+        inputs = []
+        for value, name in ((config_snapshot, 'config.snapshot'), (pending_snapshot, 'pending.snapshot')):
+            if value:
+                if Path(value) != transaction / name:
+                    raise TransactionError('Configuration recovery input is outside its transaction')
+                inputs.append((parent, name, 16 * 1024 * 1024, False))
+        if recovery:
+            recovery = Path(recovery)
+            if recovery.parent != transaction or not re.fullmatch(r'sls-mass-notify-recovery\.[A-Za-z0-9]{6}', recovery.name):
+                raise TransactionError('Operational recovery input is outside its transaction')
+            recovery_fd = directory(recovery)
+            if stat.S_IMODE(os.fstat(recovery_fd).st_mode) != 0o700:
+                raise TransactionError('Operational recovery input directory must remain root-private')
+            inputs.extend((recovery_fd, name, 1048576, True) for name in ('idle-before.json', 'module-registration.json'))
+        def identity(meta):
+            return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
+                    meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+        for location, name, bound, document in inputs:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=location)
+            handles.append(fd); before = os.fstat(fd)
+            named = os.stat(name, dir_fd=location, follow_symlinks=False)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                    or stat.S_IMODE(before.st_mode) != 0o600 or not 0 < before.st_size <= bound
+                    or identity(before) != identity(named)):
+                raise TransactionError('Unsafe or missing durable recovery input: ' + name)
+            body = bytearray()
+            while len(body) <= bound:
+                block = os.read(fd, min(65536, bound + 1 - len(body)))
+                if not block: break
+                body.extend(block)
+            if len(body) != before.st_size or document and not isinstance(decode_json(body), dict):
+                raise TransactionError('Invalid durable recovery input: ' + name)
+            if identity(os.fstat(fd)) != identity(before):
+                raise TransactionError('Recovery input changed during durable inspection: ' + name)
+            os.fsync(fd)
+            if (identity(os.fstat(fd)) != identity(before)
+                    or identity(os.stat(name, dir_fd=location, follow_symlinks=False)) != identity(before)):
+                raise TransactionError('Recovery input changed during storage synchronization: ' + name)
+        if recovery_fd >= 0:
+            os.fsync(recovery_fd)
+        os.fsync(parent)
+    finally:
+        for fd in handles: os.close(fd)
+        if recovery_fd >= 0: os.close(recovery_fd)
+        os.close(parent)
+
+
+def configuration_intents(recovery, original_hash):
+    """Read only hashes durably recorded before an installer settings write."""
+    if not re.fullmatch(r'[0-9a-f]{64}', original_hash):
+        raise TransactionError('Invalid original configuration hash')
+    path = Path(recovery) / 'configuration-intents.json'
+    try:
+        value = decode_json(read(path))
+    except FileNotFoundError:
+        return {'schema': 1, 'original_sha256': original_hash, 'writes': []}
+    if (type(value) is not dict or set(value) != {'schema', 'original_sha256', 'writes'}
+            or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('original_sha256') != original_hash
+            or type(value.get('writes')) is not list or len(value['writes']) > 8):
+        raise TransactionError('Invalid protected configuration write intentions')
+    previous = original_hash
+    for item in value['writes']:
+        if (type(item) is not dict or set(item) != {'before_sha256', 'after_sha256'}
+                or item.get('before_sha256') != previous
+                or not isinstance(item.get('after_sha256'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', item['after_sha256'])):
+            raise TransactionError('Broken protected configuration write intention chain')
+        previous = item['after_sha256']
+    return value
+
+
+def record_configuration_intent(recovery, original_hash, before, after):
+    """Publish and fsync the expected bytes before replacing central settings."""
+    value = configuration_intents(recovery, original_hash)
+    previous = value['writes'][-1]['after_sha256'] if value['writes'] else original_hash
+    before_hash, after_hash = (hashlib.sha256(body).hexdigest() for body in (before, after))
+    if previous != before_hash or len(value['writes']) >= 8:
+        raise TransactionError('Configuration no longer matches this installer write transaction')
+    value['writes'].append({'before_sha256': before_hash, 'after_sha256': after_hash})
+    atomic(Path(recovery) / 'configuration-intents.json', value)
+
+
+def assert_configuration_recoverable(recovery, original_hash, current_hash,
+                                     pending_state, pending_hash, current_pending_hash):
+    if original_hash:
+        value = configuration_intents(recovery, original_hash)
+        approved = {original_hash, 'absent'} | {item['after_sha256'] for item in value['writes']}
+        if current_hash not in approved:
+            raise TransactionError('Central settings changed after the failed installation; preserve the live configuration and original snapshot for review')
+    if pending_state == 'present':
+        if (not re.fullmatch(r'[0-9a-f]{64}', pending_hash)
+                or current_pending_hash not in (pending_hash, 'absent')):
+            raise TransactionError('Pending settings changed after the failed installation; preserve both versions for review')
+    elif pending_state == 'absent' and current_pending_hash != 'absent':
+        raise TransactionError('New pending settings appeared after the failed installation; preserve them for review')
+
+
 def state(path):
     if not NAME.fullmatch(path.name): raise TransactionError('Invalid installer transaction identity')
     try:
@@ -166,6 +273,31 @@ def state(path):
     return value
 
 
+def legacy_sequence(root):
+    """Recognize an old counter as bounded data, never recovery authority."""
+    parent = directory(root)
+    fd = -1
+    try:
+        fd = os.open('transaction-sequence', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) not in (0o600, 0o640, 0o644) or not 1 <= before.st_size <= 20):
+            raise TransactionError('Unsafe legacy installer sequence metadata; preserve it for review')
+        raw = os.read(fd, 21)
+        after = os.fstat(fd)
+        named = os.stat('transaction-sequence', dir_fd=parent, follow_symlinks=False)
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                    value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if (identity(before) != identity(after) or identity(after) != identity(named)
+                or len(raw) != before.st_size or not re.fullmatch(rb'(?:0|[1-9][0-9]{0,18})\n?', raw)
+                or int(raw) > 2 ** 63 - 1):
+            raise TransactionError('Invalid legacy installer sequence metadata; preserve it for review')
+    finally:
+        if fd >= 0: os.close(fd)
+        os.close(parent)
+
+
 def pending(root):
     if not root.exists(): return []
     fd = directory(root)
@@ -176,6 +308,9 @@ def pending(root):
     if len(names) > 100: raise TransactionError('Installer evidence directory needs administrator archival')
     result = []
     for name in sorted(names):
+        if name == 'transaction-sequence':
+            legacy_sequence(root)
+            continue
         if not NAME.fullmatch(name): raise TransactionError('Unknown installer evidence directory: ' + name)
         value = state(root / name)
         if value['phase'] not in TERMINAL: result.append(value)
@@ -196,8 +331,9 @@ def clean_completed_evidence(value):
             atomic(path / 'transaction.json', value)
             names = ['transaction.json']
         fixed = {'transaction.json', 'installer.sh', 'package.tgz', 'release-manifest.json',
-                 'release-manifest.sig', 'bootstrap', 'approval', 'config.snapshot', 'pending.snapshot'}
-        if any(name not in fixed and not re.fullmatch(r'sls-mass-notify-recovery\.[A-Za-z0-9]{6,12}', name) for name in names):
+                 'release-manifest.sig', 'bootstrap', 'approval', 'config.snapshot', 'pending.snapshot',
+                 'history-evidence.json'}
+        if any(name not in fixed and not re.fullmatch(r'(?:sls-mass-notify-recovery|recovery-carrier)\.[A-Za-z0-9]{6,12}', name) for name in names):
             raise TransactionError('A completed installer generation has unknown evidence; preserve it for administrator review: ' + str(path))
         for name in names:
             if name == 'transaction.json': continue
@@ -212,9 +348,9 @@ def clean_completed_evidence(value):
 
 
 def begin(root):
-    if pending(root): raise TransactionError('An unfinished SLS installation must be recovered before a new installation')
+    if pending(root): raise TransactionError('An unfinished SLL installation must be recovered before a new installation')
     if root.exists():
-        completed = sorted((state(path) for path in root.iterdir()), key=lambda row: row['updated_at'])
+        completed = sorted((state(path) for path in root.iterdir() if NAME.fullmatch(path.name)), key=lambda row: row['updated_at'])
         for value in completed:
             clean_completed_evidence(value)
         for value in completed[:-20]:
@@ -354,4 +490,4 @@ def main():
 if __name__ == '__main__':
     try: raise SystemExit(main())
     except (TransactionError, OSError, ValueError, KeyError, tarfile.TarError) as error:
-        raise SystemExit('SLS installer transaction: ' + str(error)) from None
+        raise SystemExit('SLL installer transaction: ' + str(error)) from None

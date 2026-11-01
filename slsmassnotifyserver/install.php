@@ -1,5 +1,5 @@
 <?php
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 if (!defined('FREEPBX_IS_AUTH')) {
 	die('No direct script access allowed');

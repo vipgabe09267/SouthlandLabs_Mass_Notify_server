@@ -19,13 +19,13 @@ trait SlsBetaNotice
             // the warning disappear with the normalization error.
             $settings = $this->loadSettingsFile(self::SETTINGS_JSON);
         } catch (\Throwable $error) {
-            error_log('SLS Mass Notify beta acknowledgment could not be read; the mandatory warning remains active.');
+            error_log('SLL Mass Notify Server beta acknowledgment could not be read; the mandatory warning remains active.');
             return true;
         }
         try {
             return !BetaNotice::acknowledged($settings, $principal['username']);
         } catch (\Throwable $error) {
-            error_log('SLS Mass Notify beta acknowledgment is invalid; the mandatory warning remains active.');
+            error_log('SLL Mass Notify Server beta acknowledgment is invalid; the mandatory warning remains active.');
             return true;
         }
     }

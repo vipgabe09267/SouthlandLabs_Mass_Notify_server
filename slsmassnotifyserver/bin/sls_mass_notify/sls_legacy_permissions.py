@@ -1,8 +1,8 @@
 #!/usr/bin/python3
-"""Tighten recognized legacy SLS files after authenticated upgrade approval.
+"""Tighten recognized legacy SLL files after authenticated upgrade approval.
 
-Only central configuration and its empty mutex can recover known root/service
-ownership. Journals, executable files and encryption keys are never replaced.
+Central configuration, retention mutexes and collector caches can recover known
+root/service ownership. Journals, executable files and encryption keys are never replaced.
 The runtime's authoritative readers remain strict after this bounded migration.
 """
 from __future__ import annotations
@@ -27,14 +27,25 @@ MAX_STATE = 16 * 1024 * 1024
 CONFIG_NAMES = ('mass-notifications.config', 'mass-notifications.pending.config')
 CONFIG_LOCK = 'mass-notifications.config.lock'
 PHONE_HISTORY_MARKER_NAME = '.phone-admission-required'
+PHONE_RETENTION_LOCK = 'phone-history-retention.lock'
 PHONE_HISTORY_MARKER = b'SLS_PHONE_ADMISSION_V1\n'
+WEATHER_HISTORY_MARKER = b'SLS_WEATHER_OUTBOX_V1\n'
+JSON_HISTORY_MARKER = b'SLS_JSON_V1\n'
+COLLECTOR_CACHES = ('phone-collector-heartbeat.json', 'phone-collector-display.json')
+COLLECTOR_LOCKS = tuple(name + '.lock' for name in COLLECTOR_CACHES)
+REPAIRABLE_OWNERS = (*CONFIG_NAMES, CONFIG_LOCK, PHONE_RETENTION_LOCK, *COLLECTOR_LOCKS, *COLLECTOR_CACHES)
 NAMES = ('enterprise-worker.lock', 'announcement-activity.lock', 'mass-notifications.config.lock',
-         'phone-admission.lock', PHONE_HISTORY_MARKER_NAME, 'phone-admission.json', *CONFIG_NAMES)
+         'phone-admission.lock', PHONE_RETENTION_LOCK, PHONE_HISTORY_MARKER_NAME, 'phone-admission.json',
+         *COLLECTOR_LOCKS, *COLLECTOR_CACHES,
+         'weather-delivery.lock', 'weather-delivery.json', *CONFIG_NAMES)
 CONFIG_KEYRING = Path('/etc/sls-mass-notify/config-keys.json')
 DATA = '/var/lib/asterisk/SLS_Mass_Notifications_Plugin'
+RECOVERY_ROOT = '/var/www/html/admin/modules/.sls-mass-notify-recovery'
 MAX_CHOWN = 512 * 1024
 CHOWN_BLOCK = ('\n; BEGIN SLS MASS NOTIFY DATA PERMISSIONS\n[blacklist]\n'
                'directory = ' + DATA + '\n; END SLS MASS NOTIFY DATA PERMISSIONS\n').encode()
+RECOVERY_CHOWN_BLOCK = ('\n; BEGIN SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n[blacklist]\n'
+    'directory = ' + RECOVERY_ROOT + '\n; END SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n').encode()
 
 
 class PermissionRecoveryError(RuntimeError):
@@ -105,6 +116,37 @@ def decoded(raw):
         raise PermissionRecoveryError('Legacy permission recovery JSON is malformed') from None
 
 
+def utf8_size_within(value, maximum):
+    """Reject strings that cannot be represented as canonical UTF-8."""
+    try:
+        return len(value.encode('utf-8')) <= maximum
+    except UnicodeEncodeError:
+        return False
+
+
+def bounded_state_tree(value, depth=0, counter=None):
+    """Apply the runtime journal's structural limits before changing metadata."""
+    counter = [0] if counter is None else counter
+    counter[0] += 1
+    if counter[0] > 100000 or depth > 32:
+        return False
+    if value is None or type(value) in (bool, int, str):
+        return not isinstance(value, str) or utf8_size_within(value, 262144)
+    if type(value) is float:
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return len(value) <= 10000 and all(
+            bounded_state_tree(item, depth + 1, counter) for item in value
+        )
+    if isinstance(value, dict):
+        return len(value) <= 10000 and all(
+            isinstance(key, str) and utf8_size_within(key, 4096)
+            and bounded_state_tree(item, depth + 1, counter)
+            for key, item in value.items()
+        )
+    return False
+
+
 def approved(path, account):
     parent = directory(Path(path).parent, account, protected=True)
     try:
@@ -168,6 +210,60 @@ def checked_phone_state(raw):
                 raise PermissionRecoveryError('Legacy phone admission channel record is malformed')
 
 
+def checked_weather_state(raw):
+    state = decoded(raw)
+    if (not isinstance(state, dict) or type(state.get('schema')) is not int or state['schema'] != 1
+            or set(state) - {'schema', 'jobs', 'snapshots', 'dispatch_metrics'}
+            or not isinstance(state.get('jobs'), dict) or len(state['jobs']) > 5000
+            or not isinstance(state.get('snapshots'), dict) or len(state['snapshots']) > 64
+            or not bounded_state_tree(state)):
+        raise PermissionRecoveryError('Legacy Weather delivery journal has an invalid structure')
+    valid_states = {'queued', 'running', 'complete', 'uncertain', 'failed', 'expired', 'cancelled'}
+    for identifier, job in state['jobs'].items():
+        if (not re.fullmatch(r'[a-f0-9]{64}', str(identifier)) or not isinstance(job, dict)
+                or job.get('service') not in {'nws', 'lightning'}
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', str(job.get('group_id', '')))
+                or not isinstance(job.get('key'), str) or not 0 < len(job['key']) <= 4096
+                or job.get('state') not in valid_states
+                or any(name not in job for name in ('created_at', 'updated_at', 'priority'))
+                or ('payload' in job and not isinstance(job['payload'], dict))
+                or ('deadline_missed' in job and type(job['deadline_missed']) is not bool)):
+            raise PermissionRecoveryError('Legacy Weather delivery record is malformed')
+        for name in ('created_at', 'updated_at', 'started_at', 'deadline_at', 'deduplicate_until',
+                     'queue_age_seconds', 'worker_start_ticks'):
+            if name in job and not finite_nonnegative(job[name]):
+                raise PermissionRecoveryError('Legacy Weather delivery timing record is malformed')
+        if job['state'] in {'queued', 'running'} and not isinstance(job.get('payload'), dict):
+            raise PermissionRecoveryError('Legacy active Weather delivery payload is malformed')
+        if (not isinstance(job['priority'], list) or len(job['priority']) != 2
+                or any(not finite_nonnegative(value) for value in job['priority'])):
+            raise PermissionRecoveryError('Legacy Weather delivery priority is malformed')
+        if 'worker_pid' in job and (type(job['worker_pid']) is not int or job['worker_pid'] <= 0):
+            raise PermissionRecoveryError('Legacy Weather delivery worker record is malformed')
+        if 'claim_token' in job and not re.fullmatch(r'[a-f0-9]{32}', str(job['claim_token'])):
+            raise PermissionRecoveryError('Legacy Weather delivery worker record is malformed')
+    for group_id, snapshot in state['snapshots'].items():
+        if (not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', str(group_id)) or not isinstance(snapshot, dict)
+                or set(snapshot) != {'zone', 'observed_at', 'active'}
+                or not isinstance(snapshot.get('active'), dict) or len(snapshot['active']) > 2000
+                or not finite_nonnegative(snapshot.get('observed_at'))
+                or not isinstance(snapshot.get('zone', ''), str) or len(snapshot.get('zone', '')) > 32
+                or any(not isinstance(key, str) or len(key) > 4096 or not isinstance(value, dict)
+                       for key, value in snapshot['active'].items())):
+            raise PermissionRecoveryError('Legacy Weather observation record is malformed')
+    metrics = state.get('dispatch_metrics')
+    if metrics is not None:
+        expected = {'updated_at', 'max_workers', 'running', 'oldest_queued_age_seconds',
+                    'oldest_running_age_seconds', 'deadline_misses'}
+        if (not isinstance(metrics, dict) or set(metrics) != expected
+                or not finite_nonnegative(metrics['updated_at'])
+                or any(type(metrics[name]) is not int or metrics[name] < 0
+                       for name in ('max_workers', 'running', 'deadline_misses'))
+                or not finite_nonnegative(metrics['oldest_queued_age_seconds'])
+                or not finite_nonnegative(metrics['oldest_running_age_seconds'])):
+            raise PermissionRecoveryError('Legacy Weather dispatch metrics are malformed')
+
+
 def finite_nonnegative(value):
     try:
         return type(value) in (int, float) and math.isfinite(value) and value >= 0
@@ -199,20 +295,44 @@ def checked_configuration(raw):
         raise PermissionRecoveryError('Central configuration could not be authenticated; preserve its original file and encryption keys for review') from None
 
 
+def checked_collector_cache(raw, name):
+    state = decoded(raw)
+    common = {'schema', 'boot_id', 'heartbeat_tick'}
+    expected = common | ({'generation', 'anchor_tick'} if name == COLLECTOR_CACHES[0]
+                         else {'connected', 'updated_at', 'active_batches', 'reserved_contacts'})
+    if (not isinstance(state, dict) or set(state) != expected or type(state.get('schema')) is not int
+            or state['schema'] != 1 or not valid_utf8_text(state.get('boot_id'), 256, forbid_space=True)
+            or not finite_nonnegative(state.get('heartbeat_tick'))):
+        raise PermissionRecoveryError('Legacy collector cache is malformed: ' + name)
+    if name == COLLECTOR_CACHES[0]:
+        valid = (isinstance(state['generation'], str) and re.fullmatch(r'[a-f0-9]{32}', state['generation'])
+                 and finite_nonnegative(state['anchor_tick']))
+    else:
+        valid = (state['connected'] is True
+                 and all(type(state[key]) is int and state[key] >= 0
+                         for key in ('updated_at', 'active_batches', 'reserved_contacts')))
+    if not valid:
+        raise PermissionRecoveryError('Legacy collector cache is malformed: ' + name)
+
+
 def checked_file(fd, name, account):
     info = os.fstat(fd)
-    configuration = name in (*CONFIG_NAMES, CONFIG_LOCK)
-    owner_ok = (info.st_uid in (0, account.pw_uid) and info.st_gid in (0, account.pw_gid)) if configuration else (
+    repairable_owner = name in REPAIRABLE_OWNERS
+    owner_ok = (info.st_uid in (0, account.pw_uid) and info.st_gid in (0, account.pw_gid)) if repairable_owner else (
         info.st_uid == account.pw_uid and info.st_gid == account.pw_gid)
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or not owner_ok
             or stat.S_IMODE(info.st_mode) not in (0o600, 0o640, 0o644)):
         raise PermissionRecoveryError(
-            f'Unsafe SLS file {name}: uid={info.st_uid}, gid={info.st_gid}, '
+            f'Unsafe SLL file {name}: uid={info.st_uid}, gid={info.st_gid}, '
             f'mode={stat.S_IMODE(info.st_mode):04o}, links={info.st_nlink}. '
             'Only single-link regular files with recognized root/service configuration ownership '
             'or matching Asterisk runtime ownership can be recovered.')
-    if name.endswith('.lock') and info.st_size != 0:
-        raise PermissionRecoveryError('Legacy worker/admission lock is not the recognized empty layout: ' + name)
+    if name.endswith('.lock'):
+        expected_size = len(WEATHER_HISTORY_MARKER) if name == 'weather-delivery.lock' else 0
+        valid_size = (0 <= info.st_size <= len(JSON_HISTORY_MARKER) if name in COLLECTOR_LOCKS
+                      else info.st_size in ({0, expected_size} if name == 'weather-delivery.lock' else {0}))
+        if not valid_size:
+            raise PermissionRecoveryError('Legacy worker/admission lock is not a recognized layout: ' + name)
     return info
 
 
@@ -269,12 +389,12 @@ def repair(data, approval, *, timeout=120):
         parent = directory(data, account)
     except FileNotFoundError:
         if previous:
-            raise PermissionRecoveryError('Previously installed SLS data directory is missing; preserve recovery evidence') from None
+            raise PermissionRecoveryError('Previously installed SLL data directory is missing; preserve recovery evidence') from None
         missing_parent = directory(Path(data).parent, account)
         try:
             try: os.stat(Path(data).name, dir_fd=missing_parent, follow_symlinks=False)
             except FileNotFoundError: return {'ok': True, 'repaired_files': [], 'preserved_files': 0, 'fresh_install': True}
-            raise PermissionRecoveryError('SLS data directory appeared during fresh-install inspection')
+            raise PermissionRecoveryError('SLL data directory appeared during fresh-install inspection')
         finally: os.close(missing_parent)
     files = []
     created = []
@@ -282,7 +402,7 @@ def repair(data, approval, *, timeout=120):
         info = os.fstat(parent)
         if (info.st_uid != account.pw_uid or info.st_gid != account.pw_gid
                 or stat.S_IMODE(info.st_mode) not in (0o700, 0o750, 0o755)):
-            raise PermissionRecoveryError('Legacy SLS data directory has unsafe ownership or permissions')
+            raise PermissionRecoveryError('Legacy SLL data directory has unsafe ownership or permissions')
         parent_identity = info.st_dev, info.st_ino
         deadline = time.monotonic() + timeout
         for name in NAMES:
@@ -304,8 +424,19 @@ def repair(data, approval, *, timeout=120):
                     try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
-                            raise PermissionRecoveryError('Legacy SLS lock is active; stop the verified worker before repair: ' + name) from None
+                            raise PermissionRecoveryError('Legacy SLL lock is active; stop the verified worker before repair: ' + name) from None
                         time.sleep(.05)
+                if name == 'weather-delivery.lock':
+                    marker = read(fd, len(WEATHER_HISTORY_MARKER))
+                    if marker not in (b'', WEATHER_HISTORY_MARKER):
+                        raise PermissionRecoveryError('Legacy Weather history marker is malformed')
+                elif name in COLLECTOR_LOCKS:
+                    if not JSON_HISTORY_MARKER.startswith(read(fd, len(JSON_HISTORY_MARKER))):
+                        raise PermissionRecoveryError('Legacy collector mutex marker is malformed')
+                # An in-flight writer can finish its initial marker while we
+                # wait. Retain the identity observed after owning its mutex.
+                info = checked_file(fd, name, account)
+                files[-1] = (name, fd, identity(info))
             elif name == PHONE_HISTORY_MARKER_NAME:
                 if not any(entry[0] == 'phone-admission.lock' for entry in files):
                     raise PermissionRecoveryError('Existing phone history marker is missing its permanent lock; preserve it for reviewed recovery')
@@ -316,11 +447,19 @@ def repair(data, approval, *, timeout=120):
                 if not any(entry[0] == 'phone-admission.lock' for entry in files):
                     raise PermissionRecoveryError('Existing phone admission journal is missing its permanent lock; preserve it for reviewed recovery')
                 checked_phone_state(read(fd, MAX_STATE))
+            elif name == 'weather-delivery.json':
+                if not any(entry[0] == 'weather-delivery.lock' for entry in files):
+                    raise PermissionRecoveryError('Existing Weather journal is missing its permanent lock; preserve it for reviewed recovery')
+                checked_weather_state(read(fd, MAX_STATE))
+            elif name in COLLECTOR_CACHES:
+                if not any(entry[0] == name + '.lock' for entry in files):
+                    raise PermissionRecoveryError('Existing collector cache is missing its permanent lock; preserve it for reviewed recovery')
+                checked_collector_cache(read(fd, 1024), name)
             else:
                 if not any(entry[0] == CONFIG_LOCK for entry in files):
                     raise PermissionRecoveryError('Existing central configuration is missing its permanent lock; preserve it for reviewed recovery')
                 checked_configuration(read(fd, 3 * 1024 * 1024))
-            if stat.S_IMODE(info.st_mode) == 0o644 and not previous and name not in (*CONFIG_NAMES, CONFIG_LOCK):
+            if stat.S_IMODE(info.st_mode) == 0o644 and not previous and name not in (*CONFIG_NAMES, CONFIG_LOCK, PHONE_RETENTION_LOCK):
                 raise PermissionRecoveryError('Legacy file migration requires authenticated previous-release approval: ' + name)
         # Inspect every recognized file before any permission change. Never
         # replace a locked inode or rewrite a journal merely to repair its mode.
@@ -328,18 +467,18 @@ def repair(data, approval, *, timeout=120):
         try:
             current_parent = os.fstat(live)
             if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
-                raise PermissionRecoveryError('Legacy SLS data directory changed before repair')
+                raise PermissionRecoveryError('Legacy SLL data directory changed before repair')
         finally: os.close(live)
         for name, fd, original in files:
             current = os.stat(name, dir_fd=parent, follow_symlinks=False)
             if identity(current) != original or identity(os.fstat(fd)) != original:
-                raise PermissionRecoveryError('Legacy SLS file changed before repair: ' + name)
+                raise PermissionRecoveryError('Legacy SLL file changed before repair: ' + name)
         changed = []
         for name, fd, original in files:
             current = os.fstat(fd)
             if identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != original or identity(current) != original:
-                raise PermissionRecoveryError('Legacy SLS file name changed during repair: ' + name)
-            needs_owner = name in (*CONFIG_NAMES, CONFIG_LOCK) and (current.st_uid, current.st_gid) != (account.pw_uid, account.pw_gid)
+                raise PermissionRecoveryError('Legacy SLL file name changed during repair: ' + name)
+            needs_owner = name in REPAIRABLE_OWNERS and (current.st_uid, current.st_gid) != (account.pw_uid, account.pw_gid)
             needs_mode = stat.S_IMODE(current.st_mode) == 0o644 or needs_owner and stat.S_IMODE(current.st_mode) != 0o640
             if needs_owner:
                 os.fchown(fd, account.pw_uid, account.pw_gid)
@@ -355,7 +494,7 @@ def repair(data, approval, *, timeout=120):
         try:
             current_parent = os.fstat(live)
             if (current_parent.st_dev, current_parent.st_ino) != parent_identity:
-                raise PermissionRecoveryError('Legacy SLS data directory changed during repair; review the preserved files')
+                raise PermissionRecoveryError('Legacy SLL data directory changed during repair; review the preserved files')
         finally: os.close(live)
         return {'ok': True, 'repaired_files': changed, 'created_files': created, 'preserved_files': len(files)}
     finally:
@@ -363,8 +502,13 @@ def repair(data, approval, *, timeout=120):
         os.close(parent)
 
 
-def chown_transform(raw):
+def chown_transform(raw, *, scope='data'):
     """Use the native LoadConfig section/repeated-key contract; keep original bytes."""
+    if scope not in ('data', 'recovery'):
+        raise PermissionRecoveryError('Unknown SLL ownership exclusion scope')
+    target = DATA if scope == 'data' else RECOVERY_ROOT
+    block = CHOWN_BLOCK if scope == 'data' else RECOVERY_CHOWN_BLOCK
+    label = 'DATA' if scope == 'data' else 'MODULE RECOVERY'
     if len(raw) > MAX_CHOWN or b'\x00' in raw:
         raise PermissionRecoveryError('FreePBX chown configuration is oversized or malformed')
     try: text = raw.decode('utf-8')
@@ -397,19 +541,26 @@ def chown_transform(raw):
         key, value = entry[1].strip(), entry[2].strip().replace('\\;', ';')
         if section == 'blacklist' and key == 'directory':
             path = value.rstrip('/')
-            if path == DATA or DATA.startswith(path + '/') and path.startswith('/'):
+            if path == target or target.startswith(path + '/') and path.startswith('/'):
                 excluded = True
         if section == 'custom' and key in ('file', 'dir', 'rdir', 'execdir'):
             path = value.split(',', 1)[0].strip().rstrip('/')
-            if path == DATA or path.startswith(DATA + '/'):
-                raise PermissionRecoveryError('A custom SLS data permission directive conflicts with the managed exclusion')
+            if path == target or path.startswith(target + '/'):
+                raise PermissionRecoveryError('A custom SLL data permission directive conflicts with the managed exclusion')
     if in_block:
         raise PermissionRecoveryError('FreePBX chown configuration has an unterminated comment block')
-    markers = (b'BEGIN SLS MASS NOTIFY DATA PERMISSIONS', b'END SLS MASS NOTIFY DATA PERMISSIONS')
-    if any(marker in raw for marker in markers) and (raw.count(CHOWN_BLOCK) != 1 or any(raw.count(marker) != 1 for marker in markers)):
-        raise PermissionRecoveryError('An incomplete SLS chown exclusion requires review')
+    markers = tuple((word + ' SLS MASS NOTIFY ' + label + ' PERMISSIONS').encode() for word in ('BEGIN', 'END'))
+    if any(marker in raw for marker in markers) and (raw.count(block) != 1 or any(raw.count(marker) != 1 for marker in markers)):
+        raise PermissionRecoveryError('An incomplete SLL chown exclusion requires review')
+    # Legacy uninstallers remove their canonical trailing DATA block. Put only
+    # our new fixed infrastructure block before it; never move administrator
+    # directives or require the restored runtime to understand a new suffix.
+    if scope == 'recovery' and raw.endswith(CHOWN_BLOCK + RECOVERY_CHOWN_BLOCK):
+        return raw[:-len(CHOWN_BLOCK + RECOVERY_CHOWN_BLOCK)] + RECOVERY_CHOWN_BLOCK + CHOWN_BLOCK
     if excluded: return raw
-    return raw + CHOWN_BLOCK
+    if scope == 'recovery' and raw.endswith(CHOWN_BLOCK):
+        return raw[:-len(CHOWN_BLOCK)] + RECOVERY_CHOWN_BLOCK + CHOWN_BLOCK
+    return raw + block
 
 
 def config_read(parent, name, account):
@@ -451,7 +602,7 @@ def write_atomic(parent, path, body, uid, gid, mode, expected, account):
     try:
         os.fchown(fd, 0, 0); os.fchmod(fd, 0o600)
         with os.fdopen(fd, 'wb', closefd=False) as handle:
-            if handle.write(body) != len(body): raise PermissionRecoveryError('SLS chown protection write was incomplete')
+            if handle.write(body) != len(body): raise PermissionRecoveryError('SLL chown protection write was incomplete')
             handle.flush(); os.fsync(fd)
         current_parent(parent, path.parent, account)
         current_name(parent, name, expected)
@@ -489,25 +640,29 @@ def snapshot_read(path, account):
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0 or info.st_gid != 0
                     or stat.S_IMODE(info.st_mode) != 0o600):
-                raise PermissionRecoveryError('SLS chown recovery snapshot is unsafe')
+                raise PermissionRecoveryError('SLL chown recovery snapshot is unsafe')
             return decoded(read(fd, 2 * MAX_CHOWN))
         finally: os.close(fd)
     finally: os.close(parent)
 
 
-def protect_chown(path, snapshot, approval):
-    if os.geteuid() != 0: raise PermissionRecoveryError('SLS chown protection requires root')
+def protect_chown(path, snapshot, approval, *, scope='data'):
+    if os.geteuid() != 0: raise PermissionRecoveryError('SLL chown protection requires root')
     account = pwd.getpwnam('asterisk'); path = Path(path)
     approved(approval, account)
     parent = directory(path.parent, account)
     try:
         original, info = config_read(parent, path.name, account)
-        installed = chown_transform(original or b'')
+        # Inspect the runtime block before adding permanent installer metadata.
+        # Existing runtime snapshots retain their original transformation bytes.
+        if scope == 'recovery': chown_transform(original or b'')
+        installed = chown_transform(original or b'', scope=scope)
         record = {'schema': 1, 'path': str(path), 'existed': original is not None,
                   'original_base64': base64.b64encode(original or b'').decode(),
                   'uid': info.st_uid if info else 0, 'gid': info.st_gid if info else 0,
                   'mode': stat.S_IMODE(info.st_mode) if info else 0o644,
                   'installed_sha256': hashlib.sha256(installed).hexdigest(), 'changed': installed != original}
+        if scope == 'recovery': record['scope'] = 'recovery'
         snapshot_write(snapshot, record, account)
         current, current_info = config_read(parent, path.name, account)
         if current != original or (info is not None and identity(current_info) != identity(info)):
@@ -519,22 +674,24 @@ def protect_chown(path, snapshot, approval):
 
 
 def restore_chown(path, snapshot):
-    if os.geteuid() != 0: raise PermissionRecoveryError('SLS chown recovery requires root')
+    if os.geteuid() != 0: raise PermissionRecoveryError('SLL chown recovery requires root')
     account = pwd.getpwnam('asterisk'); path = Path(path)
     record = snapshot_read(snapshot, account)
+    if isinstance(record, dict) and record.get('scope', 'data') != 'data':
+        raise PermissionRecoveryError('Module recovery ownership protection is retained with installer evidence; it is not a runtime rollback snapshot')
     if (not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] != 1 or record.get('path') != str(path)
             or type(record.get('existed')) is not bool or type(record.get('changed')) is not bool
             or record.get('uid') not in (0, account.pw_uid) or record.get('gid') not in (0, account.pw_gid)
             or record.get('mode') not in (0o600, 0o640, 0o644, 0o660, 0o664)):
-        raise PermissionRecoveryError('SLS chown recovery snapshot is malformed')
+        raise PermissionRecoveryError('SLL chown recovery snapshot is malformed')
     try: original = base64.b64decode(record['original_base64'], validate=True)
     except (KeyError, ValueError, TypeError):
-        raise PermissionRecoveryError('SLS chown recovery snapshot contents are malformed') from None
+        raise PermissionRecoveryError('SLL chown recovery snapshot contents are malformed') from None
     if len(original) > MAX_CHOWN or hashlib.sha256(chown_transform(original)).hexdigest() != record.get('installed_sha256'):
-        raise PermissionRecoveryError('SLS chown recovery snapshot transformation is invalid')
+        raise PermissionRecoveryError('SLL chown recovery snapshot transformation is invalid')
     if (not record['existed'] and original or record['changed'] != (chown_transform(original) != original)
             or not record['existed'] and (record['uid'], record['gid'], record['mode']) != (0, 0, 0o644)):
-        raise PermissionRecoveryError('SLS chown recovery snapshot state is inconsistent')
+        raise PermissionRecoveryError('SLL chown recovery snapshot state is inconsistent')
     parent = directory(path.parent, account)
     try:
         current, info = config_read(parent, path.name, account)
@@ -555,15 +712,19 @@ def restore_chown(path, snapshot):
 
 
 def remove_chown(path):
-    if os.geteuid() != 0: raise PermissionRecoveryError('SLS chown removal requires root')
+    if os.geteuid() != 0: raise PermissionRecoveryError('SLL chown removal requires root')
     account = pwd.getpwnam('asterisk'); path = Path(path); parent = directory(path.parent, account)
     try:
         body, info = config_read(parent, path.name, account)
         if body is None or b'BEGIN SLS MASS NOTIFY DATA PERMISSIONS' not in body:
             return {'ok': True, 'changed': False}
-        if not body.endswith(CHOWN_BLOCK) or body.count(CHOWN_BLOCK) != 1:
-            raise PermissionRecoveryError('The managed SLS exclusion was edited or followed by administrator changes; review before removing it')
-        write_atomic(parent, path, body[:-len(CHOWN_BLOCK)], info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), info, account)
+        suffix = b''
+        if body.endswith(RECOVERY_CHOWN_BLOCK) and body.count(RECOVERY_CHOWN_BLOCK) == 1:
+            suffix = RECOVERY_CHOWN_BLOCK
+        runtime_body = body[:-len(suffix)] if suffix else body
+        if not runtime_body.endswith(CHOWN_BLOCK) or body.count(CHOWN_BLOCK) != 1:
+            raise PermissionRecoveryError('The managed SLL exclusion was edited or followed by administrator changes; review before removing it')
+        write_atomic(parent, path, runtime_body[:-len(CHOWN_BLOCK)] + suffix, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), info, account)
         return {'ok': True, 'changed': True}
     finally: os.close(parent)
 
@@ -574,17 +735,18 @@ def main():
     parser.add_argument('--approval')
     parser.add_argument('--chown-config', default='/etc/asterisk/freepbx_chown.conf')
     parser.add_argument('--snapshot')
-    parser.add_argument('action', choices=['repair', 'protect-chown', 'restore-chown', 'remove-chown'])
+    parser.add_argument('action', choices=['repair', 'protect-chown', 'protect-recovery-chown', 'restore-chown', 'remove-chown'])
     args = parser.parse_args()
-    if args.action in ('repair', 'protect-chown') and not args.approval: parser.error('this action requires --approval')
-    if args.action in ('protect-chown', 'restore-chown') and not args.snapshot: parser.error('this action requires --snapshot')
+    if args.action in ('repair', 'protect-chown', 'protect-recovery-chown') and not args.approval: parser.error('this action requires --approval')
+    if args.action in ('protect-chown', 'protect-recovery-chown', 'restore-chown') and not args.snapshot: parser.error('this action requires --snapshot')
     try:
         if args.action == 'repair': result = repair(args.data, args.approval)
         elif args.action == 'protect-chown': result = protect_chown(args.chown_config, args.snapshot, args.approval)
+        elif args.action == 'protect-recovery-chown': result = protect_chown(args.chown_config, args.snapshot, args.approval, scope='recovery')
         elif args.action == 'restore-chown': result = restore_chown(args.chown_config, args.snapshot)
         else: result = remove_chown(args.chown_config)
     except (OSError, KeyError, PermissionRecoveryError) as error:
-        print('SLS legacy permission recovery: ' + str(error), file=sys.stderr)
+        print('SLL legacy permission recovery: ' + str(error), file=sys.stderr)
         return 1
     print(json.dumps(result, separators=(',', ':')))
     return 0

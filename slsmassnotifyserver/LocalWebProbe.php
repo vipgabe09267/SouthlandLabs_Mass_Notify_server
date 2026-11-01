@@ -40,12 +40,47 @@ final class SlsLocalWebProbe
 			$status = 1;
 			@exec('/usr/bin/timeout 5 /usr/sbin/apache2ctl -t -D DUMP_VHOSTS 2>/dev/null', $output, $status);
 			$vhostDump = $status === 0 ? implode("\n", $output) : '';
+			// Apache's compact, single-vhost rows omit ServerAlias entirely.
+			// Add a synthetic vhost only to a second configuration-test command
+			// so Apache renders the native aliases. No files, listeners or running
+			// service are changed; caller hostnames never enter the command.
+			$bindings = [];
+			if ($validHost) {
+				foreach (explode("\n", substr($vhostDump, 0, 262144)) as $line) {
+					if (!preg_match('/^\s*(\*|[0-9.]+|\[[0-9a-f:]+\]):([0-9]+)\s+([^\s(]+)\s+\(/i', $line, $match)) { continue; }
+					$port = (int)$match[2];
+					if ($port < 1 || $port > 65535 || in_array($port, [80,443], true)
+						|| strtolower($match[3]) === $publicHost || count($bindings) >= 16) { continue; }
+					$bindings[$match[1] . ':' . $port] = true;
+				}
+			}
+			if ($bindings) {
+				$command = '/usr/bin/timeout 5 /usr/sbin/apache2ctl -t -D DUMP_VHOSTS';
+				foreach (array_keys($bindings) as $binding) {
+					foreach (['<VirtualHost ' . $binding . '>', 'ServerName _sls_local_vhost_discovery.invalid', '</VirtualHost>'] as $directive) {
+						$command .= ' -c ' . escapeshellarg($directive);
+					}
+				}
+				$expanded = []; $expandedStatus = 1;
+				@exec($command . ' 2>/dev/null', $expanded, $expandedStatus);
+				if ($expandedStatus === 0) { $vhostDump = implode("\n", $expanded); }
+			}
 		}
 			if ($vhostDump !== null && !is_string($vhostDump)) { throw new \InvalidArgumentException('Apache virtual-host inventory must be text.'); }
 			$ports = [80 => ['127.0.0.1'], 443 => ['127.0.0.1']];
 		$preferred = [];
+		$aliasPort = null;
 		foreach (explode("\n", substr((string)$vhostDump, 0, 262144)) as $line) {
-			if (!preg_match('/^\s*(?:(\*|[0-9.]+|\[[0-9a-f:]+\]):([0-9]+)\s+|port\s+([0-9]+)\s+namevhost\b)/i', $line, $match)) {
+			if (preg_match('/^\s+(?:(wild)\s+)?alias\s+([a-z0-9*?.-]{1,253})\s*$/iD', $line, $alias)) {
+				$pattern = strtolower($alias[2]);
+				if ($validHost && $aliasPort !== null
+					&& (($alias[1] ?? '') === '' ? $publicHost === $pattern : fnmatch($pattern, $publicHost))) {
+					$preferred[$aliasPort] = true;
+				}
+				continue;
+			}
+			$aliasPort = null;
+			if (!preg_match('/^\s*(?:(\*|[0-9.]+|\[[0-9a-f:]+\]):([0-9]+)\s+|port\s+([0-9]+)\s+namevhost\s+)([^\s(]+)/i', $line, $match)) {
 				continue;
 			}
 				$port = (int)(($match[2] ?? '') !== '' ? $match[2] : ($match[3] ?? 0));
@@ -53,10 +88,12 @@ final class SlsLocalWebProbe
 				continue;
 			}
 			$ports[$port] = $ports[$port] ?? ['127.0.0.1'];
+			$primary = strtolower($match[4]);
+			if ($primary !== 'is' && $primary !== '_sls_local_vhost_discovery.invalid') { $aliasPort = $port; }
 			if (strpos((string)($match[1] ?? ''), '[') === 0) {
 				$ports[$port] = array_values(array_unique(array_merge($ports[$port], ['::1'])));
 			}
-			if ($validHost && preg_match('/(?:^|\s)' . preg_quote($publicHost, '/') . '(?:\s|$)/i', $line)) {
+			if ($validHost && $primary === $publicHost) {
 				$preferred[$port] = true;
 			}
 		}

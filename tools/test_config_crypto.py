@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,84 @@ class ConfigCryptoTest(unittest.TestCase):
         path.write_bytes(contents)
         path.chmod(0o640)
         return path
+
+    def php_read_with_change(self, *, when='read', change='replace', count=1, keyring=False, touch_atime=False):
+        previous=self.data/'atomic-reader.config'
+        if previous.exists() or previous.is_symlink():previous.unlink()
+        path=self.private_file('atomic-reader.config',self.sealed)
+        latest={**self.settings,'revision':2}
+        replacements=[]
+        for index in range(count):
+            body=self.keyring.read_bytes() if keyring else crypto.encode_config({**latest,'revision':2+index},self.keyring)
+            replacements.append(str(self.private_file('replacement-'+str(index),body)))
+            if touch_atime:
+                replacement=Path(replacements[-1]);stamp=replacement.stat().st_mtime
+                os.utime(replacement,(stamp-86400,stamp))
+        target=self.keyring if keyring else path
+        fixture=r'''
+namespace FreePBX\modules {
+ function lstat($path){
+  if($path===getenv('SLS_CRYPTO_CHANGE_TARGET') && getenv('SLS_CRYPTO_TOUCH_ATIME')==='1'
+     && ($GLOBALS['fixture_changes']??0)>0 && !($GLOBALS['fixture_atime_touched']??false)){
+   $GLOBALS['fixture_atime_touched']=true;$handle=\fopen($path,'rb');\fread($handle,1);\fclose($handle);\clearstatcache(true,$path);
+  }
+  return \lstat($path);
+ }
+ function fixtureChange($path) {
+  if($path!==getenv('SLS_CRYPTO_CHANGE_TARGET'))return;
+  $count=$GLOBALS['fixture_changes']??0;$paths=json_decode(getenv('SLS_CRYPTO_REPLACEMENTS'),true);
+  if($count>=count($paths))return;
+  $GLOBALS['fixture_changes']=$count+1;
+  switch(getenv('SLS_CRYPTO_CHANGE_KIND')){
+   case 'replace': if(!\rename($paths[$count],$path))throw new \RuntimeException('Fixture rename failed');break;
+   case 'inplace': \file_put_contents($path,' ',FILE_APPEND);break;
+   case 'symlink': \unlink($path);\symlink($paths[$count],$path);break;
+   case 'public': \chmod($paths[$count],0666);\rename($paths[$count],$path);break;
+   default:throw new \RuntimeException('Unexpected fixture change');
+  }
+ }
+ function fopen($path,$mode,...$rest){
+  if(getenv('SLS_CRYPTO_CHANGE_WHEN')==='open')fixtureChange($path);
+  return \fopen($path,$mode,...$rest);
+ }
+ function stream_get_contents($stream,...$rest){
+  $value=\stream_get_contents($stream,...$rest);
+  if(getenv('SLS_CRYPTO_CHANGE_WHEN')==='read')fixtureChange(\stream_get_meta_data($stream)['uri']);
+  return $value;
+ }
+}
+namespace {
+ require $argv[1];
+ try{$value=\FreePBX\modules\SlsConfigCrypto::readFile($argv[2],$argv[3],false);$reply=['ok'=>true,'result'=>$value];}
+ catch(\Throwable $error){$reply=['ok'=>false,'message'=>$error->getMessage()];}
+ $reply['changes']=$GLOBALS['fixture_changes']??0;echo json_encode($reply,JSON_THROW_ON_ERROR);
+}
+'''
+        result=subprocess.run(['php','-r',fixture,str(PHP_FILE),str(path),str(self.keyring)],capture_output=True,text=True,timeout=5,
+            env={**os.environ,'SLS_CRYPTO_CHANGE_TARGET':str(target),'SLS_CRYPTO_CHANGE_KIND':change,
+                 'SLS_CRYPTO_CHANGE_WHEN':when,'SLS_CRYPTO_REPLACEMENTS':json.dumps(replacements),
+                 'SLS_CRYPTO_TOUCH_ATIME':'1' if touch_atime else '0'})
+        self.assertEqual((result.returncode,result.stderr),(0,''));return json.loads(result.stdout),latest
+
+    def test_php_valid_atomic_configuration_replacement_returns_the_new_authenticated_snapshot(self):
+        for when in ('open','read'):
+            with self.subTest(when=when):
+                value,latest=self.php_read_with_change(when=when)
+                self.assertTrue(value['ok'],value)
+                self.assertEqual(value['result'],latest);self.assertEqual(value['changes'],1)
+
+    def test_php_atomic_open_retry_ignores_unrelated_access_time_updates(self):
+        value,latest=self.php_read_with_change(when='open',touch_atime=True)
+        self.assertTrue(value['ok'],value);self.assertEqual(value['result'],latest)
+
+    def test_php_configuration_retry_is_bounded_and_never_accepts_inplace_or_unsafe_changes(self):
+        for change,count in (('replace',2),('inplace',1),('symlink',1),('public',1)):
+            with self.subTest(change=change):
+                value,_=self.php_read_with_change(change=change,count=count)
+                self.assertFalse(value['ok'],value)
+                self.assertEqual(value['changes'],count)
+        value,_=self.php_read_with_change(keyring=True)
+        self.assertFalse(value['ok'],value);self.assertEqual(value['changes'],1)
 
     def test_cross_language_authenticated_roundtrips(self):
         self.assertEqual(self.php("decode", raw=self.sealed)["result"], self.settings)
@@ -368,6 +447,120 @@ class ConfigCryptoTest(unittest.TestCase):
 
     def test_runtime_php_matches_canonical_source(self):
         self.assertEqual(PHP_FILE.read_bytes(), (RUNTIME / "sls_config_crypto.php").read_bytes())
+
+
+class ConfigCryptoMutexTest(unittest.TestCase):
+    """Maintenance must coordinate on the same trusted, permanent mutex."""
+    private_file = ConfigCryptoTest.private_file
+    tearDown = ConfigCryptoTest.tearDown
+
+    def setUp(self):
+        ConfigCryptoTest.setUp(self)
+        self.account = pwd.getpwnam('asterisk')
+        self.foreign = pwd.getpwnam('nobody')
+
+    def mutex(self, name, uid, gid, body=b'', mode=0o640):
+        path = self.private_file(name, body)
+        os.chown(path, uid, gid)
+        path.chmod(mode)
+        return path
+
+    def snapshot(self, path):
+        value = path.stat()
+        return (value.st_uid, value.st_gid, value.st_mode, value.st_ino, path.read_bytes())
+
+    def test_known_runtime_and_root_mutex_metadata_remains_supported(self):
+        for owner in (0, self.account.pw_uid):
+            for group in (0, self.account.pw_gid):
+                for mode in (0o600, 0o640):
+                    with self.subTest(owner=owner, group=group, mode=oct(mode)):
+                        path = self.mutex('known.lock', owner, group, mode=mode)
+                        inode = path.stat().st_ino
+                        with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+                            pass
+                        self.assertEqual(path.stat().st_ino, inode)
+                        self.assertEqual(path.read_bytes(), b'')
+                        self.assertEqual(path.stat().st_mode & 0o7777, mode)
+                        path.unlink()
+
+    def test_new_runtime_mutex_has_expected_private_identity(self):
+        path = self.data / 'mass-notifications.config.lock'
+        with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+            value = path.stat()
+            self.assertEqual((value.st_uid, value.st_gid), (self.account.pw_uid, self.account.pw_gid))
+            self.assertEqual(value.st_mode & 0o7777, 0o640)
+            self.assertEqual(value.st_size, 0)
+        with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+            self.assertEqual(path.stat().st_ino, value.st_ino)
+
+    def test_foreign_settings_mutex_owner_is_not_adopted_by_maintenance(self):
+        self.mutex('announcement-activity.lock', self.account.pw_uid, self.account.pw_gid)
+        path = self.mutex('mass-notifications.config.lock', self.foreign.pw_uid, self.account.pw_gid)
+        before = self.snapshot(path)
+        with self.assertRaises(crypto.ConfigCryptoError):
+            crypto.maintain(self.data, self.keyring, self.account.pw_uid, self.account.pw_gid, now=self.now)
+        self.assertEqual(self.snapshot(path), before)
+
+    def test_foreign_mutex_group_is_not_adopted(self):
+        path = self.mutex('mass-notifications.config.lock', self.account.pw_uid, self.foreign.pw_gid)
+        before = self.snapshot(path)
+        with self.assertRaises(crypto.ConfigCryptoError):
+            with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+                pass
+        self.assertEqual(self.snapshot(path), before)
+
+    def test_nonempty_settings_mutex_is_not_used(self):
+        path = self.mutex('mass-notifications.config.lock', self.account.pw_uid, self.account.pw_gid, b'not-a-mutex')
+        before = self.snapshot(path)
+        with self.assertRaises(crypto.ConfigCryptoError):
+            with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+                pass
+        self.assertEqual(self.snapshot(path), before)
+
+    def test_busy_legacy_mutex_is_not_reowned_before_acquisition(self):
+        path = self.mutex('mass-notifications.config.lock', 0, 0)
+        before = self.snapshot(path)
+        with path.open('r+b') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):
+                with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+                    pass
+        self.assertEqual(self.snapshot(path), before)
+
+    def test_mutex_replacement_during_flock_is_rejected(self):
+        path = self.mutex('mass-notifications.config.lock', self.account.pw_uid, self.account.pw_gid)
+        previous = path.with_name('retained-original.lock')
+        real_flock = crypto.fcntl.flock
+        swapped = False
+        def replace_before_flock(descriptor, operation):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                path.rename(previous)
+                self.mutex(path.name, self.account.pw_uid, self.account.pw_gid)
+            return real_flock(descriptor, operation)
+        with patch.object(crypto.fcntl, 'flock', side_effect=replace_before_flock):
+            with self.assertRaises(crypto.ConfigCryptoError):
+                with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+                    self.fail('A replaced mutex admitted the critical section.')
+
+    def test_mutex_parent_replacement_during_flock_is_rejected(self):
+        path = self.mutex('mass-notifications.config.lock', self.account.pw_uid, self.account.pw_gid)
+        retained = self.data.with_name('retained-original-data')
+        real_flock = crypto.fcntl.flock
+        swapped = False
+        def replace_before_flock(descriptor, operation):
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                self.data.rename(retained)
+                self.data.mkdir(mode=0o700)
+                self.mutex(path.name, self.account.pw_uid, self.account.pw_gid)
+            return real_flock(descriptor, operation)
+        with patch.object(crypto.fcntl, 'flock', side_effect=replace_before_flock):
+            with self.assertRaises(crypto.ConfigCryptoError):
+                with crypto._lock(path, self.account.pw_uid, self.account.pw_gid):
+                    self.fail('A replaced data directory admitted the critical section.')
 
 
 if __name__ == "__main__":

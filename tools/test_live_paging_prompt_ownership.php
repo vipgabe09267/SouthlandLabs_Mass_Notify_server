@@ -111,7 +111,7 @@ paging_ownership_check(glob(PagingPromptOwnershipFixture::SOUNDS_DIR . '/paging/
 $changedVoice = $settings; $changedVoice['announcement_piper_voice'] = 'changed-voice';
 paging_readiness_rejects(static function () use ($fixture, $changedVoice): void { $fixture->assertReady($changedVoice); }, 'Changed speech voice bypassed paging preparation');
 $files = glob(PagingPromptOwnershipFixture::SOUNDS_DIR . '/paging/*.wav');
-$requiredRoles = ['menu','pin','ready','recording','partial','text_failure','invalid','busy','no_receivers','unavailable','denied'];
+$requiredRoles = ['menu','internal_menu','pin','ready','recording','partial','text_failure','invalid','busy','no_receivers','unavailable','denied','internal_group_1'];
 $promptFiles = \SLS\MassNotify\LivePagingConfig::promptFiles($settings);
 paging_ownership_check(array_keys($promptFiles) === $requiredRoles, 'The complete reviewed prompt roles, including voicemail recording instructions, are missing');
 $expectedCount = count($requiredRoles);

@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace SLS\MassNotify;
 require_once __DIR__.'/OperatorAccess.php';
+require_once __DIR__.'/bin/sls_mass_notify/sls_runtime_state.php';
 
 /** Only portable settings; no transactions, replay IDs or browser cookies. */
 final class EnterpriseIdentityConfig
@@ -133,17 +134,35 @@ final class EnterpriseIdentityConfig
     private static function certificate($cert,?int $now=null): string
     {
         $cert=self::pem($cert,'Signing certificate');$x=openssl_x509_read($cert);$key=$x?openssl_pkey_get_public($x):false;$d=$key?openssl_pkey_get_details($key):false;
-        $parsed=$x?openssl_x509_parse($x,false):false;$now??=time();$usage=is_array($parsed)?($parsed['extensions']['keyUsage']??''):'';
+        $parsed=$x?openssl_x509_parse($x,false):false;$usage=is_array($parsed)?($parsed['extensions']['keyUsage']??''):'';
         if (!$d || $d['type']!==OPENSSL_KEYTYPE_RSA || $d['bits']<2048 || $d['bits']>8192 || !is_array($parsed)
-            || !is_int($parsed['validFrom_time_t']??null)||!is_int($parsed['validTo_time_t']??null)||$parsed['validFrom_time_t']>$now||$parsed['validTo_time_t']<=$now
+            || !is_int($parsed['validFrom_time_t']??null)||!is_int($parsed['validTo_time_t']??null)
+            || ($now!==null&&($parsed['validFrom_time_t']>$now||$parsed['validTo_time_t']<=$now))
             || ($usage!==''&&!preg_match('/(?:^|,)\s*Digital Signature(?:,|$)/i',$usage))) { throw new \DomainException('Pin a currently valid 2048–8192 bit RSA certificate permitted for digital signatures.'); }return $cert;
+    }
+    /** Saved expired certificates remain inspectable, but cannot be enabled again. */
+    public static function assertEnabledCertificates(array $config,?int $now=null): void
+    {
+        $config=self::normalize($config);$now??=time();
+        foreach($config['providers'] as $provider){
+            if(!$provider['enabled']||$provider['protocol']!=='saml'){continue;}
+            foreach($provider['idp_signing_certificates'] as $cert){self::certificate($cert,$now);}
+            self::certificate($provider['sp_certificate'],$now);
+        }
     }
     public static function provider(array $settings,string $id): array
     {
+        \SLS\MassNotify\RuntimeState::requireEnterpriseAvailable($settings);
         $c=self::bindCallbacks(self::normalize($settings['enterprise_identity']??[]),$settings);
         $access=OperatorAccess::normalize($settings['operator_access']??[]);
         if (!$c['enabled'] || !$access['portal_enabled']) { throw new \DomainException('Enterprise operator sign-in is disabled.'); }
-        foreach ($c['providers'] as $p) { if ($p['id']===$id && $p['enabled']) { return $p; } }throw new \DomainException('This enterprise provider is unavailable.');
+        foreach ($c['providers'] as $p) { if ($p['id']===$id && $p['enabled']) {
+            if($p['protocol']==='saml'){
+                foreach($p['idp_signing_certificates'] as $cert){self::certificate($cert,time());}
+                self::certificate($p['sp_certificate'],time());
+            }
+            return $p;
+        } }throw new \DomainException('This enterprise provider is unavailable.');
     }
     public static function revision(array $provider): string { return hash('sha256',json_encode($provider,JSON_THROW_ON_ERROR)); }
     public static function publicConfig(array $config): array

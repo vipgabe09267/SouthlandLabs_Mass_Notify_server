@@ -99,9 +99,9 @@ try {
             }
             echo json_encode($result,JSON_THROW_ON_ERROR),"\n";
         } catch (Throwable $error) {
-            fwrite(STDERR,"SLS cluster worker: cycle fenced: ".slsClusterWorkerError($error)."\n");
+            fwrite(STDERR,"SLL cluster worker: cycle fenced: ".slsClusterWorkerError($error)."\n");
             if (!$watch) { exit(1); }
         }
         if ($watch && $running) { sleep($delay); }
     } while ($watch && $running);
-} catch (Throwable $error) { fwrite(STDERR,"SLS cluster worker: dispatch stopped: ".slsClusterWorkerError($error)."\n"); exit(1); }
+} catch (Throwable $error) { fwrite(STDERR,"SLL cluster worker: dispatch stopped: ".slsClusterWorkerError($error)."\n"); exit(1); }

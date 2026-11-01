@@ -1,12 +1,12 @@
 # Security policy
 
-SLS Mass Notifications is beta software for noncritical testing. It is not an emergency or life-safety service. Restrict administration, keep the host patched and qualify changes on a separate test PBX.
+SLL Mass Notify Server is beta software for noncritical testing. It is not an emergency or life-safety service. Restrict administration, keep the host patched and qualify changes on a separate test PBX.
 
 ## Reporting a vulnerability
 
-Report sensitive issues through [GitHub Private Vulnerability Reporting](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/security/advisories/new). That report is visible only to the repository's security collaborators. If that channel is unavailable, email `gabe09267@gmail.com` with a short, redacted description and ask for an encrypted transfer method before sending logs or attachments. Do not use the public Discord server for sensitive reports. Nonsensitive defects can be reported in [GitHub issues](https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/issues).
+Report sensitive issues through [GitHub Private Vulnerability Reporting](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/security/advisories/new). That report is visible only to the repository's security collaborators. If that channel is unavailable, email `gabe09267@gmail.com` with a short, redacted description and ask for an encrypted transfer method before sending logs or attachments. Do not use the public Discord server for sensitive reports. Nonsensitive defects can be reported in [GitHub issues](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/issues).
 
-Include the SLS, FreePBX and Asterisk versions, affected interface, reproduction steps and redacted evidence. Authentication bypass, unauthorized sending, arbitrary file writes, command execution and restore-integrity failures require prompt review. The project aims to acknowledge reports and publish fixes when practical; no response-time guarantee is offered.
+Include the SLL, FreePBX and Asterisk versions, affected interface, reproduction steps and redacted evidence. Authentication bypass, unauthorized sending, arbitrary file writes, command execution and restore-integrity failures require prompt review. The project aims to acknowledge reports and publish fixes when practical; no response-time guarantee is offered.
 
 Do not publish configuration, API keys, passwords, authenticator seeds, AMI credentials, provider tokens, signing keys, reset links or private alert content. The [redacted support report](docs/DEPLOYMENT_READINESS.md) is separate from a sensitive configuration backup.
 
@@ -14,11 +14,13 @@ Do not publish configuration, API keys, passwords, authenticator seeds, AMI cred
 
 Security fixes target the latest published prerelease, currently `0.1.8-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
 
+The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected candidate retains version `0.1.9-beta` and remains unpublished pending owner acceptance.
+
 Corrections receive a new version and signed assets. The updater does not replace equal versions. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
 
 ## Administrative and authentication boundaries
 
-FreePBX administration and the SLS operator portal have separate authentication. SLS does not replace FreePBX or UCP login and exposes administration through the PBX administrator panel. Operator logins grant only their saved roles, actions, channels and recipients. Current permissions and identity are rechecked before queued delivery. Disabled, expired or replaced identities cannot authorize old work.
+FreePBX administration and the SLL operator portal have separate authentication. SLL does not replace FreePBX or UCP login and exposes administration through the PBX administrator panel. Operator logins grant only their saved roles, actions, channels and recipients. Current permissions and identity are rechecked before queued delivery. Disabled, expired or replaced identities cannot authorize old work.
 
 Operator passwords use salted Argon2id with 64 MiB and four passes, or PBKDF2-HMAC-SHA256 with 600,000 iterations when Argon2id is unavailable. Two concurrent password slots bound derivation memory to 128 MiB. TOTP, an unused recovery code or an explicitly enabled, enrolled passkey follows password verification. Initial authenticator enrollment and passkey management require TOTP. Seeds are account-bound encrypted values; recovery codes are hashed. Consumption and credential changes commit under the configuration lock.
 
@@ -27,6 +29,8 @@ Portal sessions use HTTPS, Secure/HttpOnly cookies, session rotation, expiry, CS
 Password-reset credentials are random, hashed, single-use, revocable and expire after 24 hours. URLs use the configured HTTPS origin; credentials travel in fragments removed before a CSRF-protected POST. Reset requires the existing TOTP and does not extend account expiry. Two self-service recovery email attempts or two failed verifications require administrator assistance. Uncertain mail is not replayed. See [operator access and recovery](docs/OPERATORS.md).
 
 SSO administration is in **Operator Access**. OIDC/SAML verifies the configured provider, signature, issuer, audience, nonce and explicit local account grant, then requires the local operator authenticator. Provider role/email claims cannot create accounts or grant authority. Enabling SSO requires an enabled, enrolled, unexpired local recovery administrator. Portal accounts, Control API keys and UCP users cannot configure federation. See [operator SSO](docs/ENTERPRISE_IDENTITY.md).
+
+OIDC token requests use application/x-www-form-urlencoded encoding. Basic, POST and public clients send only their registered client-authentication form; client secrets are never duplicated into another method.
 
 Operator, API, directory and subscriber changes use recoverable active/pending settings transactions under the central configuration lock. A failed second write restores the prior protected files; crash recovery refuses unknown intervening changes. Unrelated staged edits are retained.
 
@@ -48,11 +52,11 @@ The Control API starts disabled. Named credentials contain hashed secrets and ex
 
 `Idempotency-Key` binds ordinary API announcements to the credential, canonical request and current authority for thirty days. Repeated identical accepted requests return the existing result; conflicting or uncertain claims cannot authorize another send. Retain replay history through recovery.
 
-Forwarded addresses/schemes are accepted only from explicitly configured immediate proxy networks. SLS validates the chain from its trusted end; trusted proxies must overwrite incoming forwarding headers. Forwarded hostnames are not an authority, and forwarded requests receive no direct-loopback plaintext exemption. SLS address changes use protected administrator settings; DNS/OS hostname changes do not migrate them automatically.
+Forwarded addresses/schemes are accepted only from explicitly configured immediate proxy networks. SLL validates the chain from its trusted end; trusted proxies must overwrite incoming forwarding headers. Forwarded hostnames are not an authority, and forwarded requests receive no direct-loopback plaintext exemption. SLL address changes use protected administrator settings; DNS/OS hostname changes do not migrate them automatically.
 
 Administrator and API inputs enforce object, depth and byte limits, reject duplicate keys/nonfinite values, and retain role/CSRF checks. Recipient envelopes prevent native PHP form-variable limits from silently dropping a selection. Scoped locations use stable device identities and reviewed snapshots; assignments alone do not establish consent or presence.
 
-External voice admission inspects the supported FreePBX route before queuing and again on its bound SLS Local channel. Arbitrary predial hooks remain unsupported. An extension-only callback is accepted only when its leading user/channel guards prove that every SLS Local call returns before the callback body. The full observed context remains in the route fingerprint; SLS does not change or execute custom callback files during inspection.
+External voice admission inspects the supported FreePBX route before queuing and again on its bound SLL Local channel. Arbitrary predial hooks remain unsupported. An extension-only callback is accepted only when its leading user/channel guards prove that every SLL Local call returns before the callback body. The full observed context remains in the route fingerprint; SLL does not change or execute custom callback files during inspection.
 
 ## Configuration, secrets and backups
 
@@ -74,7 +78,7 @@ Install, update, repair and removal share private maintenance/worker/configurati
 
 Downloads have HTTPS, size, time and hash bounds. Piper uses pinned hash-locked binary wheels and verified voice models. Protected imports compile authenticated source rather than executing legacy bytecode. Served PHP is checked independently of CLI PHP. Unsupported layouts, permissions or service states require review; the installer does not weaken host policy to force success.
 
-The explicit `0.1.8-beta --correction` bootstrap downloads a separately signed offline bundle and two checksum-pinned verification helpers. Their bytes are checked before execution; they read the real publisher ledger and enforce its current keys, revocations and expiry. Missing or unsafe established policy fails closed. The correction does not initialize, replace or rewind that policy, and the original immutable release assets remain unchanged.
+The fresh-install bootstrap verifies the signed release manifest and installer before execution, then the installer verifies the package. It refuses an established publisher policy; upgrades and recovery must use that installation's verified updater or independently approved recovery path. Missing, unsafe, expired or revoked authority fails closed rather than initializing replacement trust.
 
 Offline candidates require the publisher signature, signed manifest and an explicitly trusted archive SHA-256. The digest is exactly 64 hexadecimal characters. Archive validation rejects duplicate or ambiguous paths, links, special files, writable executable payloads, oversized content and ambiguous module metadata before extraction. A checksum alone cannot authorize installation.
 
@@ -82,9 +86,9 @@ Transactions retain authenticated recovery programs and snapshots before mutatio
 
 Static web and Asterisk integration snapshots accept standard FreePBX group-write modes only for root/Asterisk ownership with the Asterisk group. They preserve that metadata through rollback and do not grant root execution. Root runtime, signing/trust files and Piper compatibility directories still reject group writes. World-writable files and unrelated writable groups remain rejected. Read-only inspection validates the complete static inventory before worker coordination.
 
-Legacy permission repair is narrowly scoped to known root/Asterisk ownership and modes after previous-release/configuration authentication. It preserves bytes and lock inodes and rejects links, special files and unknown contents. FreePBX's chown exclusion protects the SLS data directory. New phone admission requires a fresh authenticated collector heartbeat; an unavailable collector remains nonfatal to ordinary FreePBX reloads.
+Legacy permission repair is narrowly scoped to known root/Asterisk ownership and modes after previous-release/configuration authentication. It preserves bytes and lock inodes and rejects links, special files and unknown contents. FreePBX's chown exclusion protects the SLL data directory. New phone admission requires a fresh authenticated collector heartbeat; an unavailable collector remains nonfatal to ordinary FreePBX reloads.
 
-The included uninstaller works locally without downloads or a healthy speech engine. It authenticates teardown helpers, drains SLS work, refuses active delivery and preserves configuration, media, history, logs and recovery keys by default. Help and unsupported arguments never begin host operations. Destructive purge requires a separate explicit request. Failed cron reads do not erase unrelated jobs. See [installer recovery and removal](docs/INSTALLER_OPERATIONS.md).
+The included uninstaller works locally without downloads or a healthy speech engine. It authenticates teardown helpers, drains SLL work, refuses active delivery and preserves configuration, media, history, logs and recovery keys by default. Help and unsupported arguments never begin host operations. Destructive purge requires a separate explicit request. Failed cron reads do not erase unrelated jobs. See [installer recovery and removal](docs/INSTALLER_OPERATIONS.md).
 
 Publisher Ed25519 signing and PBX-local module signing are distinct. Private release keys stay outside the repository; bounded validated key bytes feed OpenSSL without reopening the selected path. Publisher rotation, expiry, irreversible retirement and emergency recovery require explicit root review. Downloaded metadata and `.config` cannot establish signing authority.
 
@@ -100,7 +104,7 @@ Generated image/XML URLs retain anonymous compatibility access by default. Admin
 
 Generic webhooks use verified HTTPS, public-address validation/pinning, no redirects and bounded payloads. Optional HMAC-SHA256 covers `timestamp + "." + event_id + "." + raw_request_body`; receivers must verify freshness and deduplicate IDs. Discord URL tokens and provider-specific formats retain their own contracts. One-way acceptance is not human receipt.
 
-Fresh-install email is disabled. Every SLS mail producer reserves shared bounded capacity before Postfix. Read-only queue checks refuse unavailable evidence or a backlog of 200 messages; uncertain handoffs are not automatically replayed. Cron uses fixed bounded runners and private output, preventing SLS cron mail floods. These controls do not manage unrelated PBX mail or delete its queue.
+Fresh-install email is disabled. Every SLL mail producer reserves shared bounded capacity before Postfix. Read-only queue checks refuse unavailable evidence or a backlog of 200 messages; uncertain handoffs are not automatically replayed. Cron uses fixed bounded runners and private output, preventing SLL cron mail floods. These controls do not manage unrelated PBX mail or delete its queue.
 
 Actual Weather/Lightning and recorded live paging can use default-on internal voicemail fallback. It excludes the caller and extensions with a selected handset answer, rechecks policy/mailbox identity, and submits at most one eligible deposit. Manual tests and ordinary Dashboard TTS do not deposit voicemail. Native Asterisk owns mailbox storage/limits; a deposit is not proof of listening. External carrier voicemail is outside this feature.
 
@@ -128,7 +132,9 @@ The dependency inventory covers declared Python, vendored PHP and embedded JavaS
 
 Isolated fixtures use private mount/network/PID namespaces, read-only inherited storage and disposable writable overlays. They are trusted project fixtures, not a boundary against hostile root code. Local tests and advisory checks do not constitute an independent external penetration test, compliance certification, physical-device acceptance or full-PBX disaster-recovery/fleet qualification. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
-## 0.1.8-beta qualification boundaries
+## 0.1.9-beta qualification boundaries
+
+Lite is offered only below the Standard RAM baseline after its own resource checks pass and the installer receives explicit consent. Enterprise Labs and enterprise SSO are unavailable in Lite. Server-side activation, direct configuration writes, provider entry points and raw PHP/Python runtime checks enforce this restriction even when stored flags request activation. Saved Enterprise configuration and credentials are retained; returning to Standard does not automatically reactivate them. It does not relax signatures, protected-path checks, configuration encryption, authentication, authorization, durable outcome handling, storage admission or rollback. The installer rejects Lite conversion when capacity exceeds 25 desktops or 25 phone contacts, when pending settings exist, or while Enterprise Labs or enterprise SSO is active. Backup, import and restore cannot switch deployment profiles; use the publisher-authenticated installer so CPU, RAM, storage and rollback checks remain authoritative.
 
 New optional authentication, browser, directory, radio, media, mail-evidence and
 script features start disabled. Passkeys affect the separate operator portal,

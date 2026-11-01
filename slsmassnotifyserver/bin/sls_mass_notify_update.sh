@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Southland Servers Mass Notifications Server by the Southland Servers Group
+# SLL Mass Notify Server by the Southland Labs
 set -euo pipefail
 
 umask 027
@@ -12,7 +12,7 @@ STATUS_FILE="${STATUS_FILE:-/var/lib/asterisk/SLS_Mass_Notifications_Plugin/upda
 UPDATE_PROGRESS_FILE="${UPDATE_PROGRESS_FILE:-/var/lib/asterisk/SLS_Mass_Notifications_Plugin/update-progress.json}"
 LOG_FILE="${LOG_FILE:-/var/log/sls_mass_notify.log}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/sls-mass-notify-update.lock}"
-CURRENT_VERSION="${SLS_MASS_NOTIFY_CURRENT_VERSION:-0.1.8-beta}"
+CURRENT_VERSION="${SLS_MASS_NOTIFY_CURRENT_VERSION:-0.1.9-beta}"
 
 GITHUB_UPDATES_ENABLED="0"
 GITHUB_UPDATES_CHANNEL="beta"
@@ -22,7 +22,7 @@ GITHUB_UPDATES_WINDOW_END=""
 GITHUB_UPDATES_DELAY_HOURS="0"
 MANUAL_UPDATE="${SLS_MASS_NOTIFY_MANUAL_UPDATE:-0}"
 CHECK_ONLY="${SLS_MASS_NOTIFY_CHECK_ONLY:-0}"
-readonly GITHUB_UPDATES_REPOSITORY="vipgabe09267/SouthlandServers_Mass_Notify_server"
+readonly GITHUB_UPDATES_REPOSITORY="vipgabe09267/SouthlandLabs_Mass_Notify_server"
 FAILURE_RECORDED=0
 REPORTING_ADMITTED=0
 release_work=""
@@ -308,7 +308,7 @@ from datetime import datetime, timezone
 sys.dont_write_bytecode = True
 
 repo = os.environ.get("REPOSITORY", "")
-current = os.environ.get("CURRENT_VERSION", "0.1.8-beta")
+current = os.environ.get("CURRENT_VERSION", "0.1.9-beta")
 now = datetime.now(timezone.utc).astimezone().isoformat()
 if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
     print(json.dumps({"ok": False, "checked_at": now, "update_available": False, "latest_version": current, "message": "Configured GitHub repository is invalid."}, separators=(",", ":")))
@@ -349,7 +349,7 @@ def version_key(value):
 try:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/releases?per_page=100",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "SouthlandServers-Mass-Notifications-Updater/0.1.8-beta"},
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "SouthlandLabs-Mass-Notify-Updater/0.1.9-beta"},
     )
     with urllib.request.urlopen(request, timeout=20) as response:
         body = response.read(2097153)
@@ -408,7 +408,7 @@ if available:
     try:
         commit_request = urllib.request.Request(
             f"https://api.github.com/repos/{repo}/commits/{tag}",
-            headers={"Accept": "application/vnd.github+json", "User-Agent": "SLS-Mass-Notify-Updater"},
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "SLL-Mass-Notify-Updater"},
         )
         with urllib.request.urlopen(commit_request, timeout=20) as response:
             commit_info = json.loads(response.read(1048576))

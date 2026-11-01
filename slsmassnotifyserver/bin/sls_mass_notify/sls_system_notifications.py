@@ -226,7 +226,7 @@ def collect_health_faults(worker: dict | None, storage: dict | None, *,
         categories = {
             "worker_start_failed": "Required announcement process supervision is unavailable.",
             "worker_bootstrap_failed": "The announcement worker could not load FreePBX.",
-            "worker_module_load_failed": "The announcement worker could not load the SLS module.",
+            "worker_module_load_failed": "The announcement worker could not load the SLL module.",
             "worker_runtime_failed": "The announcement worker reported an execution failure.",
         }
         category = worker.get("failure_category")
@@ -392,6 +392,9 @@ def project_status(status: dict, config: dict, now: int) -> dict:
     recovered = recovered or (stage == 'piper_voice_download'
                  and status.get('last_piper_voice_install_status') == 'ok'
                  and epoch(status.get('last_piper_voice_install_at')) > at)
+    recovered = recovered or (stage == 'dependencies'
+                 and status.get('last_dependency_check_status') == 'ok'
+                 and epoch(status.get('last_dependency_check_at')) > at)
     ongoing = stage in {'api', 'external', 'dependencies', 'piper_voice_download'}
     if not applicable or recovered or (not ongoing and not recent(status.get('last_fault_at'))):
         status['last_fault_at'] = ''
@@ -740,7 +743,7 @@ def process_faults(config: dict, faults: dict[str, dict], state_path: Path, *, s
         attempts[channel]['submission_started'] = True
         state = {"version": 1, "active": active, "attempts": attempts, "history": history}
         _write_state(state_path, state)
-        subject = "SLS Mass Notify system fault — " + fault["stage"]
+        subject = "SLL Mass Notify Server system fault — " + fault["stage"]
         body_lines = [
             "The Mass Notifications Module detected a system fault.",
             "",

@@ -128,19 +128,19 @@ def scenario(guest,bundle,name,baseline,environment):
             guest.ssh("timeout 900 bash -c 'while kill -0 \"$(cat /root/sls-test-install.pid)\" 2>/dev/null; do sleep 1; done'",timeout=910)
     result=guest.ssh(installation_command(),timeout=3600,check=False)
     if result.returncode:raise RuntimeError('Installer failed in '+name+': '+result.stdout+result.stderr)
-    guest.ssh('fwconsole reload',timeout=180)
+    guest.ssh('/usr/sbin/runuser -u asterisk -- /usr/sbin/fwconsole reload',timeout=180)
     guest.ssh("python3 - <<'PY'\nimport hashlib,json,pathlib\np=pathlib.Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin')\nfor name,digest in json.loads(pathlib.Path('/root/sls-config-before.json').read_text()).items():\n assert hashlib.sha256((p/name).read_bytes()).hexdigest()==digest,'Protected settings changed: '+name\nPY")
     doctor=guest.ssh('/usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_install_doctor.py --json',timeout=60)
     if name=='repair':
         repaired=guest.ssh(installation_command(),timeout=3600,check=False)
         if repaired.returncode: raise RuntimeError('The installed signed candidate could not be repaired.')
-        guest.ssh('fwconsole reload',timeout=180)
+        guest.ssh('/usr/sbin/runuser -u asterisk -- /usr/sbin/fwconsole reload',timeout=180)
     if name in ('uninstall','purge'):
         removal=('SLS_MASS_NOTIFY_PURGE_CONFIG=1 ' if name=='purge' else '')+'bash /usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh'
         removed=guest.ssh(removal,timeout=1800,check=False)
         if removed.returncode: raise RuntimeError('The included local uninstaller failed.')
         guest.ssh('test ! -e /var/www/html/admin/modules/slsmassnotifyserver; test ! -e /usr/local/bin/sls_mass_notify')
-        guest.ssh('fwconsole reload',timeout=180)
+        guest.ssh('/usr/sbin/runuser -u asterisk -- /usr/sbin/fwconsole reload',timeout=180)
         if name=='uninstall':
             guest.ssh("python3 - <<'PY'\nimport hashlib,json,pathlib\np=pathlib.Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin')\nfor name,digest in json.loads(pathlib.Path('/root/sls-config-before.json').read_text()).items():\n assert hashlib.sha256((p/name).read_bytes()).hexdigest()==digest\nPY")
         else: guest.ssh('test ! -e /var/lib/asterisk/SLS_Mass_Notifications_Plugin')
@@ -150,7 +150,7 @@ def scenario(guest,bundle,name,baseline,environment):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image',type=Path,required=True);parser.add_argument('--image-sha256',required=True)
-    parser.add_argument('--bundle',type=Path,required=True);parser.add_argument('--baseline',choices=('fresh','0.1.4-beta','0.1.5-beta','0.1.6-beta','0.1.7-beta'),required=True)
+    parser.add_argument('--bundle',type=Path,required=True);parser.add_argument('--baseline',choices=('fresh','0.1.4-beta','0.1.5-beta','0.1.6-beta','0.1.7-beta','0.1.8-beta','0.1.9-beta'),required=True)
     parser.add_argument('--scenarios',nargs='+',choices=SCENARIOS,default=list(SCENARIOS))
     parser.add_argument('--report',type=Path,required=True)
     parser.add_argument('--allow-disposable-vm',action='store_true')

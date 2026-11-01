@@ -200,7 +200,7 @@
       config[section][list].forEach(row => {
         const wrapper = node('div', undefined, 'sls-ent-row'), description = node('div'); description.append(node('strong', row.name), node('div', row.enabled ? 'Enabled' : 'Disabled'));
         const actions = node('div', undefined, 'sls-ent-actions'), edit = node('button', 'Edit', 'btn btn-default btn-sm'); edit.type = 'button'; edit.addEventListener('click', () => editRow(section, row));
-        const remove = node('button', 'Remove', 'btn btn-link'); remove.type = 'button'; remove.addEventListener('click', () => { config[section][list] = config[section][list].filter(item => item.id !== row.id); rows(); feedback('Removed in this editor. Save coordination settings to apply. Existing delivery and drill history remain.'); });
+        const remove = node('button', 'Remove', 'btn btn-link'); remove.type = 'button'; remove.addEventListener('click', () => { config[section][list] = config[section][list].filter(item => item.id !== row.id); rows(); feedback('Removed in this editor. Save coordination settings to apply. Existing delivery and drill history remain.'); window.SlsSaveState?.set(root, 'editor'); });
         actions.append(edit, remove);
         if (section === 'floorplans' && row.enabled && config.enabled && config.floorplans.enabled) {
           const overlay = node('button', 'View incident overlay', 'btn btn-default btn-sm'); overlay.type = 'button';
@@ -310,7 +310,7 @@
     retire.addEventListener('click', () => {
       open('Retire stored floor plan', 'Retire image');
       body.append(node('p', `Image ${image.image_id.slice(4, 20)} uses ${(Number(image.bytes) / 1048576).toFixed(2)} MiB.`),
-        node('p', 'Download the image first if it must be retained outside SLS. The server will recheck active, staged and retained configuration references while settings are locked.'));
+        node('p', 'Download the image first if it must be retained outside SLL. The server will recheck active, staged and retained configuration references while settings are locked.'));
       const exportLink = node('a', 'Download image before retirement', 'btn btn-default'); exportLink.href = download.href; body.append(exportLink);
       const confirmation = field('Enter RETIRE to confirm permanent removal', input('text')); confirmation.required = true; confirmation.pattern = 'RETIRE'; confirmation.autocomplete = 'off';
       handler = async () => { const result = await post('floorplan_retire', { image_id: image.image_id, confirmation: confirmation.value }); feedback(result.message); location.reload(); };

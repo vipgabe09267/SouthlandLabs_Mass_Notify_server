@@ -1,4 +1,4 @@
-Southland Servers Mass Notifications Server - SIP NOTIFY Phone Formats
+SLL Mass Notify Server - SIP NOTIFY Phone Formats
 ====================================================================
 
 This beta exposes a primary authenticated live desktop stream under:
@@ -30,7 +30,7 @@ When mixed phone formats share an extension, the sender routes each vendor paylo
 Implemented format families
 ---------------------------
 
-- Desktop: authenticated live SSE event records for the SLS Mass Notify desktop/client app, with the JSON route retained as a fallback. Expired authorized events advance the stream cursor without being emitted so the next valid targeted event is not skipped.
+- Desktop: authenticated live SSE event records for the SLL Mass Notify Server desktop/client app, with the JSON route retained as a fallback. Expired authorized events advance the stream cursor without being emitted so the next valid targeted event is not skipped.
 - Yealink: Yealink XML Browser `YealinkIPPhoneTextScreen` and generated `YealinkIPPhoneImageScreen` payloads. NWS color alerts and the Dashboard colored-announcement Labs feature use this image format. The `yealink_text` override avoids image retrieval on models that cannot load the hosted PNG. Yealink's SIP-NOTIFY XML push control is disabled by default on some firmware and must be enabled on the handset or through provisioning; this PBX module does not change phone provisioning.
 - Cisco Multiplatform/3PCC: an `XML-Service` SIP NOTIFY containing `CiscoIPPhoneExecute`, which directs the phone to a randomized hosted `CiscoIPPhoneText` document. Cisco documents a 401 digest challenge for this event; the endpoint/firmware must be provisioned so Asterisk can satisfy that authentication requirement.
 - Snom: Snom XML Minibrowser `SnomIPPhoneText` payloads.

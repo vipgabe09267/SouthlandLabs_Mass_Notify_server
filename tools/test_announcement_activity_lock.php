@@ -53,6 +53,7 @@ class EnterpriseActivityFixture extends AnnouncementActivityFixture
     use \FreePBX\modules\SlsEnterpriseAdministration;
     public array $settings=['unrelated'=>'preserved'];
     public int $writes=0;
+    public function getActiveSettings(): array { return $this->settings; }
     protected function assertEnterpriseAdministrator(): array { return ['username'=>'fixture']; }
     public function updateEnterprise(): void { $this->saveEnterpriseNamespace('enterprise_operations',['enabled'=>false]); }
     public function loadSettingsFile($path): array { return $this->settings; }

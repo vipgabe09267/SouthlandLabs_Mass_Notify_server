@@ -413,6 +413,21 @@ class IncidentStore
     private static function release($handle): void { if (is_resource($handle)) { flock($handle, LOCK_UN); fclose($handle); } }
     public function read(string $id): ?array
     {
+        // Writers publish complete records with atomic replacement. A reader
+        // that overlaps that replacement must repeat every descriptor/schema
+        // check against a fresh snapshot, never accept the unlinked old inode.
+        for ($attempt = 0; ; $attempt++) {
+            try { return $this->readSnapshot($id); }
+            catch (\RuntimeException $error) {
+                if ($attempt !== 0 || !in_array($error->getMessage(), [
+                    'Incident storage identity changed during access.',
+                    'Incident state changed while it was read.',
+                ], true)) { throw $error; }
+            }
+        }
+    }
+    private function readSnapshot(string $id): ?array
+    {
         $path = $this->path($id); $this->directoryMeta();
         // Verify permanent replay history even while the requested record is
         // active. Losing that ledger must not permit a reused start identifier.
@@ -516,6 +531,23 @@ class IncidentStore
         // retryable send just because an optional cache could not be persisted.
     }
     public function metadata(string $id): array
+    {
+        // A protected atomic commit can replace a record or advisory summary
+        // between lstat and fopen. Retry the entire verified snapshot once;
+        // ownership, link, size and schema failures remain immediate errors.
+        for ($snapshotAttempt = 0; $snapshotAttempt < 2; $snapshotAttempt++) {
+            try { return $this->metadataSnapshot($id); }
+            catch (\RuntimeException $error) {
+                if ($snapshotAttempt !== 0 || !in_array($error->getMessage(), [
+                    'Incident storage identity changed during access.',
+                    'Incident state changed while it was read.',
+                    'Incident changed during summary lookup.',
+                ], true)) { throw $error; }
+            }
+        }
+        throw new \RuntimeException('Incident changed while its summary was being read. Retry the history request.');
+    }
+    private function metadataSnapshot(string $id): array
     {
         $path = $this->path($id); $cache = $this->directory . '/.' . $id . '.summary';
         for ($attempt = 0; $attempt < 2; $attempt++) {

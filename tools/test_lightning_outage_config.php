@@ -77,6 +77,7 @@ try {
     $pending = $defaults; $pending['public_pbx_host'] = 'pending.example';
     $pending['xweather']['adaptive_gate_failure_policy'] = 'bounded_poll';
     $pending['xweather']['adaptive_fallback_minutes'] = 90;
+    $pending['xweather']['client_id'] = 'preserved-fixture-key';
     $pending['xweather']['client_secret'] = 'preserved-fixture-secret';
     file_put_contents($directory.'/active.config', json_encode($active));
     file_put_contents($directory.'/pending.config', json_encode($pending));
@@ -92,10 +93,29 @@ try {
         $unrelatedSaved = $saved; $unrelatedPending = $pending;
         unset($unrelatedSaved['xweather'], $unrelatedPending['xweather']);
         $check($unrelatedSaved === $unrelatedPending, 'Lightning save changed unrelated pending settings.');
-        $check($saved['public_pbx_host'] === 'pending.example' && $saved['xweather']['client_secret'] === 'preserved-fixture-secret', 'Save lost unrelated pending settings or existing secret.');
+        $check($saved['public_pbx_host'] === 'pending.example' && $saved['xweather']['client_id'] === 'preserved-fixture-key' && $saved['xweather']['client_secret'] === 'preserved-fixture-secret', 'Save lost unrelated pending settings or existing credentials.');
         $check($saved['xweather']['adaptive_gate_failure_policy'] === ($index ? 'standby' : 'bounded_poll') && $saved['xweather']['adaptive_fallback_minutes'] === ($index ? 15 : 90), 'Old form reset policy or explicit form failed to change it.');
         $check(file_get_contents($directory.'/active.config') === $activeBytes, 'Staged save changed active config bytes.');
     }
+    $result = $fixture->saveLightningSettings(['xweather' => ['client_secret' => 'replacement-secret']]);
+    $check($result['success'], 'Explicit Lightning credential rotation failed.');
+    $saved = json_decode(file_get_contents($directory.'/pending.config'), true);
+    $check($saved['xweather']['client_secret'] === 'replacement-secret', 'Lightning credential rotation was not saved.');
+    $result = $fixture->saveLightningSettings(['xweather' => ['client_secret' => '', 'clear_client_secret' => '1']]);
+    $check($result['success'], 'Explicit Lightning credential clearing failed.');
+    $saved = json_decode(file_get_contents($directory.'/pending.config'), true);
+    $check($saved['xweather']['client_secret'] === '', 'Lightning credential clear control did not clear the saved secret.');
+    $result = $fixture->saveLightningSettings(['xweather' => ['client_id' => 'replacement-api-key']]);
+    $check($result['success'], 'Explicit Lightning API key rotation failed.');
+    $saved = json_decode(file_get_contents($directory.'/pending.config'), true);
+    $check($saved['xweather']['client_id'] === 'replacement-api-key', 'Lightning API key rotation was not saved.');
+    $result = $fixture->saveLightningSettings(['xweather' => ['client_id' => '', 'clear_client_id' => '1']]);
+    $check($result['success'], 'Explicit Lightning API key clearing failed.');
+    $saved = json_decode(file_get_contents($directory.'/pending.config'), true);
+    $check($saved['xweather']['client_id'] === '', 'Lightning API key clear control did not clear the saved value.');
+    $writes = $fixture->writes;
+    $result = $fixture->saveLightningSettings(['xweather' => ['clear_client_secret' => 'unexpected']]);
+    $check(!$result['success'] && $fixture->writes === $writes, 'Malformed Lightning credential control was accepted.');
 } finally {
     @unlink($directory.'/active.config'); @unlink($directory.'/pending.config'); @rmdir($directory);
 }

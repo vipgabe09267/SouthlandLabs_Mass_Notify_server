@@ -264,7 +264,7 @@ class VisualMonitor:
         if self.failures == 1:
             # Categories are fixed call-site literals, never provider replies,
             # caller identifiers, configured text, PINs or raw exceptions.
-            syslog.syslog(syslog.LOG_NOTICE, 'SLS live paging visual failure: ' + reason)
+            syslog.syslog(syslog.LOG_NOTICE, 'SLL live paging visual failure: ' + reason)
 
     def tick(self, stop_requested=lambda: False):
         if stop_requested() or self.clock() >= self.deadline:
@@ -370,7 +370,7 @@ def main():
                 if readable:
                     break
     except Exception as error:
-        syslog.syslog(syslog.LOG_NOTICE, 'SLS live paging visual monitor unavailable; review paging and collector health.')
+        syslog.syslog(syslog.LOG_NOTICE, 'SLL live paging visual monitor unavailable; review paging and collector health.')
         if monitor is None:
             print(json.dumps({'ready': False}), flush=True)
             return 1

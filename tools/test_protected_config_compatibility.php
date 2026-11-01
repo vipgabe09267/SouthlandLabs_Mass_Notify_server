@@ -211,7 +211,17 @@ namespace {
 	$validated = $invoke('validateNativeBackupConfig', $raw);
 	$timezone = $invoke('getPbxDateTimeZone')->getName();
 	$prepared = $invoke('prepareNativeRestoredScheduleState', ['raw' => $raw, 'settings' => $validated], null, $timezone, 1800000000);
-	$assert($prepared['config_raw'] === $raw, 'Compatibility validation rewrote unchanged native-backup bytes.');
+	$restored = json_decode($prepared['config_raw'], true, 512, JSON_THROW_ON_ERROR);
+	$assert(($restored['control_api']['enabled'] ?? null) === '0', 'Native restore did not disable the Control API.');
+	$assert(preg_match('/^[A-Za-z0-9_-]{43}$/D', $restored['control_api']['api_key'] ?? '') === 1,
+		'Native restore did not generate a strong URL-safe Control API key.');
+	$assert($restored['control_api']['api_key'] !== $validated['control_api']['api_key'],
+		'Native restore retained the source PBX Control API key.');
+	$expectedRestored = $validated;
+	$expectedRestored['control_api']['enabled'] = '0';
+	$expectedRestored['control_api']['api_key'] = $restored['control_api']['api_key'];
+	$expectedRestored['control_api']['credentials'] = [];
+	$assert($restored === $expectedRestored, 'Native restore changed settings beyond the required Control API credential reset.');
 	$scheduled = $legacy;
 	$scheduled['scheduled_announcements'] = [[
 		'id' => 'synthetic_schedule', 'name' => 'Synthetic replay safety', 'enabled' => '1',

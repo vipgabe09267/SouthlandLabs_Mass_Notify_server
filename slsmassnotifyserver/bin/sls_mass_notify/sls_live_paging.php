@@ -238,7 +238,7 @@ final class LivePagingConfig
         foreach (self::resolvedGroups($config, $groups) as $row) {
             $menu .= ' For ' . $row['name'] . ', press ' . $row['menu_number'] . ', then pound.';
         }
-        $texts=['menu' => $menu, 'pin' => $config['pin_prompt'],
+        $texts=['menu' => $menu, 'internal_menu' => $config['menu_prompt'], 'pin' => $config['pin_prompt'],
             'ready' => 'Paging will begin after the tone. Speak clearly, then hang up when finished.',
             'recording' => 'No phones answered. After the tone, record your page for voicemail, then hang up when finished.',
             'partial' => 'Some phones in this group are unavailable. Paging will continue to the reachable phones.',
@@ -248,6 +248,9 @@ final class LivePagingConfig
             'no_receivers' => 'No receiving phones are available in this paging group. Check that a recipient phone is signed in and registered, then try again.',
             'unavailable' => 'Paging is unavailable. Please contact your PBX administrator.',
             'denied' => 'You are not authorized to perform that function.'];
+        foreach (self::resolvedGroups($config, $groups) as $row) {
+            $texts['internal_group_' . $row['menu_number']] = 'For ' . $row['name'] . ', press ' . $row['menu_number'] . ', then pound.';
+        }
         if (($config['external_access'] ?? '0') === '1') {
             $texts['external_menu'] = $config['menu_prompt'];
             foreach (self::resolvedGroups($config, $groups) as $row) {
@@ -1000,21 +1003,28 @@ final class LivePagingSession
                 else { $approvedNumbers[$number] = $match; }
             }
             if (!$groups) { return $this->deny('external_caller_not_approved', $settings); }
+        } else {
+            foreach ($groups as $number => $row) {
+                if (!in_array($caller['extension'], $row['allowed_callers'], true)) { unset($groups[$number]); }
+            }
+            if (!$groups) { return $this->deny('unauthorized_caller', $settings); }
         }
         if (!$groups) { return ['status' => 'no_permitted_groups']; }
         $prompts = LivePagingConfig::promptFiles($settings);
         foreach ($prompts as $key => $prompt) {
             if (str_starts_with($key, 'panic_')) { continue; }
             if (str_starts_with($key, 'external_') && (!$external || ($key !== 'external_menu' && !isset($groups[(int)substr($key, 15)])))) { continue; }
+            if (str_starts_with($key, 'internal_') && ($external || ($key !== 'internal_menu' && !isset($groups[(int)substr($key, 15)])))) { continue; }
             if ($external && $key === 'menu') { continue; }
             if (!(($this->soundExists)($prompt))) { throw new \RuntimeException('paging_prompt_unavailable'); }
         }
         $this->agi->answer();
         $this->agi->autoHangup(300);
         $externalMenu = $external ? array_merge([$prompts['external_menu']], array_map(static fn($number) => $prompts['external_group_' . $number], array_keys($groups))) : [];
+        $internalMenu = !$external ? array_merge([$prompts['internal_menu']], array_map(static fn($number) => $prompts['internal_group_' . $number], array_keys($groups))) : [];
         $group = null;
         for ($attempt = 0; $attempt < 3; $attempt++) {
-            $selection = $this->agi->menu($external ? $externalMenu : [$prompts['menu']]);
+            $selection = $this->agi->menu($external ? $externalMenu : $internalMenu);
             if (preg_match('/^(?:[1-9]|10)$/D', $selection) && isset($groups[$selection])) { $group = $groups[$selection]; break; }
             $this->agi->play($prompts['invalid']);
         }

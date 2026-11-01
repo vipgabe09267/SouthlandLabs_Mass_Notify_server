@@ -3,7 +3,7 @@
 Activation reloads Apache and each independently qualified PHP-FPM version. This
 refreshes their separate opcode caches without changing PHP settings or restarting
 Asterisk. Rollback refreshes FPM after restoring the approved files. The local,
-read-only API probe reports its compiled SLS version; installation fails clearly
+read-only API probe reports its compiled SLL version; installation fails clearly
 if the serving handler still runs a previous release or its reload fails.
 
 The supported profile is FreePBX 17 on Debian 12, amd64, CPython 3.11 and
@@ -11,14 +11,21 @@ Apache, using the standard FreePBX paths and the `asterisk` service account.
 Versioned local PHP-FPM sockets are inspected separately from CLI PHP. The
 served Apache or FPM process must run as `asterisk`; required process and
 cryptographic functions must be enabled in both the served PHP configuration
-and its FPM pool overrides. SLS does not change the global web-server user or
+and its FPM pool overrides. SLL does not change the global web-server user or
 grant another web account access to PBX secrets. Other
 architectures, relocated layouts and restricted containers require explicit
 adapters and qualification; the installer does not guess replacement paths or
 disable its trust checks to accommodate them.
 
+The phone collector continues to update its ledger and heartbeat while install
+workers are guarded. Permission repair takes each file's permanent writer mutex
+and leaves already-correct metadata alone. Only exact collector temporary names
+may disappear during this walk; missing canonical files, lost mutexes, unsafe
+links and mount changes remain errors. Recognized legacy heartbeat/display
+caches are validated under their original mutexes before their modes are repaired.
+
 The signed voicemail helper is installed and checked with the other protected
-phone runtimes. Voicemail itself remains optional: SLS does not require an enabled
+phone runtimes. Voicemail itself remains optional: SLL does not require an enabled
 mailbox to install, create mailboxes, modify FreePBX voicemail policies or open a
 new service. Weather/Lightning and live paging default to voicemail fallback only
 for eligible internal mailboxes. Review the independent controls and the existing
@@ -43,11 +50,23 @@ The doctor reports the detected Asterisk version and the PHP version, handler,
 required extensions/functions and service-account check observed through the
 local API route. An active collector service is checked separately from its
 current authenticated AMI heartbeat. Root inspection verifies the saved release
-signature, installed SLS inventory and reviewed Framework/Dashboard inventories;
+signature, installed SLL inventory and reviewed Framework/Dashboard inventories;
 it reports the release version and artifact/inventory hashes.
 
+The installer also checks the local FreePBX web response before mutation and
+after activation. A vendor ionCube loader error returned with HTTP 200 fails
+readiness. When changing a PBX to FPM, configure its native vendor loaders for
+that SAPI as well as CLI PHP; SLL does not change those global PHP settings.
+Redirects and access-controlled routes are reported as limited observations,
+without following redirects or supplying web credentials. They still require
+an administrator's authenticated browser check. Response bodies are bounded
+and excluded from diagnostics and installer logs.
+
 The report also includes prerequisites, Apache configuration, requested resource
-allocation and the latest recorded installer phase and stage. A saved failure
+allocation and the latest recorded installer phase and stage. Its default probe
+uses the deployment profile in the protected central configuration, so a Lite
+installation is not evaluated against Standard RAM. Pass `--profile standard`
+or `--profile lite` only to inspect a hypothetical profile explicitly. A saved failure
 marker is explicitly historical; a later commit marks it superseded, and current
 readiness comes from the live checks. JSON output excludes configuration contents,
 credentials, PINs, provider tokens and recovery snapshot contents. The Help page
@@ -70,6 +89,15 @@ services, run FreePBX hooks, open a new AMI session or contact notification
 providers. A web-process diagnostic cannot inspect root-only trust or recovery
 snapshots; those checks explicitly direct the administrator to the CLI.
 
+Authenticated local probes on custom ports require the configured public PBX
+hostname to match the site's native `ServerName` or `ServerAlias`. Literal and
+wildcard aliases are supported. Apache omits aliases from its compact single-site
+inventory, so SLL may perform a second bounded configuration-test command with a
+temporary command-line virtual host to obtain Apache's expanded alias inventory.
+This changes no files, listeners or running services. The synthetic site grants
+no credential authority; failed discovery never sends credentials to an unrelated
+custom-port site.
+
 On a fresh host, use the publisher-authenticated installer's `--inspect` mode
 for signed package and stock inventory checks. Inspection may download evidence
 into private temporary storage; it does not enroll live trust or activate code.
@@ -84,6 +112,25 @@ the signed candidate, the signed installer, verified bootstrap helpers,
 independent stock/previous-release approvals and recovery snapshots across a
 reboot. Public module recovery remains on the module filesystem for atomic
 renames; the journal records that location.
+
+New module backups use root-private transaction directories below
+`/var/www/html/admin/modules/.sls-mass-notify-recovery` on the module filesystem.
+A separate native FreePBX ownership exclusion keeps that directory private
+when FreePBX starts or normalizes permissions. This installer infrastructure
+and its exclusion remain with recovery records after rollback or uninstall;
+the ordinary SLL data exclusion is restored or removed separately. Apache also
+denies web access to these backups and the older sibling-directory layout.
+
+Recovery of an older backup can recognize native FreePBX ownership and mode
+normalization only after checking its original module against the protected
+pre-install inventory. It seals the directory and checks the approved bytes
+again before restoration. Unknown entries, links, independent code changes and
+unsupported ownership remain failures; observed hashes never become approval.
+
+Retained configuration copies and the phone-history/native-registration
+baselines are flushed with their containing directories before the journal
+authorizes mutation. A failed storage flush stops installation. Original
+configuration snapshot temporaries remain until durable retention completes.
 
 Discovery and recovery acquire the existing installation locks before examining
 unfinished work. A named, empty, root-owned mode 0700 transaction directory left
@@ -107,10 +154,62 @@ bash /path/to/publisher-authenticated/install_release.sh --recover \
 ```
 
 Recovery authenticates the saved installer, package and executable helpers
-against publisher evidence before using the original restoration sequence.
+against publisher evidence. The corrected `0.1.9-beta` publisher-signed installer can supply recovery
+helpers for an earlier unfinished transaction, including the withdrawn package
+with the same version. Its own installer and package are authenticated separately and
+retained in a private `recovery-carrier.*` directory. The original signed
+artifacts, approvals and operational baseline remain the restoration authority.
 The journal does not approve live file hashes. It does not restore operational
 delivery history over newer records. Failed restoration or newer activity that
 prevents safe verification requires administrator review.
+
+A valid root-owned legacy `transaction-sequence` file is a counter, not an
+unfinished installation. Use only a real `transaction-<id>` directory with
+authenticated unfinished evidence. Malformed counters, links and unexpected
+permissions still stop admission with a specific diagnostic.
+
+Recovery checks active and pending settings before restoring anything. It
+accepts the original configuration or a change whose exact encoded hash was
+recorded durably before an installer profile/branding write. Later administrator
+edits are preserved and reported for review. Do not replace the live settings
+merely to get past this check; retain both the live file and original snapshot.
+
+### Phone history during installation
+
+The installer holds an exclusive retention lease while notification workers
+are paused. The collector can update its heartbeat and ledger while pruning is
+deferred. New baselines also record protected closure times. Modified closed
+records, missing nonexpired records and active voicemail dependencies still
+prevent completion. Final checks require an existing ledger and a fresh
+collector heartbeat, with a bounded wait for startup or a guarded cron worker
+to exit.
+
+The withdrawn `0.1.9-beta` installer could let normal retention prune closed
+records after taking its baseline, then fail both installation and rollback.
+Its older baseline contains record hashes without closure times. For that
+case, use a protected pre-upgrade ledger copy from a backup:
+
+```bash
+bash /path/to/publisher-authenticated/install_release.sh --recover \
+  '/var/lib/sls-mass-notify-installer/transaction-<id>' \
+  --history-evidence '/root/pre-upgrade-phone-admission.json'
+```
+
+The copy must be a private root-owned regular file under protected directories.
+Only complete closed records matching the original baseline hash can prove
+retirement after the seven-day limit. Matching facts from separate backups can
+accumulate across recovery attempts; unmatched backup records grant no approval.
+The verifier does not copy this evidence over the live ledger. Without enough
+matching evidence, recovery preserves the transaction and leaves root SLL jobs
+disabled. Preserve backups and the failed installer log; do not reset history or
+delete the transaction to bypass the check.
+
+New installation snapshots also preserve the scoped native Manager database
+rows. Rollback restores their original identities and regenerates native
+Manager configuration before restarting the collector. Unrelated accounts and
+independent edits are preserved; older snapshots cannot supply database state
+they did not record. Module-tree restoration is idempotent across either rename
+and verifies the old tree before re-enabling its root maintenance schedule.
 
 An earlier `0.1.6-beta` installer omitted ownership, permission, collector and
 coordination stage names from its transaction allowlist. Those copies can exit with code 2 while their
@@ -139,7 +238,7 @@ recovery sources are never pruned.
 ## Missing stock Dashboard
 
 An absent Dashboard can be staged from an independently verified official
-GPG package before SLS maintenance changes. Its installation hooks run as
+GPG package before SLL maintenance changes. Its installation hooks run as
 `asterisk`. Existing Dashboard files are never replaced by this bootstrap.
 Unknown local differences still require reviewed inventories.
 
@@ -209,7 +308,7 @@ SLS_DISPOSABLE_QUALIFICATION_ONLY
 
 Each scenario uses a new overlay. Guest outbound networking is disabled; SSH
 is forwarded only to the controller's loopback interface. The harness checks
-the declared fresh/0.1.4-beta/0.1.5-beta/0.1.6-beta baseline, protected settings, installer
+the declared fresh or 0.1.4-beta through 0.1.8-beta baseline, protected settings, installer
 completion, reload and doctor results. Scenarios cover installation, inactive
 cron, absent Dashboard, TERM/INT/HUP and an abrupt VM power interruption followed
 by authenticated recovery and retry. Power interruption tests require a VM;
@@ -229,7 +328,7 @@ Copied or restored central settings may be owned by root rather than Asterisk, o
 
 The authenticated worker keeper holds the configuration mutex until completion or recovery; it validates the current directory and mutex before and after acquisition. Unsafe files are rejected without blocking on FIFOs or adopting hard links. Active editors have a bounded wait. Failure markers identify publisher approval, legacy permission recovery, previous collector recovery or worker/configuration coordination separately. Review the first specific error in the protected installer log. Successful final verification clears the installation marker; manual permission changes alone do not establish a successful installation.
 
-A managed entry in `/etc/asterisk/freepbx_chown.conf` excludes only `/var/lib/asterisk/SLS_Mass_Notifications_Plugin` from recursive permission normalization. Existing unrelated settings remain intact. Conflicting custom SLS permission directives require administrator review. Managed changes have private recovery evidence; concurrent administrator edits are not silently overwritten.
+A managed entry in `/etc/asterisk/freepbx_chown.conf` excludes only `/var/lib/asterisk/SLS_Mass_Notifications_Plugin` from recursive permission normalization. Existing unrelated settings remain intact. Conflicting custom SLL permission directives require administrator review. Managed changes have private recovery evidence; concurrent administrator edits are not silently overwritten.
 
 After recovery, the installer verifies the approved collector service and a fresh authenticated heartbeat before acquiring notification-worker guards. It can start an approved, enabled inactive collector; disabled, masked or custom service states require review. Do not delete a ledger, loosen runtime checks or repeatedly restart FreePBX to bypass a failed readiness check. Preserve the specific diagnostic and installer recovery locations instead.
 
@@ -241,7 +340,7 @@ Earlier installers can stop with `Previous runtime changed after preflight; no a
 
 Current installers recognize completed or partially completed quarantine only when the protected `runtime-cache-recovery/inventory.json` matches the original approval and the saved cache bytes match their recorded hashes. Each check still verifies authenticated source files and rejects unknown runtime files, unsafe recovery entries and changed caches. Quarantined bytecode never receives execution or rollback approval. Completed quarantine evidence is left intact.
 
-Use the publisher-authenticated installer and package from the exact release generation recorded in the retained transaction. Do not substitute either an older or newer installer merely because it is currently published. After that transaction is recovered, use the intended target release for a new upgrade attempt. If the installer reports an unfinished transaction, use the authenticated recovery command in [Interrupted installations](#interrupted-installations) before retrying. Preserve the transaction and installer log; missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
+Keep the publisher-authenticated installer and package recorded in the retained transaction. The corrected `0.1.9-beta` authenticated repair installer can supply its own separately verified recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace the older signed evidence or approve current live files. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
 
 ## Included offline removal
 
@@ -253,16 +352,26 @@ Only recorded workspaces are cleaned; unrelated `/tmp` files remain untouched.
 
 Run `sudo slsconsole uninstall` or the included `/usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh`. Removal does not download packages or require the installed `sls_privileged_install.py`, speech engine or collector to be healthy. It authenticates fixed teardown helpers against the retained publisher generation and checks independently approved Framework/Dashboard inventories. It drains notification workers under private leases before changing services or removing files, and refuses active phone delivery. It preserves configuration, media, history, logs and recovery keys by default. Purging data is a separate destructive option.
 
-Both crontabs are read and checked before SLS entries are removed. Unexpected read/write failures retain private originals and require review; unrelated jobs are preserved. Retry accepts only exact approved installed or uninstall stock variants. An absent SLS directory must also have an independently checked absent module registry entry. Unknown partial file changes remain a review boundary.
+Both crontabs are read and checked before SLL entries are removed. Unexpected read/write failures retain private originals and require review; unrelated jobs are preserved. Retry accepts only exact approved installed or uninstall stock variants. An absent SLL directory must also have an independently checked absent module registry entry. Unknown partial file changes remain a review boundary.
 
 If a late failure removed the command itself, the signed uninstaller remains under the active retained generation, at `/var/lib/sls-mass-notify-trust/<generation>/module/bin/sls_mass_notify_uninstall.sh`. Run that retained script with Bash after reviewing the reported recovery location. Do not substitute an arbitrary live inventory. A stopped PBX is not started. Software removal and a failed final PBX reload are reported separately.
 
 ## Mail and cron safeguards
 
-SLS requires executable local Postfix `sendmail` and `postqueue` supporting `-j` for email. Missing queue evidence disables SLS email with an explicit reason; the installer does not replace an existing MTA. The queue probe stops at 200 records and has a one-second deadline. A private reservation journal limits all SLS submissions before transport, with stricter system-fault and recovery quotas. Accepted or ambiguous mail is not automatically replayed.
+SLL requires executable local Postfix `sendmail` and `postqueue` supporting `-j` for email. Missing queue evidence disables SLL email with an explicit reason; the installer does not replace an existing MTA. The queue probe stops at 200 records and has a one-second deadline. A private reservation journal limits all SLL submissions before transport, with stricter system-fault and recovery quotas. Accepted or ambiguous mail is not automatically replayed.
 
-All five SLS cron entries use the fixed `sls_cron_runner.py` job names and end in `>/dev/null 2>&1`. Child output is captured in private `cron-diagnostics/<job>.jsonl` files, bounded to 1 MiB each with a 64 KiB output tail. Excessive output and fixed job timeouts terminate the child group. Interpreter/logging failures cannot become cron email. Existing non-SLS cron and Postfix settings are not changed.
+All five SLL cron entries use the fixed `sls_cron_runner.py` job names and end in `>/dev/null 2>&1`. Child output is captured in private `cron-diagnostics/<job>.jsonl` files, bounded to 1 MiB each with a 64 KiB output tail. Excessive output and fixed job timeouts terminate the child group. Interpreter/logging failures cannot become cron email. Existing unrelated cron and Postfix settings are not changed.
 
 ## Beta acknowledgment
 
 The warning appears on each FreePBX administrator's first authenticated page visit after the mandatory wizard or upgrade. Each account must agree separately; later logins do not repeat it while that account's receipt matches the current warning revision. Existing single receipts apply only to their recorded administrator. It cannot be dismissed with a close button, Escape or backdrop click. Its confirmation requires five visible seconds and a server-side five-second session challenge. The receipt is saved in encrypted active/pending configuration without enabling any feature. The Enterprise Labs warning waits until beta acceptance has been saved. This warning does not prevent command-line removal.
+
+### Root-generated voice-selection cache
+
+The optional voice-selection reader now suppresses Python bytecode generation.
+Older installers could leave `/usr/local/bin/sls_mass_notify/__pycache__` owned
+by root with no PBX traversal permission, making the General Settings resource
+check report unreadable storage after installation. Authenticated repair uses
+its existing protected cache quarantine and keeps the original bytes as review
+evidence. Do not widen permissions or execute quarantined bytecode. Verify the
+resource result in General Settings as well as `slsconsole doctor` after repair. The doctor also runs its resource helper as the PBX account when started by root; its broader installer inventory checks retain their root-only authority.

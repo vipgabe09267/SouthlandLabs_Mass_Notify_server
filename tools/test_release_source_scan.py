@@ -52,6 +52,31 @@ class SourceScan(unittest.TestCase):
         for name in ['config-crypto.php', 'contract.php', 'event-log.php', 'media-policy.php', 'security.php']:
             self.assertIsNotNone(denied.fullmatch(name), name)
 
+    def test_operator_portal_apache_guard_exposes_browser_display(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (root / 'slsmassnotifyserver/portal/.htaccess').read_text()
+        match = re.search(r'<FilesMatch "([^"]+)">', source)
+        self.assertIsNotNone(match, 'Operator portal source-file access guard is missing.')
+        denied = re.compile(match.group(1))
+        for name in ['index.php', 'sso.php', 'subscriber.php', 'display.php']:
+            self.assertIsNone(denied.fullmatch(name), name)
+        for name in ['private.php', 'config.php', 'test.php']:
+            self.assertIsNotNone(denied.fullmatch(name), name)
+
+    def test_web_runtime_cannot_delegate_a_root_configuration_purge(self):
+        root = Path(__file__).resolve().parents[1]
+        maintenance = (root / 'slsmassnotifyserver/bin/sls_mass_notify_maintenance.sh').read_text()
+        view = (root / 'slsmassnotifyserver/views/other_settings.php').read_text()
+        page = (root / 'slsmassnotifyserver/page.slsmassnotifyserver_other.php').read_text()
+        module = (root / 'slsmassnotifyserver/Slsmassnotifyserver.class.php').read_text()
+        self.assertNotIn('UNINSTALL_REQUEST_FILE', maintenance)
+        self.assertNotIn('SLS_MASS_NOTIFY_PURGE_CONFIG=1', maintenance)
+        self.assertNotIn('name="slsmassnotifyserver_action" value="complete_uninstall"', view)
+        self.assertNotIn("$action === 'complete_uninstall'", page)
+        self.assertNotIn('function requestCompleteUninstall', module)
+        self.assertIn('slsconsole uninstall --purge', view)
+        self.assertIn('local root shell', view)
+
     def test_every_runnable_test_is_registered_once(self):
         root = Path(__file__).resolve().parents[1]
         build = (root / 'tools/build_tgz.sh').read_text()

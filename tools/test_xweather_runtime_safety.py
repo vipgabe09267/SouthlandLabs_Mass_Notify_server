@@ -69,6 +69,46 @@ with tempfile.TemporaryDirectory(prefix="sls-xweather-state-") as directory:
             fail("corrupt Lightning dedup state was treated as an empty cluster")
 
 
+with tempfile.TemporaryDirectory(prefix="sls-xweather-media-") as directory:
+    media = Path(directory)
+    parent = os.open(media, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    victim = media / 'victim'
+    victim.write_bytes(b'preserve-me')
+    target = media / 'xweather_sequence_fixture.wav'
+    target.symlink_to(victim)
+    descriptor = None
+    try:
+        descriptor, temporary = worker._new_media_output(parent, 'fixture')
+        os.write(descriptor, b'R' * 44)
+        worker._commit_media_output(parent, descriptor, temporary, target.name)
+        if victim.read_bytes() != b'preserve-me' or target.is_symlink() or target.read_bytes() != b'R' * 44:
+            fail('Lightning media commit followed or retained an existing target symlink')
+    finally:
+        if descriptor is not None: os.close(descriptor)
+        os.close(parent)
+
+    parent = os.open(media, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    descriptor = None
+    try:
+        descriptor, temporary = worker._new_media_output(parent, 'fixture-race')
+        os.write(descriptor, b'W' * 44)
+        os.unlink(temporary, dir_fd=parent)
+        os.symlink('victim', temporary, dir_fd=parent)
+        try:
+            worker._commit_media_output(parent, descriptor, temporary, 'xweather_sequence_race.wav')
+        except RuntimeError:
+            pass
+        else:
+            fail('Replaced Lightning temporary name was committed')
+        if victim.read_bytes() != b'preserve-me':
+            fail('Replaced Lightning temporary name changed another file')
+    finally:
+        if descriptor is not None: os.close(descriptor)
+        try: os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError: pass
+        os.close(parent)
+
+
 handler = worker._RejectRedirects()
 try:
     handler.redirect_request(

@@ -123,9 +123,9 @@ def run_script(action, event, *, seconds=10):
         if interpreter == '/usr/bin/node':
             command.append('--preserve-symlinks-main')
         command.append('/proc/self/fd/' + str(descriptor))
-        if action.get('execution_mode','trusted')=='restricted':
+        if action.get('execution_mode','restricted')=='restricted':
             command=restricted_command(descriptor,interpreter)
-        elif action.get('execution_mode','trusted')!='trusted':
+        elif action.get('execution_mode','restricted')!='trusted':
             raise ActionError('Choose trusted or restricted script execution.')
         process = subprocess.Popen(command, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, pass_fds=(descriptor,), cwd='/',

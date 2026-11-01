@@ -298,7 +298,7 @@ trait SlsAnnouncementDelivery
 
     private function announcementSender(array $options = [])
     {
-        if (($options['trigger_source'] ?? '') === 'SLS Operator Portal') {
+        if (in_array($options['trigger_source'] ?? '', ['SLL Operator Portal', 'SLS Operator Portal'], true)) {
             $principal = $GLOBALS['sls_control_principal'] ?? null;
             if (is_array($principal) && isset($principal['username'])) {
                 return $this->sanitizeScheduleText('Operator: ' . $principal['username'], 80, true);
@@ -649,10 +649,22 @@ trait SlsAnnouncementDelivery
             $principal = $GLOBALS['sls_control_principal'] ?? null;
             if (is_array($principal)) {
                 $settings = $this->getActiveSettings();
+                $revision = is_string($principal['authority_revision'] ?? null)
+                    ? $principal['authority_revision'] : null;
+                $principal = \SLS\MassNotify\ApiSecurity::currentCredential(
+                    $settings, (string)($principal['id'] ?? ''), $revision);
+                if (!is_array($principal)) {
+                    return ['success' => false, 'error_code' => 'permission_denied', 'message' => 'This credential is no longer active.'];
+                }
                 if (!\SLS\MassNotify\ApiSecurity::permitsResolvedAnnouncement($principal, $request, $settings)) {
                     return ['success' => false, 'error_code' => 'permission_denied', 'message' => 'The original announcement exceeds this credential\'s current permissions.'];
                 }
-                if (($principal['id'] ?? '') !== 'legacy') { $request['api_credential_id'] = $principal['id']; }
+                if (($principal['id'] ?? '') !== 'legacy') {
+                    $request['api_credential_id'] = $principal['id'];
+                    unset($request['api_credential_revision']);
+                } elseif (($request['api_credential_id'] ?? '') === 'legacy') {
+                    $request['api_credential_revision'] = $principal['authority_revision'];
+                }
             }
             $request['only_channels'] = [];
             // Older releases stored the final receipt journal only inside
@@ -735,14 +747,18 @@ trait SlsAnnouncementDelivery
         $principal = $GLOBALS['sls_control_principal'] ?? null;
         if (is_array($principal)) {
             $settings = $this->getActiveSettings();
-            if (($principal['id'] ?? '') !== 'legacy') {
-                $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings, (string)$principal['id']);
-            }
+            $revision = is_string($principal['authority_revision'] ?? null)
+                ? $principal['authority_revision'] : null;
+            $principal = \SLS\MassNotify\ApiSecurity::currentCredential(
+                $settings, (string)($principal['id'] ?? ''), $revision);
             if (!is_array($principal) || !\SLS\MassNotify\ApiSecurity::permitsResolvedAnnouncement($principal, $request, $settings)) {
                 return ['success' => false, 'error_code' => 'permission_denied', 'delivery_started' => false,
                     'message' => 'The selected recipients exceed this API credential\'s current permissions, or the credential was revoked.'];
             }
-            if ($principal['id'] !== 'legacy') { $request['api_credential_id'] = $principal['id']; }
+            $request['api_credential_id'] = $principal['id'];
+            if ($principal['id'] === 'legacy') {
+                $request['api_credential_revision'] = $principal['authority_revision'];
+            } else { unset($request['api_credential_revision']); }
         }
         if (!empty($request['preview'])) {
             $inventory = $this->getDeviceOverrideInventory();
@@ -893,7 +909,7 @@ trait SlsAnnouncementDelivery
         $store = new \SlsAnnouncementJobStore($this->announcementJobDirectory());
         foreach ($store->pendingIds() as $id) {
             try { $store->reconcile($id); }
-            catch (\Throwable $error) { error_log('SLS announcement reconcile: unsafe_job_state'); }
+            catch (\Throwable $error) { error_log('SLL announcement reconcile: unsafe_job_state'); }
         }
     }
 
@@ -938,10 +954,10 @@ trait SlsAnnouncementDelivery
                 'worker_helper_missing'=>'The protected announcement worker is missing or not executable. Run Repair Installation after reviewing the installer compatibility report.',
                 'php_cli_missing'=>'/usr/bin/php is unavailable. Check the installer compatibility report and the installed PHP CLI package.',
                 'worker_storage_unwritable'=>'Announcement job storage is unreadable or not writable by the PBX service account. Preserve delivery history and review its ownership with the installation doctor.',
-                'worker_probe_missing'=>'No announcement-worker health report exists. Check the SLS root maintenance cron and maintenance log; the last job state is separate from current worker readiness.',
+                'worker_probe_missing'=>'No announcement-worker health report exists. Check the SLL root maintenance cron and maintenance log; the last job state is separate from current worker readiness.',
                 'worker_probe_failed'=>'The announcement worker health check failed. Check the recorded failure category and maintenance log; a previous completed job does not prove current readiness.',
                 'worker_probe_future'=>'The announcement-worker health timestamp is in the future. Check the PBX clock and time synchronization.',
-                'worker_probe_stale'=>'The announcement-worker health report is older than ten minutes. Check the SLS root maintenance cron, its lock and maintenance log. The last completed job is historical.'
+                'worker_probe_stale'=>'The announcement-worker health report is older than ten minutes. Check the SLL root maintenance cron, its lock and maintenance log. The last completed job is historical.'
             ];
             $result['health_reason'] = $healthReasons[$result['health_failure_code']] ?? '';
             $result['latest_state'] = in_array($state['state'] ?? '', ['prepared', 'queued', 'worker_starting', 'running', 'complete', 'failed', 'cancelled', 'expired'], true) ? $state['state'] : 'idle';
@@ -1081,7 +1097,8 @@ trait SlsAnnouncementDelivery
                     $exit = $status['exitcode'] >= 0 ? $status['exitcode']
                         : (!empty($status['signaled']) ? 128 + (int)$status['termsig'] : $closed);
                     $completed((string)$target, ['success' => $exit === 0, 'started' => true,
-                        'exit_code' => $exit, 'reason' => in_array($exit, [124, 137, 143], true) ? 'child_timeout' : 'child_finished']);
+                        'exit_code' => $exit, 'reason' => $exit === 0 ? 'accepted'
+                            : (in_array($exit, [124, 137, 143], true) ? 'child_timeout' : 'sender_exit_nonzero')]);
                 }
                 $remaining = $deadline - hrtime(true) / 1000000000;
                 if ($remaining <= 0) {
@@ -1140,7 +1157,8 @@ trait SlsAnnouncementDelivery
                         $exit = $status['exitcode'] >= 0 ? $status['exitcode']
                             : (!empty($status['signaled']) ? 128 + (int)$status['termsig'] : $closed);
                         $completed((string)$target, ['success' => $exit === 0, 'started' => true,
-                            'exit_code' => $exit, 'reason' => in_array($exit, [124, 137, 143], true) ? 'child_timeout' : 'child_finished']);
+                            'exit_code' => $exit, 'reason' => $exit === 0 ? 'accepted'
+                                : (in_array($exit, [124, 137, 143], true) ? 'child_timeout' : 'sender_exit_nonzero')]);
                         continue;
                     }
                     $running[$target] = ['process' => $process, 'pid' => (int)$status['pid']];
@@ -1220,7 +1238,8 @@ trait SlsAnnouncementDelivery
             }
             if (!isset($request['api_credential_id']) || !$targets) { return $targets; }
             $settings = $this->getActiveSettings();
-            $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings, (string)$request['api_credential_id']);
+            $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings,
+                (string)$request['api_credential_id'], $request['api_credential_revision'] ?? null);
             $allowed = [];
             if (is_array($principal) && \SLS\MassNotify\ApiSecurity::permits($principal, 'send')) {
                 $allowed = ($principal['audience']['unrestricted'] ?? false) === true ? $targets
@@ -1246,7 +1265,8 @@ trait SlsAnnouncementDelivery
         $credentialVoiceIds = null;
         if (isset($request['api_credential_id'])) {
             $settings = $this->getActiveSettings();
-            $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings, (string)$request['api_credential_id']);
+            $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings,
+                (string)$request['api_credential_id'], $request['api_credential_revision'] ?? null);
             $allowed = ['phones' => [], 'desktops' => [], 'webhooks' => [], 'voice_recipient_ids' => []];
             if (is_array($principal) && \SLS\MassNotify\ApiSecurity::permits($principal, 'send')) {
                 $allowed = ($principal['audience']['unrestricted'] ?? false) === true
@@ -1387,6 +1407,7 @@ trait SlsAnnouncementDelivery
                     'tts_volume' => $request['volume'], 'trigger_source' => $request['trigger_source'], 'sender' => $sender,
                     'priority' => $request['priority'] ?? 'normal',
                     'api_credential_id' => $request['api_credential_id'] ?? '',
+                    'api_credential_revision' => $request['api_credential_revision'] ?? null,
                     'automation_context' => $request['automation_context'] ?? null,
                     'outbound_targets' => $batch['outbound'], 'correlation' => $request['delivery_id'] ?? '',
                     'schedule_deadline_at' => $scheduleDeadline,
@@ -1441,7 +1462,7 @@ trait SlsAnnouncementDelivery
             $webhooks = $this->dispatchAnnouncementWebhooks($request['webhooks'], $request['message'], $request['title'],
                 $request['background_color'], [['Sent by', $sender]], $request['delivery_id'] ?? '',
                 $request['webhook_fingerprints'] ?? [], $request['delivery_timestamp'] ?? '', $scheduleDeadline, $request['incident_context'] ?? null,
-                array_filter(array_intersect_key($request, array_flip(['api_credential_id','automation_context'])), static fn($value)=>$value !== null));
+                array_filter(array_intersect_key($request, array_flip(['api_credential_id','api_credential_revision','automation_context'])), static fn($value)=>$value !== null));
         } catch (\Throwable $error) {
             $webhookUncertain = true;
             $webhooks = ['accepted' => [], 'failed' => array_map(static function ($id) {
@@ -1508,7 +1529,9 @@ trait SlsAnnouncementDelivery
             $started = !empty($result['started']);
             $state = $accepted ? 'submitted' : ($started ? 'uncertain' : 'failed');
             $detail = $accepted ? 'Asterisk accepted the request; handset display is not confirmed.'
-                : ($started ? 'The visual sender started, but its submission could not be confirmed. It will not be replayed automatically.'
+                : ($started ? (($result['reason'] ?? '') === 'child_timeout'
+                    ? 'The phone visual sender exceeded its deadline. Submission is unconfirmed and will not be replayed automatically.'
+                    : 'The phone visual sender exited without confirming Asterisk acceptance. Submission is unconfirmed and will not be replayed automatically.')
                     : (($result['reason'] ?? '') === 'phase_timeout'
                         ? 'The phone visual time budget ended before this sender started. No submission was attempted.'
                         : 'The phone visual sender could not be started. No submission was attempted.'));
@@ -1537,7 +1560,8 @@ trait SlsAnnouncementDelivery
             }
             if (isset($request['api_credential_id'])) {
                 $settings = $this->getActiveSettings();
-                $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings, $request['api_credential_id']);
+                $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings,
+                    $request['api_credential_id'], $request['api_credential_revision'] ?? null);
                 $phones = is_array($principal) ? (\SLS\MassNotify\ApiSecurity::allowedAudience($principal, $settings)['phones'] ?? []) : [];
                 return is_array($principal) && \SLS\MassNotify\ApiSecurity::permits($principal, 'send')
                     && (($principal['audience']['unrestricted'] ?? false) === true
@@ -1632,11 +1656,15 @@ trait SlsAnnouncementDelivery
         }
         if (($result['state'] ?? '') === 'rejected' && $result['ok'] === false) {
             $code = $result['error_code'] ?? '';
+            if ($code === 'email_authorization_changed' && ($result['submission_started'] ?? null) === false && $result['retryable'] === false) {
+                return ['state'=>'cancelled', 'retryable'=>false, 'submission_started'=>false,
+                    'detail'=>'Current email destination, sender, source authority or deadline no longer permits this submission. No email was submitted.'];
+            }
             $mailAdmissionErrors = [
                 'mail_queue_full' => 'The PBX mail queue is full. Check Postfix delivery and available storage before sending again.',
                 'mail_queue_unavailable' => 'The PBX mail queue could not be checked. Check Postfix and its postqueue command before sending again.',
-                'mail_rate_limited' => 'The SLS mail submission limit was reached. Wait for capacity before sending again.',
-                'mail_admission_unavailable' => 'SLS mail capacity could not be reserved safely. Check the private mail admission files before sending again.',
+                'mail_rate_limited' => 'The SLL mail submission limit was reached. Wait for capacity before sending again.',
+                'mail_admission_unavailable' => 'SLL mail capacity could not be reserved safely. Check the private mail admission files before sending again.',
             ];
             if (isset($mailAdmissionErrors[$code]) && ($result['submission_started'] ?? null) === false && $result['retryable'] === false) {
                 return ['state' => 'failed', 'retryable' => false, 'submission_started' => false, 'detail' => $mailAdmissionErrors[$code]];
@@ -1664,6 +1692,30 @@ trait SlsAnnouncementDelivery
 
     protected function announcementEmailMonotonic(): float { return hrtime(true) / 1000000000; }
 
+    private function announcementEmailTargetAuthorized(array $request, string $id, $frozen): bool
+    {
+        try {
+            $settings = $this->getActiveSettings();
+            $current = $this->announcementEmailTargets($settings)[$id] ?? null;
+            $allowed = \SLS\MassNotify\RuntimeState::running($settings) && is_array($frozen) && is_array($current)
+                && is_string($frozen['fingerprint'] ?? null)
+                && hash_equals($frozen['fingerprint'], $this->announcementEmailFingerprint($current))
+                && hash_equals($frozen['fingerprint'], $this->announcementEmailFingerprint($frozen));
+            if ($allowed && isset($request['api_credential_id'])) {
+                $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings,
+                    (string)$request['api_credential_id'], $request['api_credential_revision'] ?? null);
+                $allowed = is_array($principal) && \SLS\MassNotify\ApiSecurity::permitsResolvedAnnouncement(
+                    $principal, ['email_recipient_ids'=>[$id]], $settings);
+            }
+            if ($allowed && !empty($request['automation_context'])) { $allowed = $this->automationContextPermitted($request['automation_context']); }
+            if ($allowed && !empty($request['weather_context'])) {
+                $weather = $this->weatherChannelAuthorization($request['weather_context']);
+                $allowed = is_array($weather) && ($weather['status'] ?? null) === 'eligible';
+            }
+            return $allowed;
+        } catch (\Throwable $error) { return false; }
+    }
+
     private function deliverAnnouncementEmailTargets(array $request, array &$receipts, callable $progress): void
     {
         $ids = $request['email_recipient_ids'] ?? [];
@@ -1680,26 +1732,7 @@ trait SlsAnnouncementDelivery
                 'attempt_id' => $attempt, 'message_id' => is_array($frozen) ? ($frozen['message_id'] ?? '') : '',
                 'email_phase_deadline' => $phaseDeadline, 'submission_started' => false];
             if(is_array($frozen)&&is_string($frozen['address']??null)){$row['mail_recipient_hash']=hash('sha256',strtolower($frozen['address']));}
-            $allowed = false; $settings = $this->getActiveSettings();
-            try {
-                $current = $this->announcementEmailTargets($settings)[$id] ?? null;
-                $allowed = is_array($frozen) && is_array($current)
-                    && is_string($frozen['fingerprint'] ?? null)
-                    && hash_equals($frozen['fingerprint'], $this->announcementEmailFingerprint($current))
-                    && hash_equals($frozen['fingerprint'], $this->announcementEmailFingerprint($frozen));
-            } catch (\Throwable $error) { $allowed = false; }
-            if ($allowed && isset($request['api_credential_id'])) {
-                $principal = \SLS\MassNotify\ApiSecurity::currentCredential($settings, (string)$request['api_credential_id']);
-                $allowed = is_array($principal) && \SLS\MassNotify\ApiSecurity::permits($principal, 'send')
-                    && (($principal['audience']['unrestricted'] ?? false) === true
-                        || in_array($id, \SLS\MassNotify\ApiSecurity::allowedAudience($principal, $settings)['email_recipient_ids'] ?? [], true));
-            }
-            if ($allowed && !empty($request['automation_context'])) { $allowed=$this->automationContextPermitted($request['automation_context']); }
-            if ($allowed && !empty($request['weather_context'])) {
-                try { $weather=$this->weatherChannelAuthorization($request['weather_context']); }
-                catch (\Throwable $error) { $weather=['status'=>'deferred']; }
-                $allowed=is_array($weather)&&($weather['status']??null)==='eligible';
-            }
+            $allowed = $this->announcementEmailTargetAuthorized($request, $id, $frozen);
             if (!$allowed) { $row['detail'] = 'Email destination, sender, channel availability or API permission changed after Send. No email was submitted.'; }
             elseif ($scheduleDeadline !== null && time() >= $scheduleDeadline) {
                 $row['state'] = 'failed'; $row['failure_category'] = 'schedule_deadline';
@@ -1722,10 +1755,40 @@ trait SlsAnnouncementDelivery
                 $receipts[] = $row;
                 // A failed intent write throws before any sender can launch.
                 $progress($receipts, 'Submitting saved email destination…');
-                try { $outcome = $scheduleDeadline !== null && time() >= $scheduleDeadline
-                    ? ['state' => 'failed', 'retryable' => false, 'submission_started' => false, 'failure_category' => 'schedule_deadline',
-                        'detail' => 'The scheduled deadline passed while recording intent. No email was submitted.']
-                    : $this->submitAnnouncementEmail($envelope); }
+                try {
+                    if ($scheduleDeadline !== null && time() >= $scheduleDeadline) {
+                        $outcome = ['state' => 'failed', 'retryable' => false, 'submission_started' => false, 'failure_category' => 'schedule_deadline',
+                            'detail' => 'The scheduled deadline passed while recording intent. No email was submitted.'];
+                    } elseif (time() >= $request['email_expires_at'] || !$this->announcementEmailTargetAuthorized($request, $id, $frozen)) {
+                        $outcome = ['state' => 'cancelled', 'retryable' => false, 'submission_started' => false,
+                            'detail' => 'Email destination, sender, source authority or original lifetime changed while recording intent. No email was submitted.'];
+                    } else {
+                        // Old injected sender callbacks keep their exact envelope.
+                        // The installed module always supplies a snapshot-bound guard.
+                        if (method_exists($this, 'announcementEmailAuthorizationHashes')) {
+                            try { $hashes = $this->announcementEmailAuthorizationHashes($id, $frozen['fingerprint']); }
+                            catch (\Throwable $error) { $hashes = []; }
+                            if (!$hashes) {
+                                $outcome = ['state'=>'cancelled', 'retryable'=>false, 'submission_started'=>false,
+                                    'detail'=>'The current email policy snapshot could not be confirmed. No email was submitted.'];
+                            } else {
+                                $envelope['authorization'] = ['recipient_id'=>$id, 'target_hashes'=>$hashes,
+                                    'expires_at'=>$request['email_expires_at'], 'schedule_deadline'=>$scheduleDeadline];
+                                foreach (['api_credential_id', 'api_credential_revision', 'automation_context'] as $key) {
+                                    // Ordinary manual jobs carry a null automation context.
+                                    // Keep absence out of the child's strict authority envelope.
+                                    if ($key === 'automation_context' && ($request[$key] ?? null) === null) { continue; }
+                                    if (array_key_exists($key, $request)) { $envelope['authorization'][$key] = $request[$key]; }
+                                }
+                                if (!empty($request['weather_context'])) {
+                                    $envelope['authorization']['weather_context'] = array_intersect_key($request['weather_context'],
+                                        array_flip(['source_validity','event','severity','deadline_at']));
+                                }
+                                $outcome = $this->submitAnnouncementEmail($envelope);
+                            }
+                        } else { $outcome = $this->submitAnnouncementEmail($envelope); }
+                    }
+                }
                 catch (\Throwable $error) { $outcome = ['state' => 'uncertain', 'retryable' => false, 'detail' => 'Email submission could not be confirmed. It will not be replayed automatically.']; }
                 $receipts[$index] = array_merge($row, $outcome);
                 // Persist this result before considering another destination.

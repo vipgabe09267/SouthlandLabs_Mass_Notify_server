@@ -233,7 +233,7 @@ class ExternalJournalSafety(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs['env'],
                              {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'})
 
-    def test_malformed_channel_reply_does_not_block_independent_email(self):
+    def test_unconfirmed_channel_reply_is_uncertain_and_does_not_block_independent_email(self):
         module = self.load_runtime()
         channels = {'voice_recipient_ids': ['voice_' + 'a' * 24], 'sms_recipient_ids': [], 'fingerprints': {}}
         for raw in ('[]', '{"success":true,"status":[]}', '{"success":true,"status":"unexpected"}'):
@@ -250,8 +250,38 @@ class ExternalJournalSafety(unittest.TestCase):
                                                      validity_checker=lambda *args: ('eligible', '', None))
                 self.assertEqual(calls, [1])
                 saved = module._load_retry_state(path)['deliveries'][key]
-                self.assertTrue(saved['channels_pending'])
+                self.assertFalse(saved['channels_pending'])
+                self.assertEqual(saved['channels_uncertain']['status'], 'uncertain')
                 self.assertFalse(saved['email_pending'])
+                with mock.patch.object(module.subprocess, 'run') as run:
+                    module.retry_external_deliveries(path, {}, 'nws', live=True,
+                                                     validity_checker=lambda *args: ('eligible', '', None))
+                run.assert_not_called()
+
+    def test_timed_out_channel_handoff_is_never_replayed(self):
+        module = self.load_runtime()
+        channels = {'voice_recipient_ids': ['voice_' + 'a' * 24], 'sms_recipient_ids': [], 'fingerprints': {}}
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / 'external.json'
+            key = module.queue_external_delivery(
+                path, {}, 'timeout-channel', 'Alert', 'Body', source='nws', channel_snapshot=channels,
+            )
+            with mock.patch.object(module.subprocess, 'run', side_effect=subprocess.TimeoutExpired('php', 45)) as run:
+                first = module.retry_external_deliveries(
+                    path, {}, 'nws', live=True,
+                    validity_checker=lambda *_args: ('eligible', '', None),
+                )
+                second = module.retry_external_deliveries(
+                    path, {}, 'nws', live=True,
+                    validity_checker=lambda *_args: ('eligible', '', None),
+                )
+            saved = module._load_retry_state(path)['deliveries'][key]
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual((first['pending'], first['uncertain']), (0, 1))
+            self.assertEqual((second['pending'], second['uncertain']), (0, 1))
+            self.assertFalse(saved['channels_pending'])
+            self.assertEqual(saved['channels_uncertain']['error'], 'weather_channel_submission_unconfirmed')
+            self.assertEqual(saved['terminal_status'], 'uncertain')
 
     def test_directory_change_cannot_retarget_a_leased_write(self):
         spec=importlib.util.spec_from_file_location('external_parent_boundary',RUNTIME/'sls_notification_destinations.py')

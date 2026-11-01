@@ -50,5 +50,5 @@ if __name__ == '__main__':
         if len(sys.argv) != 3: raise ValueError('Expected output path and byte limit')
         write_stream(sys.argv[1], int(sys.argv[2]))
     except (OSError, ValueError) as error:
-        print('SLS bounded download: ' + str(error), file=sys.stderr)
+        print('SLL bounded download: ' + str(error), file=sys.stderr)
         sys.exit(1)

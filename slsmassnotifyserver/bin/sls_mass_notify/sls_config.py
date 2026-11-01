@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read and validate the SLS Mass Notify central configuration."""
+"""Read and validate the SLL Mass Notify Server central configuration."""
 
 import json
 import ipaddress
@@ -166,7 +166,7 @@ def main():
         print(f"Central config {path} is not a JSON object", file=sys.stderr)
         return 1
     if type(data.get('runtime_enabled', True)) is not bool:
-        print('SLS runtime_enabled must be a boolean; correct the protected configuration before activation.', file=sys.stderr)
+        print('SLL runtime_enabled must be a boolean; correct the protected configuration before activation.', file=sys.stderr)
         return 1
 
     try:
@@ -312,7 +312,7 @@ def main():
         "QUIET_HOURS_ENABLED": enabled(data.get("quiet_hours_enabled")),
         "QUIET_HOURS_START": clock_time(data.get("quiet_hours_start"), "21:00"),
         "QUIET_HOURS_END": clock_time(data.get("quiet_hours_end"), "06:00"),
-        "MAIL_FROM_NAME": re.sub(r"[\r\n]+", " ", text(data.get("mail_from_name"), "SLS Mass Notification System"))[:80],
+        "MAIL_FROM_NAME": re.sub(r"[\r\n]+", " ", text(data.get("mail_from_name"), "SLL Mass Notify Server"))[:80],
         "MAIL_FROM_LOCAL_PART": normalized_sender_local_part(data.get("mail_from_local_part")) or "no-reply",
         "MAIL_FROM_ADDR": sender_address(data),
         "ALERT_EMAIL_SUBJECT": text(data.get("alert_email_subject")),
@@ -325,7 +325,7 @@ def main():
         "AMI_HOST": "127.0.0.1",
         "AMI_PORT": bounded_int(ami.get("port"), 1, 65535, 5038),
         "GITHUB_UPDATES_ENABLED": enabled(updates.get("github_enabled")),
-        "GITHUB_UPDATES_REPOSITORY": text(updates.get("repository"), "vipgabe09267/SouthlandServers_Mass_Notify_server"),
+        "GITHUB_UPDATES_REPOSITORY": text(updates.get("repository"), "vipgabe09267/SouthlandLabs_Mass_Notify_server"),
         "GITHUB_UPDATES_CHANNEL": text(updates.get("channel"), "beta"),
         "GITHUB_UPDATES_PIN": text(updates.get("pinned_version")),
         "GITHUB_UPDATES_WINDOW_START": text(updates.get("window_start")),

@@ -59,15 +59,20 @@ final class EnterpriseIdentityHttp
         }
         throw new \DomainException('Provider hostname DNS alias chain exceeds its limit.');
     }
-    /** Resolve and vet one immutable cURL destination. Public for deterministic security fixtures. */
-    public static function pinnedAddress(string $host,array $policy,?callable $resolver=null): string
+    /** Resolve and vet the complete immutable destination set before connecting. */
+    public static function pinnedAddresses(string $host,array $policy,?callable $resolver=null): array
     {
         $policy=self::policy($policy);$host=EnterpriseIdentityConfig::hostname($host);
         if(!in_array($host,$policy['hosts'],true)){throw new \DomainException('Provider endpoint hostname is outside the explicit allowlist.');}
-        if(isset($policy['private_pins'][$host])){return $policy['private_pins'][$host];}
+        if(isset($policy['private_pins'][$host])){return [$policy['private_pins'][$host]];}
         $addresses=($resolver??[self::class,'resolve'])($host);if(!is_array($addresses)||!array_is_list($addresses)||!$addresses||count($addresses)>16){throw new \DomainException('Provider hostname resolution returned an invalid address set.');}
         $valid=[];foreach($addresses as $address){$address=self::canonicalIp($address);if(!self::isPublic($address)){throw new \DomainException('Provider hostname resolves to a private, local or reserved address without an exact private pin.');}$valid[$address]=true;}
-        $valid=array_keys($valid);sort($valid,SORT_STRING);return $valid[0];
+        $valid=array_keys($valid);sort($valid,SORT_STRING);return $valid;
+    }
+    /** Preserve the deterministic single-address inspection API. */
+    public static function pinnedAddress(string $host,array $policy,?callable $resolver=null): string
+    {
+        return self::pinnedAddresses($host,$policy,$resolver)[0];
     }
     public static function request(string $url,array $policy,string $method='GET',array $form=[],array $headers=[]): array
     {
@@ -83,21 +88,31 @@ final class EnterpriseIdentityHttp
         return self::perform($url,explode('?',$url,2)[0],$policy,$method,$form,$headers,$timeoutMs);
     }
 
+    private static function formBody(array $form): string
+    {
+        // OAuth 2.0 token requests use application/x-www-form-urlencoded as
+        // defined by HTML 4.01: spaces are encoded as "+", not "%20".
+        return http_build_query($form,'','&',PHP_QUERY_RFC1738);
+    }
+
     private static function perform(string $url,string $validated,array $policy,string $method,array $form,array $headers,int $timeoutMs): array
     {
-        $validated=EnterpriseIdentityConfig::url($validated,'Provider endpoint');$host=EnterpriseIdentityConfig::hostname(parse_url($validated,PHP_URL_HOST));$port=(int)(parse_url($validated,PHP_URL_PORT)??443);$address=self::pinnedAddress($host,$policy);
+        $validated=EnterpriseIdentityConfig::url($validated,'Provider endpoint');$host=EnterpriseIdentityConfig::hostname(parse_url($validated,PHP_URL_HOST));$port=(int)(parse_url($validated,PHP_URL_PORT)??443);$addresses=self::pinnedAddresses($host,$policy);
         if(!function_exists('curl_init')||!defined('CURLOPT_RESOLVE')){throw new \DomainException('The PHP cURL runtime cannot pin provider DNS results.');}
-        $h=curl_init($url);if($h===false){throw new \DomainException('Provider HTTPS request could not be initialized.');}$body='';$resolveAddress=str_contains($address,':')?'['.$address.']':$address;
+        if(count($addresses)>1&&(!function_exists('curl_version')||(curl_version()['version_number']??0)<0x073b00)){throw new \DomainException('The PHP cURL runtime cannot pin multiple provider addresses. Update PHP/libcurl before using this endpoint.');}
+        $h=curl_init($url);if($h===false){throw new \DomainException('Provider HTTPS request could not be initialized.');}$body='';$resolveAddresses=array_map(static fn(string $address):string=>str_contains($address,':')?'['.$address.']':$address,$addresses);
         $options=ScopedTls::curlOptions(self::policy($policy)['tls'])+[CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,CURLOPT_REDIR_PROTOCOLS=>CURLPROTO_HTTPS,CURLOPT_FOLLOWLOCATION=>false,CURLOPT_SSL_VERIFYPEER=>true,
             CURLOPT_SSL_VERIFYHOST=>2,CURLOPT_SSLVERSION=>CURL_SSLVERSION_TLSv1_2,CURLOPT_CONNECTTIMEOUT_MS=>min(5000,$timeoutMs),CURLOPT_TIMEOUT_MS=>$timeoutMs,CURLOPT_PROXY=>'',CURLOPT_NOPROXY=>'*',
-            CURLOPT_RESOLVE=>[$host.':'.$port.':'.$resolveAddress],CURLOPT_HTTPHEADER=>$headers,
+            // Native connection fallback stays inside this vetted set and the
+            // existing total deadline; there is no application-level POST retry.
+            CURLOPT_RESOLVE=>[$host.':'.$port.':'.implode(',',$resolveAddresses)],CURLOPT_HTTPHEADER=>$headers,
             CURLOPT_WRITEFUNCTION=>static function($curl,string $bytes)use(&$body):int{if(strlen($body)+strlen($bytes)>1048576){return 0;}$body.=$bytes;return strlen($bytes);}];
-        if($method==='POST'){$options[CURLOPT_POST]=true;$options[CURLOPT_POSTFIELDS]=http_build_query($form,'','&',PHP_QUERY_RFC3986);}
+        if($method==='POST'){$options[CURLOPT_POST]=true;$options[CURLOPT_POSTFIELDS]=self::formBody($form);}
         elseif($method!=='GET'){curl_close($h);throw new \LogicException('Unsupported provider method.');}
         if(!curl_setopt_array($h,$options)){curl_close($h);throw new \DomainException('Provider HTTPS safeguards could not be configured.');}
         try{$ok=curl_exec($h);$status=(int)curl_getinfo($h,CURLINFO_RESPONSE_CODE);$primaryRaw=(string)curl_getinfo($h,CURLINFO_PRIMARY_IP);
             if(!$ok||$status!==200||$primaryRaw===''){throw new \DomainException('Provider HTTPS request failed or reached an address outside its pinned DNS result.');}
-            $primary=self::canonicalIp($primaryRaw);if(!hash_equals($address,$primary)){throw new \DomainException('Provider HTTPS request failed or reached an address outside its pinned DNS result.');}
+            $primary=self::canonicalIp($primaryRaw);if(!in_array($primary,$addresses,true)){throw new \DomainException('Provider HTTPS request failed or reached an address outside its pinned DNS result.');}
         }finally{curl_close($h);}
         try{return ApiSecurity::jsonObject($body,false,32);}catch(\JsonException|\InvalidArgumentException $error){throw new \DomainException('Provider returned invalid or ambiguous JSON.');}
     }

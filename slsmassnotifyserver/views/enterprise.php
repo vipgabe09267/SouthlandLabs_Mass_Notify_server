@@ -1,12 +1,12 @@
 <?php
 $e=static fn($value):string=>htmlspecialchars((string)$value,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');
 $scriptHash=@hash_file('sha256',__DIR__.'/enterprise.js');$styleHash=@hash_file('sha256',__DIR__.'/enterprise.css');
-if (!is_string($scriptHash)||!is_string($styleHash)) { throw new RuntimeException('Enterprise Labs assets are unavailable. Repair the signed SLS module before opening this page.'); }
+if (!is_string($scriptHash)||!is_string($styleHash)) { throw new RuntimeException('Enterprise Labs assets are unavailable. Repair the signed SLL module before opening this page.'); }
 $revision=substr(hash('sha256',$scriptHash.$styleHash),0,12);
 ?>
 <link rel="stylesheet" href="modules/slsmassnotifyserver/views/enterprise.css?v=<?php echo $revision; ?>">
 <div id="sls-enterprise" class="sls-enterprise-workspace">
-<header class="sls-ent-heading sls-enterprise-title"><div><span class="sls-ent-eyebrow">SLS MASS NOTIFY</span><h1>Enterprise Labs</h1><p>Site links, device integrations and incident response.</p></div><?php include __DIR__.'/labs.php'; ?></header>
+<header class="sls-ent-heading sls-enterprise-title"><div><span class="sls-ent-eyebrow">SLL MASS NOTIFY</span><h1>Enterprise Labs</h1><p>Site links, device integrations and incident response.</p></div><?php include __DIR__.'/labs.php'; ?></header>
 <div class="sls-labs-activation-card">
 <div><p id="sls-labs-activation" role="status"><span class="label label-danger">Inactive</span> <small>Enterprise Labs is disabled.</small></p><p class="sls-labs-activation-help">Use Feature manager to enable Labs and choose its tools.</p></div>
 <div class="sls-ent-actions"><span class="sls-labs-risk-receipt"><i class="fa fa-check-circle" aria-hidden="true"></i> Risk warning acknowledged</span><button type="button" class="btn btn-default" id="sls-labs-configure"><i class="fa fa-sliders" aria-hidden="true"></i> Feature manager</button></div>

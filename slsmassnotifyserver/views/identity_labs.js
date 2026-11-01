@@ -122,7 +122,7 @@
       if (source.type === 'entra') {
         for (const [key, label] of [['tenant_id', 'Tenant ID'], ['client_id', 'Application ID'], ['cloud_client_secret', 'Application secret value']])
           input(fields, label, source[key], value => change(key, value), { type: key === 'cloud_client_secret' ? 'password' : 'text' });
-        section.append(node('p', 'Labs · Microsoft Graph v1.0. Grant application User.Read.All with administrator consent. SLS only reads users; it cannot provision sign-ins or grant SMS consent. A complete preview is required before applying changes.', 'help-block'));
+        section.append(node('p', 'Labs · Microsoft Graph v1.0. Grant application User.Read.All with administrator consent. SLL only reads users; it cannot provision sign-ins or grant SMS consent. A complete preview is required before applying changes.', 'help-block'));
       }
       if (source.type === 'google') {
         for (const [key, label] of [['google_client_email', 'Service-account email'], ['google_admin_subject', 'Delegated administrator email'], ['google_customer', 'Workspace customer ID']])

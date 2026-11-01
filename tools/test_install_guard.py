@@ -52,6 +52,15 @@ class GuardTests(unittest.TestCase):
         child.communicate(b'release\n',timeout=5);self.assertEqual(child.returncode,0)
         for name in names:
             fd=self.lock(self.data/name);os.close(fd)
+
+    def test_phone_history_retention_is_excluded_until_guard_release(self):
+        path=self.data/'phone-history-retention.lock';path.touch(mode=0o640)
+        account=pwd.getpwnam('asterisk');os.chown(path,account.pw_uid,account.pw_gid)
+        child=self.start();self.ready(child)
+        with path.open('rb') as handle:
+            with self.assertRaises(BlockingIOError):fcntl.flock(handle,fcntl.LOCK_SH|fcntl.LOCK_NB)
+        child.communicate(b'release\n',timeout=5);self.assertEqual(child.returncode,0)
+        with path.open('rb') as handle:fcntl.flock(handle,fcntl.LOCK_SH|fcntl.LOCK_NB)
     def test_worker_paging_and_settings_contention_never_becomes_ready(self):
         for name in ['enterprise-worker.lock','announcement-activity.lock','live-paging-slots/global-15.lock','mass-notifications.config.lock']:
             with self.subTest(name=name):

@@ -19,7 +19,7 @@ HELPER = ROOT / 'slsmassnotifyserver/bin/sls_mass_notify/sls_update_policy.py'
 spec = importlib.util.spec_from_file_location('sls_update_policy', HELPER)
 policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(policy)
-REPO = 'vipgabe09267/SouthlandServers_Mass_Notify_server'
+REPO = 'vipgabe09267/SouthlandLabs_Mass_Notify_server'
 
 
 def release(version='1.2.3', **values):

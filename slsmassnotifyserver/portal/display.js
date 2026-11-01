@@ -24,7 +24,7 @@ class SlsDisplayFeed {
             expires = Math.min(expires, created + timeout * 1000);
         }
         if (expires <= now || row.message_type === 'cancel') return null;
-        const title = row.title || row.event || 'SLS announcement';
+        const title = row.title || row.event || 'SLL announcement';
         const message = row.message || row.body || row.description || '';
         if (typeof title !== 'string' || title.length > 500 || typeof message !== 'string' || message.length > 16384
             || typeof row.is_test !== 'boolean') throw Error('Unsupported announcement text or test flag.');

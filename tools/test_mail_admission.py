@@ -229,11 +229,15 @@ class MailAdmissionTests(unittest.TestCase):
         self.assertEqual(second['pending'], 0); self.assertEqual(second['uncertain'], 0)
 
     def test_weather_acceptance_before_failed_receipt_write_never_replays(self):
-        path = self.weather_source(); writes = 0; calls = []; original = destinations._write_retry_state
+        path = self.weather_source(); failed = False; calls = []; original = destinations._write_retry_state
         def write(target, state):
-            nonlocal writes
-            writes += 1
-            if writes == 3: raise destinations.RetryStateError('synthetic failed receipt write')
+            nonlocal failed
+            accepted_receipt = any(not record.get('email_inflight')
+                and record.get('destination_receipts', {}).get('email:email', {}).get('status') == 'accepted'
+                for record in state['deliveries'].values())
+            if calls and accepted_receipt and not failed:
+                failed = True
+                raise destinations.RetryStateError('synthetic failed receipt write')
             return original(target, state)
         def accepted(*args):
             stored = json.loads(path.read_bytes())
@@ -241,6 +245,7 @@ class MailAdmissionTests(unittest.TestCase):
             calls.append(1); return True
         with mock.patch.object(destinations, '_write_retry_state', side_effect=write):
             with self.assertRaises(destinations.RetryStateError): self.retry_weather(path, accepted)
+        self.assertEqual(calls, [1])
         recovered = self.retry_weather(path, accepted)
         self.assertEqual(calls, [1]); self.assertEqual(recovered['uncertain'], 1); self.assertEqual(recovered['pending'], 0)
 

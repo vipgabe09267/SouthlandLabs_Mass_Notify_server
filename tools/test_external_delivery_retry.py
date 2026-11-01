@@ -29,6 +29,10 @@ from unittest import mock
 test_clock = mock.patch.object(MODULE.time, 'time', return_value=1100)
 test_clock.start()
 
+assert MODULE._retry_claim_active({'worker_claim': 'a' * 32, 'worker_claimed_at': 1100}, 1000)
+assert MODULE._retry_claim_active({'worker_claim': 'a' * 32, 'worker_claimed_at': 1100}, 1219)
+assert not MODULE._retry_claim_active({'worker_claim': 'a' * 32, 'worker_claimed_at': 1100}, 1220)
+
 
 def fail(message):
     raise AssertionError(message)
@@ -254,6 +258,32 @@ with tempfile.TemporaryDirectory(prefix="sls-external-retry-fairness-") as direc
         fail("legacy retry record did not receive the next durable attempt sequence")
 
 
+with tempfile.TemporaryDirectory(prefix="sls-external-retry-lock-boundary-") as directory:
+    state_path = Path(directory) / "external-deliveries.json"
+    email_only = {"discord_webhooks": [], "generic_webhooks": []}
+    MODULE.queue_external_delivery(
+        state_path, email_only, "slow-transport", "Alert", "Body",
+        source="nws", email_recipients="alerts@example.com", now=1000,
+    )
+
+    def queue_during_transport(*_args):
+        # Transport callbacks must execute outside the retry-state lock. A live
+        # weather poll can durably admit a second alert while this send is slow.
+        MODULE.queue_external_delivery(
+            state_path, email_only, "admitted-during-transport", "Second", "Body",
+            source="nws", now=1001,
+        )
+        return True
+
+    MODULE.retry_external_deliveries(
+        state_path, email_only, "nws", live=True,
+        email_sender=queue_during_transport, max_records=1,
+    )
+    assert MODULE.external_delivery_recorded(
+        state_path, "nws", "admitted-during-transport"
+    ), "External transport retained the exclusive retry-state lock"
+
+
 with tempfile.TemporaryDirectory(prefix="sls-external-uncertain-") as directory:
     state_path = Path(directory) / "external-deliveries.json"
     uncertainty_config = {
@@ -391,6 +421,7 @@ with tempfile.TemporaryDirectory(prefix="sls-source-validity-") as directory:
         observation_path.write_text(json.dumps({"snapshots": {"north": {
             "zone": "TXC491", "observed_at": observed_at,
             "active": {validity["chain_key"]: feature} if feature else {}}}}))
+        observation_path.chmod(0o640)
 
     record = {"source_validity": validity, "payload": {"event": "Tornado Warning"}}
     write_observation()
@@ -483,15 +514,22 @@ with tempfile.TemporaryDirectory(prefix="sls-source-validity-") as directory:
         event_kind="entry", cluster_started=1000, configuration_identity=lightning_area_identity(lightning_config, area))
     lightning_record = {"source_validity": lightning_validity, "payload": {"event": "Lightning Radius Alert"}}
     lightning_observation = directory / "xweather-lightning-state-lightning_north.json"
-    lightning_observation.write_text(json.dumps({"last_observed_at": 1100, "cluster_started": 1000, "active": True}))
+
+    def write_lightning_observation(cluster_started, active):
+        lightning_observation.write_text(json.dumps({
+            "last_observed_at": 1100, "cluster_started": cluster_started, "active": active,
+        }))
+        lightning_observation.chmod(0o640)
+
+    write_lightning_observation(1000, True)
     assert REAL_VALIDATOR(lightning_record, lightning_config, directory, 1100)[0] == "eligible"
     with mock.patch.object(MODULE, "_quiet_now", return_value=True):
         assert REAL_VALIDATOR(lightning_record, lightning_config, directory, 1100)[:2] == ("deferred", "quiet_hours")
-    lightning_observation.write_text(json.dumps({"last_observed_at": 1100, "cluster_started": 1000, "active": False}))
+    write_lightning_observation(1000, False)
     assert REAL_VALIDATOR(lightning_record, lightning_config, directory, 1100)[:2] == ("cancelled", "source_cleared")
     lightning_record["source_validity"] = {**lightning_validity, "event_kind": "clear"}
     assert REAL_VALIDATOR(lightning_record, lightning_config, directory, 1100)[0] == "eligible"
-    lightning_observation.write_text(json.dumps({"last_observed_at": 1100, "cluster_started": 1001, "active": True}))
+    write_lightning_observation(1001, True)
     assert REAL_VALIDATOR(lightning_record, lightning_config, directory, 1100)[:2] == ("cancelled", "source_superseded")
 
 

@@ -21,6 +21,46 @@ ENVIRONMENT = {
 
 
 class FirstInstallDocumentationTests(unittest.TestCase):
+    def test_packaged_documentation_matches_repository_sources(self):
+        for relative in (
+            'README.md', 'INSTALL.md', 'CHANGELOG.md', 'SECURITY.md',
+            'docs/CONTROL_API.md', 'docs/FIRST_INSTALL_VERIFICATION.md',
+            'docs/INSTALLER_OPERATIONS.md', 'docs/QUALIFICATION_MATRIX.md',
+            'docs/RESOURCES.md', 'docs/SECURITY_AUDIT_0.1.9.md',
+            'docs/THREAT_MODEL_0.1.9.md', 'docs/MEDIA_ACCESS.md',
+            'docs/openapi.json', 'docs/piper-sbom.cdx.json',
+            'docs/release-status.json',
+        ):
+            source = ROOT / relative
+            packaged = ROOT / 'slsmassnotifyserver' / relative
+            source_info = source.lstat()
+            packaged_info = packaged.lstat()
+            self.assertTrue(stat.S_ISREG(source_info.st_mode) and source_info.st_nlink == 1,
+                            f'Repository documentation source is unsafe: {relative}')
+            self.assertTrue(stat.S_ISREG(packaged_info.st_mode) and packaged_info.st_nlink == 1,
+                            f'Packaged documentation source is unsafe: {relative}')
+            self.assertEqual(packaged.read_bytes(), source.read_bytes(),
+                             f'Packaged documentation diverged from {relative}.')
+
+    def test_release_security_evidence_is_portable_and_build_required(self):
+        audit = (ROOT / 'docs/SECURITY_AUDIT_0.1.9.md').read_text(encoding='utf-8')
+        threat = (ROOT / 'docs/THREAT_MODEL_0.1.9.md').read_text(encoding='utf-8')
+        media = (ROOT / 'docs/MEDIA_ACCESS.md').read_text(encoding='utf-8')
+        build = (ROOT / 'tools/build_tgz.sh').read_text(encoding='utf-8')
+        api = json.loads((ROOT / 'docs/openapi.json').read_text(encoding='utf-8'))
+        for path in (ROOT / 'docs').iterdir():
+            if path.is_file() and path.suffix in {'.md', '.json'}:
+                text = path.read_text(encoding='utf-8')
+                self.assertNotIn('/home/localadmin/', text, f'Machine-local path leaked through {path.name}.')
+                self.assertNotIn('file://', text, f'Local file URI leaked through {path.name}.')
+        self.assertIn('[threat model](THREAT_MODEL_0.1.9.md)', audit)
+        self.assertIn('[security audit](SECURITY_AUDIT_0.1.9.md)', threat)
+        self.assertIn('docs/SECURITY_AUDIT_0.1.9.md docs/THREAT_MODEL_0.1.9.md', build)
+        self.assertIn('Anonymous compatibility access remains the default', media)
+        self.assertIn('authenticated desktop media endpoint', media)
+        self.assertIn('short-lived signed capability', media)
+        self.assertIn('outside this OpenAPI document', api['info']['description'])
+
     def test_signed_schema_and_rejection_with_optimized_python(self):
         document_path = ROOT / 'docs/FIRST_INSTALL_VERIFICATION.md'
         document_info = document_path.lstat()
@@ -58,8 +98,8 @@ class FirstInstallDocumentationTests(unittest.TestCase):
             self.assertEqual(public_der.returncode, 0, public_der.stderr)
             der = public_der.stdout
             write_bytes('sls-install.sh', b'fixture installer, never executed')
-            valid = {'schema': 1, 'version': '0.1.8-beta', 'tag': 'slsmassnotifyserver-0.1.8-beta',
-                     'package': 'slsmassnotifyserver-0.1.8-beta.tgz',
+            valid = {'schema': 1, 'version': '0.1.9-beta', 'tag': 'slsmassnotifyserver-0.1.9-beta',
+                     'package': 'slsmassnotifyserver-0.1.9-beta.tgz',
                      'package_sha256': '1' * 64,
                      'installer_sha256': hashlib.sha256((directory / 'sls-install.sh').read_bytes()).hexdigest(),
                      'signing': {'key_id': hashlib.sha256(der).hexdigest(), 'issued_at': int(time.time()) - 60, 'expires_at': int(time.time()) + 3600}}
@@ -86,7 +126,7 @@ class FirstInstallDocumentationTests(unittest.TestCase):
                 verified = openssl('pkeyutl', '-verify', '-pubin', '-inkey', 'publisher.pub', '-rawin', '-in', 'release-manifest.json', '-sigfile', 'release-manifest.sig')
                 self.assertEqual(verified.returncode, 0, verified.stderr)
                 result = subprocess.run(
-                    [sys.executable, '-I', '-O', '-', '0.1.8-beta'],
+                    [sys.executable, '-I', '-O', '-', '0.1.9-beta'],
                     cwd=directory,
                     input=code,
                     text=True,
@@ -105,7 +145,7 @@ class FirstInstallDocumentationTests(unittest.TestCase):
             for raw, diagnostic in malformed.items():
                 write_text('release-manifest.json', raw)
                 result = subprocess.run(
-                    [sys.executable, '-I', '-O', '-', '0.1.8-beta'], cwd=directory, input=code,
+                    [sys.executable, '-I', '-O', '-', '0.1.9-beta'], cwd=directory, input=code,
                     text=True, capture_output=True, timeout=10, env=ENVIRONMENT,
                 )
                 self.assertNotEqual(result.returncode, 0, raw)

@@ -69,13 +69,13 @@ register_shutdown_function(static function () use (&$finished, &$store, &$phase,
             try { $store->atomic('worker-probe.json', $probe); } catch (Throwable $ignored) {}
         }
         echo json_encode($probe), "\n";
-        error_log('SLS announcement health: ' . $phase);
+        error_log('SLL announcement health: ' . $phase);
         exit(1);
     }
     if ($store && !$health && !$reconcile && slsAnnouncementJournalAuthority()) {
         try { $store->fail($id, $phase); } catch (Throwable $ignored) {}
     }
-    error_log('SLS announcement worker: ' . $phase);
+    error_log('SLL announcement worker: ' . $phase);
 });
 try {
     slsAnnouncementRequireRuntimeAccount($arguments);
@@ -83,17 +83,17 @@ try {
     $store = new SlsAnnouncementJobStore();
     $authorityExpiry=0;
     if (!$health && !slsAnnouncementJournalAuthority($authorityExpiry)) {
-        error_log('SLS announcement worker: cluster_authority_unavailable; queued work preserved');
+        error_log('SLL announcement worker: cluster_authority_unavailable; queued work preserved');
         $finished=true;exit(1);
     }
     if ($reconcile) {
         $ok = true;
         foreach ($store->pendingIds() as $pending) {
             if ($authorityExpiry!==PHP_INT_MAX && time()>=$authorityExpiry-1) {
-                $ok=false;error_log('SLS announcement reconcile: cluster_authority_expired');break;
+                $ok=false;error_log('SLL announcement reconcile: cluster_authority_expired');break;
             }
             try { $store->reconcile($pending); }
-            catch (Throwable $error) { $ok = false; error_log('SLS announcement reconcile: unsafe_job_state'); }
+            catch (Throwable $error) { $ok = false; error_log('SLL announcement reconcile: unsafe_job_state'); }
         }
         $finished = true; exit($ok ? 0 : 1);
     }
@@ -142,7 +142,7 @@ try {
         if (!$cleanTerminal && $exitCode === 0) { $exitCode = 1; }
         // Raw diagnostics may contain credentials. Persist categories, not raw output.
         if ($exitCode !== 0 || $timedOut) {
-            error_log('SLS announcement child ' . $id . ': exit=' . (int)$exitCode . ' captured_bytes=' . strlen($diagnostic));
+            error_log('SLL announcement child ' . $id . ': exit=' . (int)$exitCode . ' captured_bytes=' . strlen($diagnostic));
         }
         $finished = true; exit($exitCode === 0 && !$timedOut ? 0 : 1);
     }
@@ -180,6 +180,6 @@ try {
         }
         echo json_encode($probe), "\n";
     }
-    error_log('SLS announcement worker: ' . $phase);
+    error_log('SLL announcement worker: ' . $phase);
     $finished = true; exit(1);
 }

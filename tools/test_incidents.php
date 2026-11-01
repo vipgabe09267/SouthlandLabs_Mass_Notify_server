@@ -316,6 +316,8 @@ $unsafeResourceHtml=load_view(dirname(__DIR__).'/slsmassnotifyserver/views/incid
 incident_check(strpos($unsafeResourceHtml,'href=')===false,'Tampered resource produced an unsafe link.');
 incident_check(strpos($html, 'role="dialog"') !== false && strpos($html, 'aria-modal="true"') !== false, 'Editor accessibility hooks missing.');
 incident_check(strpos($html, 'crypto.getRandomValues') !== false && strpos($html, 'request_id:request') !== false, 'UI lost stable request identifiers.');
+incident_check(strpos($html, 'draftSnapshot') !== false && strpos($html, 'beforeunload') !== false, 'Incident editor lost draft navigation protection.');
+incident_check(strpos($html, 'Discard the changes in this incident editor?') !== false, 'Incident editor can close without a discard confirmation.');
 preg_match_all('/<script>(.*?)<\/script>/s', $html, $scripts);
 foreach ($scripts[1] as $index => $source) {
     $script = $root . '/view-' . $index . '.js'; file_put_contents($script, $source);

@@ -75,15 +75,24 @@ class PhoneVisualLease:
         self.committed = True
 
 
+class SubmissionSuppressed(RuntimeError):
+    """The final guard refused before starting this externally visible effect."""
+
+
 class GuardedContactAmi:
-    """Bound each connected-contact operation to its current page lease."""
+    """Bound every AMI operation to the caller's current submission authority."""
     def __init__(self, ami, guard):
         self.ami, self.guard = ami, guard
 
     def action(self, *args, **kwargs):
         if not self.guard():
-            raise RuntimeError('The live-page visual request expired')
-        return self.ami.action(*args, **kwargs)
+            raise SubmissionSuppressed('The current visual request no longer permits submission')
+        try:
+            return self.ami.action(*args, **kwargs)
+        except SubmissionSuppressed as error:
+            # Only the check above proves no action started. A downstream
+            # transport failure always retains the normal uncertainty path.
+            raise RuntimeError('AMI action outcome is unconfirmed') from error
 
 
 @contextmanager
@@ -607,7 +616,7 @@ def resolve_local_ami_endpoint(ami):
 
     host = str(ami.get("host") or values.get("ASTMANAGERHOST") or "localhost").strip().lower()
     if host not in {"localhost", "127.0.0.1", "::1"}:
-        raise RuntimeError("FreePBX AMI must use a loopback host for SLS Mass Notify")
+        raise RuntimeError("FreePBX AMI must use a loopback host for SLL Mass Notify Server")
     configured_port = ami.get("port") if "port" in ami and str(ami.get("port")).strip() != "" else values.get("ASTMANAGERPORT") or 5038
     try:
         port = int(configured_port)
@@ -651,8 +660,7 @@ def desktop_media_base_url(host, configured_api_url=""):
 
 
 def radio_gateway_extensions(settings):
-    labs = settings.get('enterprise_labs', {})
-    if not isinstance(labs, dict) or labs.get('enabled') is not True:
+    if not _cluster_guard.labs_enabled(settings):
         return []
     integrations = settings.get('enterprise_integrations', {})
     if not isinstance(integrations, dict) or integrations.get('enabled') not in ('1', 1, True):
@@ -2044,6 +2052,12 @@ def send_notify(ami, target, xml_payload, phone_format="yealink", target_field="
                 ],
             })
             _cluster_guard.finish(claim, uncertain=False, category='ami_response_received', **coordination_budget())
+        except SubmissionSuppressed:
+            try:
+                _cluster_guard.finish(claim, uncertain=False, category='submission_suppressed', **coordination_budget())
+            except Exception:
+                pass
+            raise
         except Exception:
             try:
                 _cluster_guard.finish(claim, uncertain=True, category='ami_submission_uncertain', **coordination_budget())
@@ -2263,8 +2277,43 @@ def strict_json_mapping(raw, maximum):
     return value
 
 
-class ScheduledStartExpired(RuntimeError):
+class ScheduledStartExpired(SubmissionSuppressed):
     """No new submission was made at this guarded boundary."""
+
+
+def lightning_submission_guard(context, phones, desktops):
+    """Reduce a trusted local Lightning request to its original/current routes."""
+    if (not isinstance(context, dict) or set(context) != {
+            'source_validity', 'event', 'severity', 'phones', 'desktops', 'desktop_client_ids'}
+            or not isinstance(context.get('source_validity'), dict)
+            or context['source_validity'].get('provider') != 'xweather'
+            or any(not isinstance(context.get(key), str) or len(context[key]) > 256
+                   for key in ('event', 'severity'))
+            or any(not isinstance(context.get(key), list) or len(context[key]) > 1000
+                   or any(not isinstance(value, str) for value in context[key])
+                   for key in ('phones', 'desktops'))
+            or not isinstance(context.get('desktop_client_ids'), dict)
+            or len(context['desktop_client_ids']) > 1000
+            or any(not re.fullmatch(r'[0-9]{1,20}', value) for value in context['phones'])
+            or any(not re.fullmatch(r'[A-Za-z0-9_.-]{1,48}', value) for value in context['desktops'])
+            or any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,48}', name)
+                   or not isinstance(value, str) or not re.fullmatch(r'[a-z0-9_-]{1,32}', value)
+                   for name, value in context['desktop_client_ids'].items())):
+        raise ValueError('Invalid original Lightning visual context')
+    original_phones = set(context['phones'])
+    original_desktops = {value.lower() for value in context['desktops']}
+    requested_phones, requested_desktops = set(phones), set(desktops)
+    if (not requested_phones and not requested_desktops
+            or requested_phones - original_phones or requested_desktops - original_desktops):
+        raise ValueError('Lightning visual request exceeds its original audience')
+    from sls_mass_notify_xweather_poll import local_source_authority
+    def authorized():
+        status, _reason, allowed_phones, allowed_desktops = local_source_authority(context)
+        if (status != 'eligible' or requested_phones - set(allowed_phones)
+                or requested_desktops - {value.lower() for value in allowed_desktops}):
+            raise SubmissionSuppressed('Lightning source or original audience no longer permits visual submission')
+        return True
+    return authorized
 
 
 def scheduled_start_guard(latest_start):
@@ -2475,6 +2524,8 @@ def append_sipnotify_event(config, record, submission_guard=None):
                     submission_guard()
                 claim = _cluster_guard.begin('desktop', 'publication', record,
                                              delivery_id=str(record.get('id') or ''))
+                if submission_guard is not None:
+                    submission_guard()
             try:
                 # The authority check occurs after temporary bytes are fsynced,
                 # immediately before replacing the externally visible feed.
@@ -2483,6 +2534,12 @@ def append_sipnotify_event(config, record, submission_guard=None):
                 _cluster_guard.finish(claim, uncertain=False, category='desktop_publication_committed')
                 try:_desktop_feed_cache.publish(path,lines,config.get('visual','phone_capability_key',fallback=''))
                 except (OSError,ValueError,RuntimeError,TypeError):logging.warning('Desktop feed cache unavailable; authenticated readers will use the durable journal')
+            except SubmissionSuppressed:
+                try:
+                    _cluster_guard.finish(claim, uncertain=False, category='submission_suppressed')
+                except Exception:
+                    pass
+                raise
             except Exception:
                 try:
                     _cluster_guard.finish(claim, uncertain=True, category='desktop_publication_uncertain')
@@ -2694,6 +2751,10 @@ def send_notify_batch(ami, endpoint_info, payload_builder, alert_id, print_resul
                     result = send_notify(ami, target, xml_payload, phone_format, target_field,
                         **({'coordination_deadline':operation_deadline or time.monotonic()+8} if strict_contacts else {}))
                     details = result.details
+                except SubmissionSuppressed:
+                    details = {"status": "failed", "event_attempts": [], "event_fallback_outcome": "not_used"}
+                    record["error_category"] = "submission_suppressed"
+                    record["submission_started"] = False
                 except NotifySubmissionError as exc:
                     details = exc.details
                 except Exception:
@@ -2974,7 +3035,16 @@ def push_announcement(config, message, targets, print_results=True, api_publish=
     if latest_start is not None and not api_only:
         raise ValueError('A scheduled publication deadline requires the desktop-only sender')
     if latest_start is not None:
-        submission_guard = scheduled_start_guard(latest_start)
+        previous_guard = submission_guard
+        deadline_guard = scheduled_start_guard(latest_start)
+        def scheduled_authorized():
+            if previous_guard is not None and previous_guard() is False:
+                raise SubmissionSuppressed('The current sender no longer permits this visual submission')
+            deadline_guard()
+            return True
+        submission_guard = scheduled_authorized
+    if submission_guard is not None and submission_guard() is False:
+        raise SubmissionSuppressed('The current sender no longer permits this visual submission')
     incident = normalize_incident_context(incident)
     if incident is not None and incident['is_test'] != (is_test is True):
         raise ValueError('Incident and announcement test metadata disagree')
@@ -3022,10 +3092,10 @@ def push_announcement(config, message, targets, print_results=True, api_publish=
         config["ami"].get("password", ""),
         **({'timeout': 2} if contact_targets is not None else {}),
     ) as ami:
-        if contact_targets is not None and submission_guard is not None:
+        if submission_guard is not None:
             ami = GuardedContactAmi(ami, submission_guard)
         endpoint_info = get_registered_endpoint_info(ami, targets, endpoint_format_overrides(config), resolve_contact_uris=True,
-            **({'submission_guard': submission_guard} if contact_targets is not None and submission_guard is not None else {}))
+            **({'submission_guard': submission_guard} if submission_guard is not None else {}))
         endpoint_info = {extension: info for extension, info in endpoint_info.items() if extension not in excluded}
         if contact_targets is not None:
             narrowed = {}
@@ -3183,7 +3253,7 @@ def main():
         except (ValueError, OSError, RuntimeError, subprocess.SubprocessError):
             print(json.dumps({"success": False, "message": "Phone image preview failed. Check the message, ImageMagick and temporary disk space."}))
             return 1
-    parser = argparse.ArgumentParser(description="SLS Mass Notify SIP NOTIFY push for supported phones")
+    parser = argparse.ArgumentParser(description="SLL Mass Notify Server SIP NOTIFY push for supported phones")
     parser.add_argument("--test", action="store_true", help="Send a fake Tornado Warning to registered phones and exit")
     parser.add_argument("--event", default="", help="Synthetic alert event to push, for PBX tests")
     parser.add_argument("--severity", default="Severe", help="Synthetic alert severity")
@@ -3208,6 +3278,7 @@ def main():
     parser.add_argument("--no-api", action="store_true", help="Do not publish this announcement/alert to the desktop API journal")
     parser.add_argument("--api-only", action="store_true", help="Publish announcement to the desktop API journal without sending SIP NOTIFY")
     parser.add_argument('--latest-start', type=int, help='Absolute scheduled desktop publication deadline')
+    parser.add_argument('--lightning-source-context-stdin', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument("--require-all-targets", action="store_true", help="Fail unless every requested phone endpoint is registered and reachable (manual delivery tests)")
     parser.add_argument("--list-endpoints-json", action="store_true", help="Print registered endpoint vendor detection as JSON and exit")
     parser.add_argument("--ami-health-json", action="store_true", help="Authenticate to AMI, issue Ping, and print a JSON health result")
@@ -3227,6 +3298,12 @@ def main():
         parser.error('--api-only cannot be combined with --no-api')
     if args.latest_start is not None and (not args.announcement or not args.api_only):
         parser.error('--latest-start requires a desktop-only announcement')
+    if args.lightning_source_context_stdin and (
+            not args.announcement or not args.no_retry or args.is_test or args.latest_start is not None
+            or args.incident_json or args.visual_owner or args.clear_visual_owner or args.desktop_all
+            or not ((args.api_only and not args.targets and args.desktop_targets)
+                    or (args.no_api and args.targets and not args.desktop_targets))):
+        parser.error('Lightning source context requires a bounded ordinary phone-only or desktop-only announcement')
     if args.visual_owner or args.clear_visual_owner:
         if (not args.announcement or not args.targets or not args.no_api or not args.no_retry or args.api_only
                 or args.desktop_targets or args.desktop_all or args.incident_json
@@ -3300,6 +3377,11 @@ def main():
             return 0
         targets = normalize_target_list(args.targets)
         desktop_targets = normalize_desktop_target_list(args.desktop_targets)
+        source_guard = None
+        if args.lightning_source_context_stdin:
+            raw = sys.stdin.buffer.read(262145)
+            context = strict_json_mapping(raw.decode('utf-8'), 262144)
+            source_guard = lightning_submission_guard(context, targets, desktop_targets)
         if args.announcement:
             push_announcement(
                 config,
@@ -3319,6 +3401,7 @@ def main():
                 incident=incident,
                 latest_start=args.latest_start,
                 visual_owner=args.visual_owner, clear_visual_owner=args.clear_visual_owner,
+                submission_guard=source_guard,
             )
         elif args.alert_json_b64 or args.alert_json_b64_stdin:
             value = args.alert_json_b64

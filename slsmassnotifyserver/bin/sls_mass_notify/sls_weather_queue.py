@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -44,7 +45,10 @@ MAX_JOBS = 1000
 FRESH_SECONDS = 180
 ACTIVE_STATES = {'queued', 'running'}
 HISTORY_SECONDS = 7 * 86400
-DISPATCH_WORKERS = 2
+STANDARD_DISPATCH_WORKERS = 2
+LITE_DISPATCH_WORKERS = 1
+STANDARD_OBSERVATION_WORKERS = 5
+LITE_OBSERVATION_WORKERS = 2
 DISPATCH_SECONDS = 3300
 # 900s synthesis + 300s audio queue + 1,774s complete page hold +
 # admission/visual overhead. Already submitted PBX calls outlive the helper.
@@ -132,7 +136,7 @@ def read_json_at(directory_fd, name, maximum=MAX_BYTES):
         owner, group = _account_ids()
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > maximum
                 or metadata.st_uid not in (0, owner) or metadata.st_gid not in (0, group)
-                or stat.S_IMODE(metadata.st_mode) not in (0o600, 0o640, 0o644)):
+                or stat.S_IMODE(metadata.st_mode) not in (0o600, 0o640)):
             raise RuntimeError('Weather queue file is unsafe or oversized')
         raw = handle.read(maximum + 1)
         if len(raw.encode()) > maximum:
@@ -192,12 +196,89 @@ def lock_marker(descriptor):
     return raw
 
 
+def _finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _utf8_size_within(value, maximum):
+    try:
+        return len(value.encode('utf-8')) <= maximum
+    except UnicodeEncodeError:
+        return False
+
+
+def _bounded_state_tree(value, depth=0, counter=None):
+    counter = [0] if counter is None else counter
+    counter[0] += 1
+    if counter[0] > 100000 or depth > 32:
+        return False
+    if value is None or type(value) in (bool, int, str):
+        return not isinstance(value, str) or _utf8_size_within(value, 262144)
+    if type(value) is float:
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return len(value) <= 10000 and all(_bounded_state_tree(item, depth + 1, counter) for item in value)
+    if isinstance(value, dict):
+        return len(value) <= 10000 and all(
+            isinstance(key, str) and _utf8_size_within(key, 4096)
+            and _bounded_state_tree(item, depth + 1, counter)
+            for key, item in value.items()
+        )
+    return False
+
+
 def validate_state(data):
     if (not isinstance(data, dict) or type(data.get('schema')) is not int or data['schema'] != 1
-            or not isinstance(data.get('jobs'), dict) or not isinstance(data.get('snapshots'), dict)
-            or any(not isinstance(row, dict) for row in data['jobs'].values())
-            or any(not isinstance(row, dict) for row in data['snapshots'].values())):
+            or set(data) - {'schema', 'jobs', 'snapshots', 'dispatch_metrics'}
+            or not isinstance(data.get('jobs'), dict) or len(data['jobs']) > 5000
+            or not isinstance(data.get('snapshots'), dict) or len(data['snapshots']) > 64
+            or not _bounded_state_tree(data)):
         raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+    states = {'queued', 'running', 'complete', 'uncertain', 'failed', 'expired', 'cancelled'}
+    for job_id, row in data['jobs'].items():
+        if (not isinstance(row, dict) or not re.fullmatch(r'[a-f0-9]{64}', job_id)
+                or row.get('state') not in states or row.get('service') not in {'nws', 'lightning'}
+                or not isinstance(row.get('group_id'), str)
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', row['group_id'])
+                or not isinstance(row.get('key'), str) or not 0 < len(row['key']) <= 4096
+                or ('payload' in row and not isinstance(row['payload'], dict))
+                or ('deadline_missed' in row and type(row['deadline_missed']) is not bool)):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+        for name in ('created_at', 'updated_at', 'started_at', 'deadline_at', 'deduplicate_until',
+                     'queue_age_seconds', 'worker_start_ticks'):
+            if name in row and not _finite_number(row[name]):
+                raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+        if 'worker_pid' in row and (type(row['worker_pid']) is not int or row['worker_pid'] <= 0):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+        if 'claim_token' in row and not re.fullmatch(r'[a-f0-9]{32}', str(row['claim_token'])):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+        if any(name not in row for name in ('created_at', 'updated_at', 'priority')):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+        if row['state'] in ACTIVE_STATES and 'payload' not in row:
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+        if 'priority' in row and (not isinstance(row['priority'], list) or len(row['priority']) != 2
+                or any(not _finite_number(value) for value in row['priority'])):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+    for group_id, row in data['snapshots'].items():
+        if (not isinstance(row, dict) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', group_id)
+                or set(row) != {'zone', 'observed_at', 'active'}
+                or not isinstance(row.get('zone'), str) or len(row['zone']) > 32
+                or not _finite_number(row.get('observed_at'))
+                or not isinstance(row.get('active'), dict) or len(row['active']) > 2000
+                or any(not isinstance(key, str) or len(key) > 4096 or not isinstance(value, dict)
+                       for key, value in row['active'].items())):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
+    metrics = data.get('dispatch_metrics')
+    if metrics is not None:
+        expected = {'updated_at', 'max_workers', 'running', 'oldest_queued_age_seconds',
+                    'oldest_running_age_seconds', 'deadline_misses'}
+        if (not isinstance(metrics, dict) or set(metrics) != expected
+                or not _finite_number(metrics['updated_at'])
+                or any(type(metrics[name]) is not int or metrics[name] < 0
+                       for name in ('max_workers', 'running', 'deadline_misses'))
+                or not _finite_number(metrics['oldest_queued_age_seconds'])
+                or not _finite_number(metrics['oldest_running_age_seconds'])):
+            raise RuntimeError('Weather queue state is corrupt; preserve it before repair')
 
 
 def commit_history_marker(directory, parent, descriptor, previous):
@@ -348,6 +429,19 @@ def current_configuration():
     return _config_crypto.read_config(path)
 
 
+def deployment_worker_limits(config=None):
+    """Return bounded worker counts for the authenticated deployment profile."""
+    config = current_configuration() if config is None else config
+    if not isinstance(config, dict):
+        raise ValueError('Invalid deployment configuration')
+    profile = config.get('deployment_profile', 'standard')
+    if profile == 'lite':
+        return LITE_DISPATCH_WORKERS, LITE_OBSERVATION_WORKERS
+    if profile == 'standard':
+        return STANDARD_DISPATCH_WORKERS, STANDARD_OBSERVATION_WORKERS
+    raise ValueError('Invalid deployment profile')
+
+
 def current_channel_snapshot(provider, group_id, config=None):
     from sls_notification_destinations import _source_group
     from sls_weather_channels import snapshot
@@ -361,7 +455,8 @@ def observe_nws():
     reconcile_status(DATA / 'status.json', configured)
     outcomes = {}
     failures = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+    _, observation_workers = deployment_worker_limits()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=observation_workers) as pool:
         futures = {pool.submit(fetch_zone, zone): zone for zone in {row[2] for row in configured.values()}}
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -482,19 +577,30 @@ def valid_nws(job, data, now):
     return True
 
 
-def check_job(job_id, directory=DATA):
+def check_job(job_id, directory=DATA, phone_recipient=None):
+    if phone_recipient is not None and (not isinstance(phone_recipient, str)
+            or not re.fullmatch(r'[0-9]{1,20}', phone_recipient)):
+        return False
     with state_lock(directory, write=False) as data:
         job = data['jobs'].get(job_id, {})
         current = (job.get('state') == 'running' and time.time() < job.get('deadline_at', float('inf'))
                    and (job.get('service') != 'nws' or valid_nws(job, data, time.time())))
         job = dict(job)
     if not current or job.get('service') != 'nws':
-        return current
+        return current and phone_recipient is None
     # Rendering/reservation waits can cross a quiet-hour boundary. The check is
     # called again immediately before local submission, using current policy.
     row = groups().get(job['group_id'])
     if not row or row[2] != job['payload'].get('zone'):
         return False
+    if phone_recipient is not None:
+        snapshot = job['payload'].get('routing_snapshot')
+        original = snapshot.get('phones') if isinstance(snapshot, dict) else None
+        if (not isinstance(original, list) or len(original) > 1000
+                or phone_recipient not in {str(value) for value in original
+                    if re.fullmatch(r'[0-9]{1,20}', str(value))}
+                or phone_recipient not in row[3].split(',')):
+            return False
     from sls_notification_destinations import _quiet_now
     policy = {'quiet_hours_enabled': row[6], 'quiet_hours_start': row[7], 'quiet_hours_end': row[8]}
     critical = job['payload']['feature']['properties'].get('event') in row[9].split('\x1f')
@@ -700,11 +806,17 @@ def stop_delivery_session(pid, start_ticks, include_leader=True, grace=DELIVERY_
     send(members(), signal.SIGKILL)
 
 
-def update_dispatch_metrics(data, now):
+def update_dispatch_metrics(data, now, worker_limit=None):
+    if worker_limit is None:
+        # Terminal child commits must not depend on rereading configuration.
+        # The coordinator records the authenticated profile limit when it
+        # claims work; legacy state predates Lite mode and therefore used two.
+        recorded = data.get('dispatch_metrics', {}).get('max_workers')
+        worker_limit = recorded if type(recorded) is int and recorded in (1, 2) else STANDARD_DISPATCH_WORKERS
     jobs = list(data['jobs'].values())
     queued = [max(0, now - float(job.get('created_at', now))) for job in jobs if job.get('state') == 'queued']
     running = [max(0, now - float(job.get('started_at', job.get('updated_at', now)))) for job in jobs if job.get('state') == 'running']
-    data['dispatch_metrics'] = {'updated_at': now, 'max_workers': DISPATCH_WORKERS,
+    data['dispatch_metrics'] = {'updated_at': now, 'max_workers': worker_limit,
         'running': len(running), 'oldest_queued_age_seconds': max(queued, default=0),
         'oldest_running_age_seconds': max(running, default=0),
         'deadline_misses': sum(bool(job.get('deadline_missed')) and float(job.get('updated_at', 0)) > now - HISTORY_SECONDS for job in jobs)}
@@ -893,12 +1005,13 @@ def deliver_claim(job_id, claim_token):
 def dispatch():
     if not runtime_enabled():
         return 0
+    worker_limit, _ = deployment_worker_limits()
     with singleton('weather-dispatch-worker.lock') as acquired:
         if not acquired:
             return 0
         deadline = time.monotonic() + DISPATCH_SECONDS
         # Reserve the TERM/KILL cleanup grace inside the existing loop budget.
-        deadline_at = time.time() + DISPATCH_SECONDS - DISPATCH_WORKERS * DELIVERY_STOP_GRACE - 1
+        deadline_at = time.time() + DISPATCH_SECONDS - worker_limit * DELIVERY_STOP_GRACE - 1
         processes = {}
         next_metrics_at = 0
         while time.monotonic() < deadline:
@@ -933,7 +1046,7 @@ def dispatch():
             # outbox while a slow delivery runs and no admission changed.
             before_states = {key: value.get('state') for key, value in data['jobs'].items()}
             active = sum(state == 'running' for state in before_states.values())
-            proposed = choose_deliveries(data, time.time(), max(0, DISPATCH_WORKERS - active), aliases) if accepting and time.time() < deadline_at else []
+            proposed = choose_deliveries(data, time.time(), max(0, worker_limit - active), aliases) if accepting and time.time() < deadline_at else []
             changed = any(value.get('state') != before_states[key] for key, value in data['jobs'].items())
             claims = []
             if proposed or changed or time.monotonic() >= next_metrics_at:
@@ -941,9 +1054,9 @@ def dispatch():
                 # used to avoid idle writes is never an admission authority.
                 with state_lock() as data:
                     active = sum(job.get('state') == 'running' for job in data['jobs'].values())
-                    selected = choose_deliveries(data, time.time(), max(0, DISPATCH_WORKERS - active), aliases) if runtime_enabled() and time.time() < deadline_at else []
+                    selected = choose_deliveries(data, time.time(), max(0, worker_limit - active), aliases) if runtime_enabled() and time.time() < deadline_at else []
                     claims = [(job_id, claim_delivery(data, job_id, time.time(), deadline_at, aliases)) for job_id in selected]
-                    update_dispatch_metrics(data, time.time())
+                    update_dispatch_metrics(data, time.time(), worker_limit)
                 next_metrics_at = time.monotonic() + 30
             for job_id, job in claims:
                 process = None
@@ -974,7 +1087,7 @@ def dispatch():
                 # Recovery or a child's final commit may have changed the
                 # earlier admission snapshot. Recheck this fresh snapshot so a
                 # failed predecessor does not strand its queued successors.
-                if time.time() < deadline_at and choose_deliveries(data, time.time(), DISPATCH_WORKERS, aliases):
+                if time.time() < deadline_at and choose_deliveries(data, time.time(), worker_limit, aliases):
                     continue
                 return 0
             time.sleep(0.25)
@@ -1031,14 +1144,17 @@ def cli():
     parser.add_argument('action', choices=['cycle', 'dispatch', 'check', 'external', 'deliver'])
     parser.add_argument('job_id', nargs='?')
     parser.add_argument('claim_token', nargs='?')
+    parser.add_argument('--phone-recipient')
     args = parser.parse_args()
+    if args.phone_recipient is not None and args.action != 'check':
+        parser.error('--phone-recipient is only valid with a current-job check')
     try:
         if args.action == 'deliver':
             if not re.fullmatch(r'[a-f0-9]{64}', args.job_id or '') or not re.fullmatch(r'[a-f0-9]{32}', args.claim_token or ''):
                 return 1
             return deliver_claim(args.job_id, args.claim_token)
         if args.action == 'check':
-            return 0 if re.fullmatch(r'[a-f0-9]{64}', args.job_id or '') and check_job(args.job_id) else 1
+            return 0 if re.fullmatch(r'[a-f0-9]{64}', args.job_id or '') and check_job(args.job_id, phone_recipient=args.phone_recipient) else 1
         if args.action == 'external':
             if not runtime_enabled():
                 return 0

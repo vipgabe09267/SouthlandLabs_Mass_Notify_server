@@ -6,7 +6,7 @@ $data=['endpoint'=>$endpoint,'csrf'=>$csrf,'callback_url'=>$callback,'identity'=
 <section id="enterprise-identity-labs" class="sls-enterprise-identity">
 <h3><i class="fa fa-key" aria-hidden="true"></i> Operator single sign-on <?php include __DIR__.'/labs.php'; ?></h3>
 <p class="alert alert-warning"><strong>Labs: DO NOT USE ON PRODUCTION SERVERS.</strong> Provider sign-in requires deployment testing. SSO is disabled by default.</p>
-<p>SSO signs users into the SLS operator dashboard at <code>/mass-notify/</code>. It does not change FreePBX or UCP sign-in. Each identity must be bound to an existing operator account; its saved role, recipients, expiration and authenticator still apply.</p>
+<p>SSO signs users into the SLL operator dashboard at <code>/mass-notify/</code>. It does not change FreePBX or UCP sign-in. Each identity must be bound to an existing operator account; its saved role, recipients, expiration and authenticator still apply.</p>
 <p>Keep an enrolled local operator administrator for recovery. Blank secret fields preserve saved credentials in the encrypted central configuration.</p>
 <div role="status" aria-live="polite" data-identity-status></div>
 <details open class="sls-identity-login"><summary><strong>Operator single sign-on (SSO)</strong></summary>

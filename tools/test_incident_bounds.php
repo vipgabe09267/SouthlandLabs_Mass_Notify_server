@@ -2,7 +2,26 @@
 declare(strict_types=1);
 // Intercept only the incident namespace so this regression can prove that
 // durable records and summaries never require write access merely to read.
-eval('namespace SLS\\MassNotify; function fopen($path,$mode,$include=false,$context=null){if(($GLOBALS["sls_incident_fopen_target"]??null)===$path){$GLOBALS["sls_incident_fopen_modes"][]=$mode;}return $context===null?\\fopen($path,$mode,$include):\\fopen($path,$mode,$include,$context);}');
+eval(<<<'PHP'
+namespace SLS\MassNotify;
+function fopen($path,$mode,$include=false,$context=null){
+    if(($GLOBALS['sls_incident_fopen_target']??null)===$path){$GLOBALS['sls_incident_fopen_modes'][]=$mode;}
+    if(($GLOBALS['sls_incident_fopen_hook_target']??null)===$path){
+        $hook=$GLOBALS['sls_incident_fopen_hook'];
+        unset($GLOBALS['sls_incident_fopen_hook_target'],$GLOBALS['sls_incident_fopen_hook']);
+        $hook();
+    }
+    return $context===null?\fopen($path,$mode,$include):\fopen($path,$mode,$include,$context);
+}
+function stream_get_contents($stream,$length=-1,$offset=-1){
+    if(($GLOBALS['sls_incident_read_hook_target']??null)===(\stream_get_meta_data($stream)['uri']??null)){
+        $hook=$GLOBALS['sls_incident_read_hook'];
+        unset($GLOBALS['sls_incident_read_hook_target'],$GLOBALS['sls_incident_read_hook']);
+        $hook();
+    }
+    return \stream_get_contents($stream,$length,$offset);
+}
+PHP);
 require_once dirname(__DIR__) . '/slsmassnotifyserver/IncidentService.php';
 use SLS\MassNotify\IncidentStore;
 use SLS\MassNotify\IncidentService;
@@ -28,6 +47,44 @@ $GLOBALS['sls_incident_fopen_target']=$seedPath;$GLOBALS['sls_incident_fopen_mod
 $store->read($seed['id']);$store->metadata($seed['id']);
 unset($GLOBALS['sls_incident_fopen_target']);
 bounds_check($GLOBALS['sls_incident_fopen_modes']!==[]&&!array_diff($GLOBALS['sls_incident_fopen_modes'],['rb']),'Incident read paths requested write access.');
+// A protected writer may atomically replace either file between the reader's
+// lstat and fopen. Retry a fresh verified snapshot without using stale bytes.
+foreach ([$seedPath,$directory.'/.'.$seed['id'].'.summary'] as $index=>$target) {
+    $title='Concurrent snapshot '.($index+1);
+    $GLOBALS['sls_incident_fopen_hook_target']=$target;
+    $GLOBALS['sls_incident_fopen_hook']=static function()use($store,$seed,$title):void{
+        $store->transaction($seed['id'],static function(array $record)use($title):array{$record['title']=$title;return $record;});
+    };
+    $snapshot=$store->metadata($seed['id']);
+    bounds_check($snapshot['row']['title']===$title,'An atomic replacement returned an old or invalid incident snapshot.');
+}
+// Full-record readers (including concurrent workers and transaction prechecks)
+// must also take a fresh verified snapshot after a protected atomic replacement.
+foreach (['fopen','read'] as $stage) {
+    $prefix=$stage==='fopen'?'sls_incident_fopen_hook':'sls_incident_read_hook';
+    $title='Concurrent full record '.$stage;
+    $GLOBALS[$prefix.'_target']=$seedPath;
+    $GLOBALS[$prefix]=static function()use($store,$seed,$title):void{
+        $store->transaction($seed['id'],static function(array $record)use($title):array{$record['title']=$title;return $record;});
+    };
+    $snapshot=$store->read($seed['id']);
+    bounds_check($snapshot['title']===$title,'A full-record reader failed to recover a protected atomic replacement.');
+}
+// Repeated replacement remains a bounded, fail-closed read, with no stale data
+// accepted and no unbounded loop under a continuously changing record.
+$replacementCount=0;
+$replaceAgain=static function()use(&$replaceAgain,&$replacementCount,$store,$seed,$seedPath):void{
+    $replacementCount++;
+    $store->transaction($seed['id'],static function(array $record)use(&$replacementCount):array{$record['title']='Repeated replacement '.$replacementCount;return $record;});
+    $GLOBALS['sls_incident_read_hook_target']=$seedPath;
+    $GLOBALS['sls_incident_read_hook']=$replaceAgain;
+};
+$GLOBALS['sls_incident_read_hook_target']=$seedPath;$GLOBALS['sls_incident_read_hook']=$replaceAgain;
+$rejected=false;
+try{$store->read($seed['id']);}catch(RuntimeException $expected){$rejected=true;}
+unset($GLOBALS['sls_incident_read_hook_target'],$GLOBALS['sls_incident_read_hook']);
+bounds_check($rejected&&$replacementCount===2,'Continuously replaced incident reads were unbounded or returned stale history.');
+file_put_contents($seedPath,$seedBytes);
 chmod($seedPath,0644);$rejected=false;try{$store->read($seed['id']);}catch(RuntimeException $expected){$rejected=true;}chmod($seedPath,0600);
 bounds_check($rejected,'World-readable incident history was accepted.');
 $damaged=json_decode($seedBytes,true,64,JSON_THROW_ON_ERROR);$requestKey=array_key_first($damaged['operations']);$damaged['operations'][$requestKey]['actor']['identity']=[];

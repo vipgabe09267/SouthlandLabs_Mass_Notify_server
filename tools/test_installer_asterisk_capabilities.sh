@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 set -Eeuo pipefail
-trap 'printf "Asterisk prerequisite fixture failed at line %s\\n" "$LINENO" >&2' ERR
+trap 'fixture_error_status=$?; printf "Asterisk prerequisite fixture failed: exit %s at line %s: %s\\n" "$fixture_error_status" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -20,6 +20,34 @@ if SLS_MASS_NOTIFY_MODULE='othermodule' \
   exit 1
 fi
 source "${ROOT_DIR}/tools/install_release.sh"
+
+# A valid CLI response must survive pipefail when the sought label is near
+# its beginning. Early awk exit previously SIGPIPEd printf, even with small
+# responses under load; a large reply makes that scheduling race reproducible.
+(
+  asterisk() {
+    /usr/bin/python3 -I - <<'PYCLI'
+print('  Module directory: /lib/asterisk/modules')
+print('  bindaddr: 127.0.0.1')
+print('unrelated details ' * 100000)
+print('  Module directory: /wrong-later-directory')
+print('  bindaddr: 192.0.2.55')
+PYCLI
+  }
+  for parser in settings labeled; do
+    if [ "$parser" = settings ]; then
+      if value="$(asterisk_setting_value 'Module directory')"; then status=0; else status=$?; fi
+      expected=/lib/asterisk/modules
+    else
+      if value="$(asterisk_labeled_value 'manager show settings' bindaddr)"; then status=0; else status=$?; fi
+      expected=127.0.0.1
+    fi
+    if [ "$status" -ne 0 ] || [ "$value" != "$expected" ]; then
+      printf 'Valid %s CLI parsing failed with status %s.\n' "$parser" "$status" >&2
+      exit 1
+    fi
+  done
+)
 
 # Prefer the documented action-first --autoenable syntax. Retry the legacy
 # global-option ordering only when fwconsole explicitly reports a syntax error;
@@ -299,6 +327,7 @@ PY
   wait_for_asterisk_cli() {
     return 0
   }
+  function /usr/bin/systemctl() { [ "$*" = 'is-active --quiet freepbx.service' ]; }
   repair_asterisk_provider_package res_pjsip_header_funcs.so
   [ -f "$mock_provider_file" ]
   [ "${#mock_apt_args[@]}" -eq 6 ]
@@ -309,6 +338,74 @@ PY
   [ "${mock_apt_args[4]}" = "--no-remove" ]
   [ "${mock_apt_args[5]}" = "asterisk22-core=22.8.2-1.sng12" ]
   [ "$APT_METADATA_REFRESHED" -eq 1 ]
+
+  # FreePBX commonly owns Asterisk through safe_asterisk while the independent
+  # asterisk.service is inactive. Never start that different service manager.
+  mock_service_owner=freepbx
+  function /usr/bin/systemctl() {
+    case "$*" in
+      'is-active --quiet freepbx.service') [ "$mock_service_owner" = freepbx ] ;;
+      'is-active --quiet asterisk.service') [ "$mock_service_owner" = asterisk ] ;;
+      'start asterisk.service') : >"$mock_repair_dir/started-asterisk-service" ;;
+      *) return 1 ;;
+    esac
+  }
+  wait_for_asterisk_cli() { [ -f "$mock_repair_dir/started-asterisk-service" ]; }
+  for mock_service_owner in freepbx unmanaged asterisk; do
+    mock_apt_args=()
+    ASTERISK_PACKAGE_REPAIR_ATTEMPTS=""
+    rm -f "$mock_repair_dir/started-asterisk-service"
+    if repair_asterisk_provider_package res_pjsip_header_funcs.so; then mock_repair_status=0; else mock_repair_status=$?; fi
+    if [ "$mock_service_owner" = unmanaged ]; then
+      if [ "${#mock_apt_args[@]}" -ne 0 ]; then
+        printf 'Provider repair changed packages without a recognized existing service manager.\n' >&2
+        exit 1
+      fi
+    fi
+    if [ "$mock_service_owner" = asterisk ]; then
+      [ "$mock_repair_status" -eq 0 ] && [ -f "$mock_repair_dir/started-asterisk-service" ]
+    else
+      if [ "$mock_repair_status" -eq 0 ] || [ -e "$mock_repair_dir/started-asterisk-service" ]; then
+        printf 'Provider repair started the wrong Asterisk service manager: %s.\n' "$mock_service_owner" >&2
+        exit 1
+      fi
+    fi
+  done
+
+  # Calls can start while apt metadata is refreshing. The last admission must
+  # precede the package operation, with the same zero-active-channel check.
+  ASTERISK_PACKAGE_REPAIR_ATTEMPTS=""
+  APT_METADATA_REFRESHED=0
+  mock_apt_args=()
+  asterisk() {
+    case "${2:-}" in
+      'core show version') printf '%s\n' 'Asterisk 22.8.2' ;;
+      'core show channels count') printf '%s active channels\n' "$((APT_METADATA_REFRESHED * 2))" ;;
+      *) return 1 ;;
+    esac
+  }
+  if repair_asterisk_provider_package res_pjsip_header_funcs.so; then
+    printf 'Provider package repair ignored calls which began during metadata refresh.\n' >&2
+    exit 1
+  fi
+  [ "${#mock_apt_args[@]}" -eq 0 ]
+
+  # A failed native CLI must not establish idleness from partial stdout, even
+  # when this function is called from an if/else that suppresses shell errexit.
+  ASTERISK_PACKAGE_REPAIR_ATTEMPTS=""
+  mock_apt_args=()
+  asterisk() {
+    case "${2:-}" in
+      'core show version') printf '%s\n' 'Asterisk 22.8.2' ;;
+      'core show channels count') printf '%s\n' '0 active channels'; return 3 ;;
+      *) return 1 ;;
+    esac
+  }
+  if repair_asterisk_provider_package res_pjsip_header_funcs.so; then
+    printf 'Provider repair trusted partial output from a failed Asterisk CLI.\n' >&2
+    exit 1
+  fi
+  [ "${#mock_apt_args[@]}" -eq 0 ]
 )
 
 # Missing provider files remain attributable through dpkg's package database.
@@ -981,7 +1078,7 @@ bootstrap_utility_line="$(grep -nFm1 'for bootstrap_utility in /usr/bin/flock' <
 
 main_body="$(declare -f main)"
 log_open_line="$(grep -nFm1 'open_root_owned_file INSTALL_LOG_FD "$LOG_FILE"' <<<"$main_body" | cut -d: -f1)"
-log_append_line="$(grep -nFm1 'SLS Mass Notify installation started:' <<<"$main_body" | cut -d: -f1)"
+log_append_line="$(grep -nFm1 'SLL Mass Notify Server installation started:' <<<"$main_body" | cut -d: -f1)"
 failure_trap_line="$(grep -nFm1 'trap guard_config_on_exit EXIT' <<<"$main_body" | cut -d: -f1)"
 require_line="$(grep -nFm1 'require_freepbx' <<<"$main_body" | cut -d: -f1)"
 lock_line="$(grep -nFm1 'acquire_maintenance_coordination' <<<"$main_body" | cut -d: -f1)"

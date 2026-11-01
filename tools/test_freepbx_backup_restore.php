@@ -189,7 +189,9 @@ namespace {
 	$preparedLedger = json_decode($prepared['schedule_raw'], true);
 	slsAssert(($preparedLedger['occurrences']['occ_past']['state'] ?? '') === 'uncertain', 'Past pending occurrence was not made replay-safe.');
 	slsAssert(!isset($preparedLedger['occurrences']['occ_future']), 'Future occurrence was incorrectly marked complete.');
-	slsAssert($prepared['config_raw'] === $configRaw, 'Config bytes changed when no schedule disable was required.');
+	$preparedSettings = json_decode($prepared['config_raw'], true);
+	slsAssert(($preparedSettings['control_api']['enabled'] ?? '1') === '0', 'Restore left the Control API enabled.');
+	slsAssert(($preparedSettings['control_api']['api_key'] ?? '') !== $settings['control_api']['api_key'], 'Restore reused the source PBX legacy API key.');
 
 	$withoutLedger = slsInvoke($module, 'prepareNativeRestoredScheduleState', [[
 		'raw' => $configRaw,

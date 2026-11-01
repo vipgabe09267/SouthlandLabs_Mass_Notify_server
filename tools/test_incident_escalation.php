@@ -153,10 +153,13 @@ $worker = $root . '/race.php'; $capture = $root . '/sends.jsonl';
 file_put_contents($worker, '<?php require ' . var_export(dirname(__DIR__) . '/slsmassnotifyserver/IncidentService.php', true) . ';
  $store=new \\SLS\\MassNotify\\IncidentStore($argv[1]);
  $service=new \\SLS\\MassNotify\\IncidentService($store,fn()=>[],fn($d)=>$d,function($d,$m,$t,$c){usleep(100000);file_put_contents($GLOBALS["argv"][3],json_encode($c)."\\n",FILE_APPEND|LOCK_EX);return ["success"=>true,"job_id"=>"job_".str_repeat("f",32)];},fn()=>[],fn()=>(int)$GLOBALS["argv"][2]);
- $r=$service->process();exit($r["success"]?0:1);');
+ $r=$service->process();if(!$r["success"]){fwrite(STDERR,json_encode($r)."\\n");}exit($r["success"]?0:1);');
 $workers = [];
 for ($i = 0; $i < 2; $i++) { $workers[] = proc_open([PHP_BINARY, $worker, $root . '/records', (string)$now, $capture], [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', $root . '/race-errors', 'a']], $pipes); }
-foreach ($workers as $process) { ladder_check(proc_close($process) === 0, 'Concurrent worker failed.'); }
+$workerResults=[];
+foreach ($workers as $process) { $workerResults[]=proc_close($process); }
+ladder_check($workerResults===[0,0], 'Concurrent worker failed: '.json_encode($workerResults).' '.
+    (is_file($root.'/race-errors')?file_get_contents($root.'/race-errors'):''));
 $captured = array_filter(explode("\n", file_get_contents($capture)));
 ladder_check(count($captured) === 1 && json_decode(reset($captured), true)['incident_id'] === $race['id'], 'Concurrent workers duplicated or misrouted an escalation.');
 echo "Escalation ladder: $checks timing, immutable audience, drill, response, uncertainty, legacy and concurrency checks passed.\n";

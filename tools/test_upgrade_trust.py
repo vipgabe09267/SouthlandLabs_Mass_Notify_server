@@ -5,8 +5,10 @@ import importlib.util
 import io
 import json
 import os
+import pwd
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -30,6 +32,80 @@ def package(path, name, contents):
 
 
 class UpgradeTrustTests(unittest.TestCase):
+    def test_signed_stock_verifies_with_long_persistent_recovery_workspace(self):
+        workspace=self.root/('persistent-recovery-'+'x'*100);workspace.mkdir(mode=0o700)
+        expected={'module.xml':b'<module><rawname>framework</rawname><version>17.0.5</version></module>',
+                  'fixture.txt':b'authenticated stock in long recovery workspace'}
+        plain=self.root/'long-workspace.tgz';package(plain,'framework',expected)
+        signed=self.root/'long-workspace.tgz.gpg'
+        subprocess.run(self.gpg_command+['--output',str(signed),'--sign',str(plain)],check=True,capture_output=True,timeout=15)
+        with patch.dict(os.environ,{'TMPDIR':'/tmp'}):
+            contents,provenance=self.upgrade.upstream_contents(signed,'framework','17.0.5',workspace)
+        self.assertEqual(contents,expected)
+        self.assertEqual(provenance['upstream_signer'],self.upgrade.UPSTREAM_SIGNER)
+
+    def upstream_with_output_observation(self, signed, limit, observed):
+        real_run = self.upgrade.subprocess.run
+        def observe(command, *args, **kwargs):
+            completed = real_run(command, *args, **kwargs)
+            if '--decrypt' in command:
+                output = Path(command[command.index('--output') + 1])
+                observed.append(output.stat().st_size if output.exists() else 0)
+            return completed
+        with patch.object(self.trust, 'MAX_ARCHIVE', limit), patch.object(self.upgrade.subprocess, 'run', side_effect=observe):
+            return self.upgrade.upstream_contents(signed, 'framework', '17.0.5', self.root)
+
+    def test_unsigned_compressed_plaintext_is_bounded_before_signature_rejection(self):
+        plain = self.root / 'expanded.bin'
+        plain.write_bytes(b'x' * (2 * 1024 * 1024))
+        unsigned = self.root / 'unsigned-compressed.gpg'
+        subprocess.run(self.gpg_command + ['--compress-algo', 'ZIP', '--output', str(unsigned), '--store', str(plain)], check=True, capture_output=True, timeout=15)
+        limit = 64 * 1024
+        self.assertLess(unsigned.stat().st_size, limit)
+        observed = []
+        before = set(Path('/tmp').glob('sls-upstream-gpg-*'))
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'signature is invalid'):
+            self.upstream_with_output_observation(unsigned, limit, observed)
+        self.assertTrue(observed)
+        self.assertLessEqual(max(observed), limit, 'Unauthenticated GPG plaintext exceeded the admitted package bound before rejection.')
+        self.assertEqual(set(Path('/tmp').glob('sls-upstream-gpg-*')), before)
+
+    def test_signed_stock_at_plaintext_limit_remains_valid(self):
+        plain = self.root / 'boundary.tgz'
+        expected = {'module.xml': b'<module><rawname>framework</rawname><version>17.0.5</version></module>', 'fixture.txt': b'authenticated stock'}
+        package(plain, 'framework', expected)
+        limit = 64 * 1024
+        # Gzip permits trailing zero padding. Preserve a real, valid package
+        # while exercising the exact GPG plaintext-output boundary.
+        self.assertLess(plain.stat().st_size, limit)
+        with plain.open('ab') as output:
+            output.write(b'\0' * (limit - plain.stat().st_size))
+        signed = self.root / 'boundary.tgz.gpg'
+        subprocess.run(self.gpg_command + ['--output', str(signed), '--sign', str(plain)], check=True, capture_output=True, timeout=15)
+        observed = []
+        before = set(Path('/tmp').glob('sls-upstream-gpg-*'))
+        contents, provenance = self.upstream_with_output_observation(signed, limit, observed)
+        self.assertEqual(contents, expected)
+        self.assertEqual(provenance['upstream_signer'], self.upgrade.UPSTREAM_SIGNER)
+        self.assertEqual(observed, [limit])
+        self.assertEqual(set(Path('/tmp').glob('sls-upstream-gpg-*')), before)
+
+    def test_installed_identity_rejects_multibyte_document_types(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            web=Path(temporary);path=web/'admin/modules/slsmassnotifyserver/module.xml'
+            path.parent.mkdir(parents=True)
+            for encoding in ('utf-8', 'utf-16', 'utf-16-le', 'utf-16-be'):
+                xml_encoding={'utf-16-le':'UTF-16LE', 'utf-16-be':'UTF-16BE'}.get(encoding,encoding)
+                for declaration in ('', '<!DOCTYPE module [<!ENTITY version "0.1.8-beta">]>'):
+                    with self.subTest(encoding=encoding, declaration=bool(declaration)):
+                        version='&version;' if declaration else '0.1.8-beta'
+                        path.write_bytes(('<?xml version="1.0" encoding="'+xml_encoding+'"?>'+declaration+'<module><rawname>slsmassnotifyserver</rawname><version>'+version+'</version></module>').encode(encoding))
+                        if declaration:
+                            with self.assertRaisesRegex(self.upgrade.UpgradeError,'Unsupported module XML declarations'):
+                                self.upgrade.identity(web,'slsmassnotifyserver')
+                        else:
+                            self.assertEqual(self.upgrade.identity(web,'slsmassnotifyserver'),'0.1.8-beta')
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix='sls-upgrade-signed-')
@@ -134,6 +210,215 @@ class UpgradeTrustTests(unittest.TestCase):
     def assert_preserved(self):
         for name, body in self.preserved.items(): self.assertEqual((self.data / name).read_bytes(), body)
         self.assertFalse(self.args.trust_root.exists())
+
+    def rollback_fixture(self):
+        self.prepare()
+        backup = self.root / 'module-backup'
+        backup.mkdir(mode=0o700)
+        live = self.web / 'admin/modules/slsmassnotifyserver'
+        live.rename(backup / 'slsmassnotifyserver')
+        live.mkdir()
+        for name, body in self.new.items():
+            target = live / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(body)
+        return live, backup
+
+    def restore_module(self, backup, existed=True):
+        with patch.object(self.upgrade, 'WEB', self.web):
+            self.upgrade.restore_previous_module(self.workspace, backup, existed)
+
+    def test_module_rollback_can_resume_after_both_directory_moves(self):
+        live, backup = self.rollback_fixture()
+        self.restore_module(backup)
+        self.assertEqual((live / 'module.xml').read_bytes(), self.old['module.xml'])
+        failed = backup / 'failed-module'
+        self.assertEqual((failed / 'module.xml').read_bytes(), self.new['module.xml'])
+        identities = (live.stat().st_ino, failed.stat().st_ino)
+        self.restore_module(backup)
+        self.assertEqual((live.stat().st_ino, failed.stat().st_ino), identities)
+        self.assert_preserved()
+
+    def test_module_rollback_resumes_after_only_the_first_directory_move(self):
+        live, backup = self.rollback_fixture()
+        live.rename(backup / 'failed-module')
+        self.restore_module(backup)
+        self.assertEqual((live / 'module.xml').read_bytes(), self.old['module.xml'])
+        self.assertEqual((backup / 'failed-module/module.xml').read_bytes(), self.new['module.xml'])
+        self.assert_preserved()
+
+    def test_private_module_backup_under_freepbx_owned_parent_can_be_restored(self):
+        live, backup = self.rollback_fixture()
+        actual = live.parent / '.sls-mass-notify-recovery.ABC123'
+        backup.rename(actual)
+        account = pwd.getpwnam('asterisk')
+        os.chown(live.parent, account.pw_uid, account.pw_gid)
+        live.parent.chmod(0o775)
+        self.restore_module(actual)
+        self.restore_module(actual)
+        self.assertEqual((live / 'module.xml').read_bytes(), self.old['module.xml'])
+        self.assertEqual((actual / 'failed-module/module.xml').read_bytes(), self.new['module.xml'])
+
+    def native_backup_fixture(self):
+        live, backup = self.rollback_fixture()
+        actual = live.parent / '.sls-mass-notify-recovery.ABC123'; backup.rename(actual)
+        account = pwd.getpwnam('asterisk')
+        (actual/'module-swap-complete').write_bytes(b'')
+        for item in [actual,*actual.rglob('*')]:
+            os.chown(item,account.pw_uid,account.pw_gid)
+            item.chmod(0o775 if item.is_dir() else 0o664)
+        return live,actual
+
+    def test_authenticated_legacy_backup_recovers_after_native_boot_permission_normalization(self):
+        live,backup=self.native_backup_fixture()
+        self.restore_module(backup)
+        self.assertEqual((live/'module.xml').read_bytes(),self.old['module.xml'])
+        self.assertEqual((backup/'failed-module/module.xml').read_bytes(),self.new['module.xml'])
+        self.assertEqual((backup.stat().st_uid,backup.stat().st_gid,stat.S_IMODE(backup.stat().st_mode)),(0,0,0o700))
+        self.restore_module(backup)
+        self.assert_preserved()
+
+    def test_modified_native_backup_is_not_adopted_or_moved(self):
+        live,backup=self.native_backup_fixture()
+        (backup/'slsmassnotifyserver/module.xml').write_bytes(b'changed after the signed approval')
+        before=live.stat().st_ino,backup.stat().st_uid,stat.S_IMODE(backup.stat().st_mode)
+        with self.assertRaises((self.upgrade.UpgradeError,self.trust.TrustError)):
+            self.restore_module(backup)
+        self.assertEqual((live.stat().st_ino,backup.stat().st_uid,stat.S_IMODE(backup.stat().st_mode)),before)
+        self.assertFalse((backup/'failed-module').exists())
+
+    def test_native_backup_unknown_entries_or_unsafe_markers_are_not_adopted(self):
+        live,backup=self.native_backup_fixture();marker=backup/'module-swap-complete'
+        for kind in ('unknown','nonempty-marker','linked-marker','world-write'):
+            with self.subTest(kind=kind):
+                marker.unlink(missing_ok=True);marker.write_bytes(b'');marker.chmod(0o664)
+                account=pwd.getpwnam('asterisk');os.chown(marker,account.pw_uid,account.pw_gid)
+                unknown=backup/'unknown';victim=self.root/('marker-victim-'+kind);victim.write_bytes(b'unchanged')
+                if kind=='unknown':unknown.write_bytes(b'preserve')
+                elif kind=='nonempty-marker':marker.write_bytes(b'unrecognized authority')
+                elif kind=='linked-marker':marker.unlink();marker.symlink_to(victim)
+                else:backup.chmod(0o777)
+                before=live.stat().st_ino,backup.stat().st_uid,stat.S_IMODE(backup.stat().st_mode)
+                with self.assertRaises((self.upgrade.UpgradeError,self.trust.TrustError,OSError)):
+                    self.restore_module(backup)
+                self.assertEqual((live.stat().st_ino,backup.stat().st_uid,stat.S_IMODE(backup.stat().st_mode)),before)
+                self.assertEqual(victim.read_bytes(),b'unchanged')
+                unknown.unlink(missing_ok=True);backup.chmod(0o775)
+
+    def test_open_writer_cannot_change_legacy_backup_between_validation_and_restore(self):
+        live,backup=self.native_backup_fixture();target=backup/'slsmassnotifyserver/module.xml'
+        original_chown=os.fchown;changed=[]
+        with target.open('r+b') as writer:
+            def changed_chown(fd,uid,gid):
+                result=original_chown(fd,uid,gid)
+                if not changed and os.fstat(fd).st_ino==backup.stat().st_ino:
+                    changed.append(True);writer.seek(0);writer.write(b'changed through an existing descriptor');writer.truncate();writer.flush()
+                return result
+            before=live.stat().st_ino
+            with patch.object(self.upgrade.os,'fchown',side_effect=changed_chown):
+                with self.assertRaises((self.upgrade.UpgradeError,self.trust.TrustError)):
+                    self.restore_module(backup)
+            self.assertEqual(live.stat().st_ino,before)
+            self.assertFalse((backup/'failed-module').exists())
+            self.assertTrue(changed,'The existing writer did not reach the sealing boundary')
+
+    def test_module_rollback_resumes_after_durable_move_failure(self):
+        live, backup = self.rollback_fixture()
+        real_fsync = os.fsync
+        failed = []
+        def fsync(descriptor):
+            if not failed:
+                failed.append(True)
+                raise OSError('fixture power loss after moving the failed module')
+            return real_fsync(descriptor)
+        with patch.object(self.upgrade.os, 'fsync', side_effect=fsync):
+            with self.assertRaises(OSError):
+                self.restore_module(backup)
+        self.assertFalse(live.exists())
+        self.assertTrue((backup / 'slsmassnotifyserver').exists())
+        self.assertTrue((backup / 'failed-module').exists())
+        self.restore_module(backup)
+        self.assertEqual((live / 'module.xml').read_bytes(), self.old['module.xml'])
+        self.assert_preserved()
+
+    def test_unsafe_module_backup_is_never_moved_into_the_live_tree(self):
+        live, backup = self.rollback_fixture()
+        original = backup / 'slsmassnotifyserver'
+        original.rename(backup / 'preserved-original')
+        original.symlink_to(backup / 'preserved-original', target_is_directory=True)
+        before = live.stat().st_ino
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Unsafe module recovery tree'):
+            self.restore_module(backup)
+        self.assertEqual(live.stat().st_ino, before)
+        self.assertFalse((backup / 'failed-module').exists())
+        original.unlink()
+        (backup / 'preserved-original').rename(original)
+        account = pwd.getpwnam('asterisk')
+        os.chown(backup, account.pw_uid, account.pw_gid)
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Unsafe module recovery directory'):
+            self.restore_module(backup)
+        self.assertEqual(live.stat().st_ino, before)
+
+    def test_module_rollback_does_not_replace_a_modified_backup(self):
+        live, backup = self.rollback_fixture()
+        target = backup / 'slsmassnotifyserver/module.xml'
+        target.write_bytes(b'changed independently')
+        before = live.stat().st_ino
+        with self.assertRaises(self.trust.TrustError):
+            self.restore_module(backup)
+        self.assertEqual(live.stat().st_ino, before)
+        self.assertFalse((backup / 'failed-module').exists())
+        self.assertEqual(target.read_bytes(), b'changed independently')
+
+    def test_repeated_rollback_does_not_approve_modified_restored_code(self):
+        live, backup = self.rollback_fixture()
+        self.restore_module(backup)
+        target = live / 'module.xml'
+        target.write_bytes(b'changed after rollback')
+        failed = backup / 'failed-module'
+        before = failed.stat().st_ino
+        with self.assertRaises(self.trust.TrustError):
+            self.restore_module(backup)
+        self.assertEqual(target.read_bytes(), b'changed after rollback')
+        self.assertEqual(failed.stat().st_ino, before)
+
+    def test_ambiguous_second_rollback_preserves_all_three_trees(self):
+        live, backup = self.rollback_fixture()
+        failed = backup / 'failed-module'
+        failed.mkdir()
+        (failed / 'evidence').write_bytes(b'previous failed release')
+        identities = (live.stat().st_ino, (backup / 'slsmassnotifyserver').stat().st_ino, failed.stat().st_ino)
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'ambiguous'):
+            self.restore_module(backup)
+        self.assertEqual(identities, (live.stat().st_ino, (backup / 'slsmassnotifyserver').stat().st_ino, failed.stat().st_ino))
+
+    def test_fresh_failed_install_rollback_can_be_repeated(self):
+        shutil.rmtree(self.web / 'admin/modules/slsmassnotifyserver')
+        for name in self.upgrade.WIDGETS:
+            (self.web / 'admin/modules/dashboard' / name).unlink()
+        runtime = self.fs / self.upgrade.RUNTIME[1:]
+        shutil.rmtree(runtime)
+        self.cron = b'12 1 * * * /usr/bin/true\n'
+        self.prepare()
+        live = self.web / 'admin/modules/slsmassnotifyserver'
+        live.mkdir()
+        (live / 'payload').write_bytes(b'failed fresh install')
+        backup = self.root / 'module-backup'
+        backup.mkdir(mode=0o700)
+        self.restore_module(backup, False)
+        failed = backup / 'failed-module'
+        before = failed.stat().st_ino
+        self.restore_module(backup, False)
+        self.assertFalse(live.exists())
+        self.assertEqual(failed.stat().st_ino, before)
+        self.assertEqual((failed / 'payload').read_bytes(), b'failed fresh install')
+
+    def test_rollback_existing_flag_must_match_the_prior_approval(self):
+        live, backup = self.rollback_fixture()
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'approval'):
+            self.restore_module(backup, False)
+        self.assertTrue(live.exists())
+        self.assertTrue((backup / 'slsmassnotifyserver').exists())
 
     def seed_current_stock_cache(self):
         self.prepare()
@@ -565,7 +850,7 @@ class UpgradeTrustTests(unittest.TestCase):
 
     def test_mismatched_installed_previous_module_is_not_auto_approved(self):
         target = self.web / 'admin/modules/slsmassnotifyserver/bin/sls_mass_notify_update.sh'; target.write_bytes(b'unknown live code')
-        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Installed previous SLS file differs'): self.prepare()
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Installed previous SLL file differs'): self.prepare()
         self.assert_preserved()
 
     def test_absent_dashboard_bootstraps_only_independently_signed_stock(self):

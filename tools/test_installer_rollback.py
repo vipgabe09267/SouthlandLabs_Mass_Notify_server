@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Exercise installer rollback against private trees and mocked PBX commands."""
 import os
+import hashlib
+import importlib.util
+import json
 from pathlib import Path
 import pwd
+import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
+import sys
 import unittest
 
 
@@ -27,13 +32,15 @@ DOWNLOAD_DIR="$fixture/download"
 RECOVERY_DIR="$fixture/recovery"
 RECOVERY_TOOL="$fixture/recover.py"
 INSTALL_BOOTSTRAP_DIR="$fixture/bootstrap"
+UPGRADE_TRUST_DIR="$fixture/approval"
 MODULE_ACTIVATED=1
 STATIC_MUTATION_STARTED=1
 HAD_EXISTING_MODULE=1
 MODULE_WAS_ENABLED=1
 INSTALL_NOTIFICATION_SIDE_EFFECTS=0
-[[ "$scenario" != fresh ]] || HAD_EXISTING_MODULE=0
+[[ "$scenario" != fresh && "$scenario" != fresh-unrecorded-swap ]] || HAD_EXISTING_MODULE=0
 [[ "$scenario" != pre-activation ]] || MODULE_ACTIVATED=0
+[[ "$scenario" != fresh-unrecorded-swap ]] || MODULE_ACTIVATED=0
 log() { printf '%s\n' "$*" >>"$fixture/messages.log"; }
 ensure_data_directory() { return 0; }
 safe_config_restore() {
@@ -46,6 +53,7 @@ record_install_failure() {
 sls_as_asterisk() { printf "restored-asterisk-config\n" >>"$LOG_FILE"; }
 verify_install_idle_history() { printf "retained-phone-history\n" >>"$LOG_FILE"; }
 verify_local_api_route() { printf "read-only-api-health\n" >>"$LOG_FILE"; }
+refresh_served_php_workers() { printf "refresh-served-php\n" >>"$LOG_FILE"; }
 fwconsole() { printf 'FORBIDDEN fwconsole %s\n' "$*" >>"$LOG_FILE"; return 99; }
 php() { printf 'FORBIDDEN PHP hook\n' >>"$LOG_FILE"; return 99; }
 refresh_module_install() { printf 'FORBIDDEN old install\n' >>"$LOG_FILE"; return 99; }
@@ -56,6 +64,11 @@ restore_module_registration() {
 }
 if [[ "$scenario" == move-failure ]]; then
   restore_previous_module_tree() { return 19; }
+fi
+if [[ "$scenario" == repeated-recovery ]]; then
+  rollback_module_install || :
+  ROLLBACK_FAILED=0
+  ROLLBACK_ATTEMPTED=0
 fi
 trap guard_config_on_exit EXIT
 exit 73
@@ -71,12 +84,38 @@ class RollbackTests(unittest.TestCase):
             (installed / 'payload').write_text('failed new release')
             backup = fixture / 'backup'
             backup.mkdir(mode=0o700)
-            if scenario != 'fresh':
+            if not scenario.startswith('fresh'):
                 previous = backup / MODULE
                 previous.mkdir()
                 (previous / 'payload').write_text('original release')
             for directory in ('stage', 'download', 'recovery', 'bootstrap'):
                 (fixture / directory).mkdir()
+            if scenario == 'fresh-unrecorded-swap':
+                # Activation copies the staged source, so the source remains
+                # present after rename and before publishing the swap marker.
+                (fixture / 'stage' / MODULE).mkdir()
+            approval = fixture / 'approval'
+            approval.mkdir(mode=0o700)
+            prior = None if scenario.startswith('fresh') else {
+                'schema': 1, 'module': MODULE, 'version': '0.1.8-beta',
+                'source': {'kind': 'publisher-ed25519', 'archive_sha256': 'a' * 64},
+                'files': {'payload': {'target': 'admin/modules/' + MODULE + '/payload',
+                                      'sha256': hashlib.sha256(b'original release').hexdigest()}}}
+            (approval / 'previous-web-approval.json').write_text(json.dumps({MODULE: prior}))
+            (approval / 'previous-web-approval.json').chmod(0o600)
+            helpers = ROOT / 'slsmassnotifyserver/bin/sls_mass_notify'
+            for name in ('sls_upgrade_trust.py', 'sls_module_trust.py', 'sls_release_trust.py', 'sls_installer_recovery.py'):
+                body = (helpers / name).read_text()
+                if name == 'sls_upgrade_trust.py':
+                    body = body.replace("WEB = Path('/var/www/html')", "WEB = Path(" + repr(str(fixture)) + ")")
+                target = fixture / 'bootstrap' / name
+                target.write_text(body)
+                target.chmod(0o700)
+            # Keep the production helper's standard web-root layout in this
+            # private filesystem while the shell exercises its actual rollback.
+            (fixture / 'admin').mkdir()
+            (fixture / 'modules').rename(fixture / 'admin/modules')
+            installed = fixture / 'admin/modules' / MODULE
             (fixture/'recovery/module-registration.json').write_text('{"schema":1,"row":null}')
             (fixture/'recover.py').write_text('import pathlib,sys\np=pathlib.Path(sys.argv[2]).parent.parent\nwith (p/"commands.log").open("a") as f: f.write("static-"+sys.argv[3]+"\\n")\nif sys.argv[3]=="restore-maintenance":sys.exit(1)\n')
             (fixture/'config').write_text('changed by failed install')
@@ -84,7 +123,7 @@ class RollbackTests(unittest.TestCase):
             snapshot.write_text('original protected config')
             (fixture/'delivery-ledger').write_text('new receipt committed during install')
             installer = fixture/'installer.sh'
-            installer.write_text(SOURCE.replace('/var/www/html/admin/modules', str(fixture/'modules')))
+            installer.write_text(SOURCE.replace('/var/www/html/admin/modules', str(fixture/'admin/modules')))
             result = subprocess.run(['bash', '-c', HARNESS, '_', str(installer), str(fixture), scenario],
                 capture_output=True, text=True, timeout=20, env={**os.environ,'SLS_MASS_NOTIFY_MODULE':MODULE})
             self.assertEqual(result.returncode,73,result.stdout+result.stderr)
@@ -100,16 +139,84 @@ class RollbackTests(unittest.TestCase):
             self.assertEqual((fixture/'delivery-ledger').read_text(),'new receipt committed during install')
             if scenario != 'config-failure':
                 self.assertEqual((fixture/'config').read_text(),'original protected config')
-            if scenario == 'fresh': self.assertFalse(installed.exists())
+            if scenario.startswith('fresh'): self.assertFalse(installed.exists())
             elif scenario not in ('move-failure','pre-activation'):
                 self.assertEqual((installed/'payload').read_text(),'original release')
             if scenario not in ('move-failure','pre-activation'):
                 self.assertEqual((backup/'failed-module/payload').read_text(),'failed new release')
             self.assertIn('Recovery locations:',(fixture/'messages.log').read_text())
+            if scenario == 'repeated-recovery':
+                self.assertNotIn('previous module directory could not be restored', (fixture / 'messages.log').read_text())
 
     def test_static_recovery_never_runs_old_module_hooks(self):
-        for scenario in ('normal','fresh','pre-activation','config-failure','registration-failure','move-failure'):
+        for scenario in ('normal','fresh','fresh-unrecorded-swap','pre-activation','config-failure','registration-failure','move-failure','repeated-recovery'):
             with self.subTest(scenario=scenario): self.run_scenario(scenario)
+
+
+class RollbackHistoryHealth(unittest.TestCase):
+    def test_rollback_requires_recovered_collector_health_and_an_existing_ledger(self):
+        helper = ROOT / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_idle.py'
+        spec = importlib.util.spec_from_file_location('rollback_idle_fixture', helper)
+        idle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(idle)
+        for failure in ('stale', 'missing', 'delayed-startup', 'transient-enterprise-worker', 'persistent-enterprise-worker'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(prefix='sll-rollback-health-') as temporary:
+                base = Path(temporary)
+                data = base / 'data'; data.mkdir(mode=0o750)
+                module = base / 'module/module.xml'; module.parent.mkdir(); module.write_bytes(b'<module/>')
+                marker = module.with_name('PhoneEventService.php'); marker.write_bytes(b'<?php')
+                proc = base / 'proc'; proc.mkdir()
+                state = {'schema':1,'collector':{'generation':'b'*32,'boot_id':'fixture-boot','heartbeat_tick':99},
+                         'batches':{'a'*32:{'status':'closed','created_at':1,'closed_at':2}}}
+                if failure == 'missing':state['batches'] = {}
+                ledger = data / 'phone-admission.json'; ledger.write_text(json.dumps(state)); ledger.chmod(0o640)
+                check = idle.IdleCheck(data,module=module,proc=proc,spools=(),channels=lambda:'',
+                    boot_id='fixture-boot',monotonic=lambda:100,clock=lambda:1000,subsystem_paths=(marker,))
+                recovery = base / 'recovery'; recovery.mkdir(mode=0o700)
+                baseline = recovery / 'idle-before.json'; baseline.write_text(json.dumps(check.inspect())); baseline.chmod(0o600)
+                if failure == 'missing':
+                    ledger.unlink()
+                elif failure in ('stale', 'delayed-startup'):
+                    state['collector']['heartbeat_tick'] = 1
+                    ledger.write_text(json.dumps(state))
+                else:
+                    worker = proc / '42'; worker.mkdir(); (worker / 'cmdline').write_bytes(b'php\0/usr/local/bin/sls_mass_notify/sls_mass_notify_cluster_worker.php\0')
+                runner = base / 'idle-runner.py'
+                runner.write_text('''import importlib.util,json,pathlib,sys
+spec=importlib.util.spec_from_file_location('actual_idle',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+base=pathlib.Path(sys.argv[2]);scenario=sys.argv[3];sys.argv=[sys.argv[0],*sys.argv[4:]]
+counter=base/'attempts';n=int(counter.read_text())+1 if counter.exists() else 1;counter.write_text(str(n))
+if scenario=='delayed-startup' and n==3:
+ p=base/'data/phone-admission.json';state=json.loads(p.read_text());state['collector']['heartbeat_tick']=99;p.write_text(json.dumps(state))
+if scenario=='transient-enterprise-worker' and n==3:
+ (base/'proc/42/cmdline').unlink();(base/'proc/42').rmdir()
+original=m.IdleCheck
+m.IdleCheck=lambda data:original(data,module=base/'module/module.xml',proc=base/'proc',spools=(),channels=lambda:'',boot_id='fixture-boot',monotonic=lambda:100,clock=lambda:1000,subsystem_paths=(base/'module/PhoneEventService.php',))
+try:m.main()
+except (m.IdleError,OSError,ValueError):sys.exit(1)
+''')
+                wrapper = base / 'idle-wrapper'
+                wrapper.write_text('#!/bin/bash\nexec ' + shlex.quote(sys.executable) + ' -I ' + shlex.join([str(runner), str(helper), str(base), failure]) + ' "$@"\n')
+                wrapper.chmod(0o700)
+                # The production shell invokes Python directly. Use a Python
+                # launcher to retain the real argument handling and checker.
+                launcher = base / 'idle-launcher.py'
+                launcher.write_text('import os,sys\nos.execv('+repr(str(wrapper))+','+repr([str(wrapper)])+'+sys.argv[1:])\n')
+                script = '''source "$1"
+WORKER_LOCK_PID=$$
+DATA_DIR="$2/data"; RECOVERY_DIR="$2/recovery"; IDLE_TOOL="$2/idle-launcher.py"
+ROLLBACK_ATTEMPTED=1
+if [[ "$3" == *enterprise-worker ]]; then ROLLBACK_ATTEMPTED=0; fi
+sleep() { :; }
+verify_install_idle_history
+'''
+                result = subprocess.run(['bash','-c',script,'fixture',str(ROOT/'tools/install_release.sh'),str(base),failure],
+                    capture_output=True,text=True,timeout=15)
+                if failure in ('delayed-startup', 'transient-enterprise-worker'):
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertGreaterEqual(int((base/'attempts').read_text()),3)
+                else:
+                    self.assertNotEqual(result.returncode,0,'Rollback accepted an unavailable collector or ledger: '+failure)
 
 @unittest.skipUnless(os.geteuid() == 0, 'Root is required to reproduce root-owned umask027 directories with an unprivileged PHP reader.')
 class ApiDirectoryPermissionTests(unittest.TestCase):

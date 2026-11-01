@@ -34,7 +34,9 @@ DATA = Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin')
 MODULE = Path('/var/www/html/admin/modules/slsmassnotifyserver/module.xml')
 SPOOLS = (Path('/var/spool/asterisk/outgoing'), Path('/var/spool/asterisk/tmp'))
 MAX_STATE = 16 * 1024 * 1024
+MAX_BASELINE = 4 * 1024 * 1024
 MAX_HISTORY = 10000
+PHONE_HISTORY_SECONDS = 7 * 86400
 MAX_PHONE_TARGETS = 1000
 MAX_PHONE_CHANNELS = 4096
 TOKEN = re.compile(r'[a-f0-9]{32}')
@@ -133,6 +135,57 @@ def read_json(path, limit=MAX_STATE, *, optional=False, protected=False, private
     finally:
         if fd >= 0: os.close(fd)
         if parent >= 0: os.close(parent)
+
+
+def read_collector_json(path, lock_name, limit=MAX_STATE, *, optional=False, private=False):
+    """Read under the writer's permanent mutex, rather than the replaced JSON inode."""
+    path = Path(path)
+    parent = lock = -1
+    try:
+        try:
+            parent = directory(path.parent)
+            lock = os.open(lock_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                           dir_fd=parent)
+        except FileNotFoundError:
+            # Older/fresh state may have no mutex yet. Keep the original
+            # bounded identity checks; never create or repair state here.
+            return read_json(path, limit, optional=optional, private=private)
+        account = pwd.getpwnam('asterisk')
+        marker = b'SLS_JSON_V1\n' if lock_name.endswith('.json.lock') else b''
+        def valid(info):
+            return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                    and info.st_uid in (0, account.pw_uid) and info.st_gid in (0, account.pw_gid)
+                    and stat.S_IMODE(info.st_mode) in (0o600, 0o640, 0o644)
+                    and 0 <= info.st_size <= len(marker))
+        deadline = time.monotonic() + 2
+        while True:
+            info = os.fstat(lock)
+            if not valid(info):
+                raise IdleError('Collector inspection mutex metadata is unsafe: ' + lock_name)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise IdleError('Collector state is busy; retry inspection after its transaction finishes') from None
+                time.sleep(.01)
+        opened = os.fstat(lock)
+        named = os.stat(lock_name, dir_fd=parent, follow_symlinks=False)
+        def identity(value):
+            return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                    value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if (not valid(opened) or identity(opened) != identity(named)
+                or not marker.startswith(os.read(lock, len(marker) + 1))):
+            raise IdleError('Collector inspection mutex changed or has invalid contents')
+        result = read_json(path, limit, optional=optional, private=private)
+        if identity(opened) != identity(os.stat(lock_name, dir_fd=parent, follow_symlinks=False)):
+            raise IdleError('Collector inspection mutex changed during the snapshot')
+        return result
+    finally:
+        if lock >= 0:
+            os.close(lock)
+        if parent >= 0:
+            os.close(parent)
 
 
 def channel_inventory():
@@ -346,7 +399,9 @@ class IdleCheck:
 
     def phone_history(self, installed, repair_collector=False, *, allow_pending_voicemail=False):
         self.repair_pending = []; self.repair_missing = False
-        state = read_json(self.data / 'phone-admission.json', optional=not installed or repair_collector)
+        self.closed_phone_times = {}; self.voicemail_sources = set()
+        state = read_collector_json(self.data / 'phone-admission.json', 'phone-admission.lock',
+                                    optional=not installed or repair_collector)
         if state is None:
             self.repair_missing = installed
             return {}
@@ -359,6 +414,12 @@ class IdleCheck:
             if not isinstance(token, str) or not TOKEN.fullmatch(token) or not isinstance(batch, dict):
                 raise IdleError('Phone admission has an unclosed or invalid batch; allow it to drain')
             if batch.get('status') != 'closed':
+                if batch.get('purpose') == 'voicemail':
+                    proof = batch.get('voicemail')
+                    source = proof.get('source_token') if isinstance(proof, dict) else None
+                    if not isinstance(source, str) or not TOKEN.fullmatch(source):
+                        raise IdleError('Phone voicemail source dependency is invalid')
+                    self.voicemail_sources.add(hashlib.sha256(source.encode()).hexdigest())
                 if not repair_collector or batch.get('status') not in ('active', 'reserved'):
                     raise IdleError('Phone admission has an unclosed or invalid batch; allow it to drain')
                 # Independent process, spool, lease and complete channel checks
@@ -368,8 +429,14 @@ class IdleCheck:
                 continue
             if not allow_pending_voicemail and self.pending_voicemail(batch):
                 raise IdleError('A voicemail fallback is pending; allow it to finish or expire and retry installation')
-            history[hashlib.sha256(token.encode()).hexdigest()] = hashlib.sha256(
+            key = hashlib.sha256(token.encode()).hexdigest()
+            history[key] = hashlib.sha256(
                 json.dumps(batch, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+            closed = batch.get('closed_at', batch.get('updated_at'))
+            if closed is not None:
+                if isinstance(closed, bool) or not isinstance(closed, (int, float)) or not math.isfinite(closed) or closed < 0:
+                    raise IdleError('Phone closed-history timestamp is invalid')
+                self.closed_phone_times[key] = closed
         if installed and not repair_collector:
             health = state.get('collector')
             if self.boot_id is None:
@@ -379,7 +446,8 @@ class IdleCheck:
             anchor_tick = health.get('heartbeat_tick')
             if isinstance(anchor_tick, bool) or not isinstance(anchor_tick, (int, float)) or not math.isfinite(anchor_tick):
                 raise IdleError('Phone collector heartbeat anchor is invalid; restore collector health before installation')
-            pulse = read_json(self.data / 'phone-collector-heartbeat.json', 1024, optional=True, private=True)
+            pulse = read_collector_json(self.data / 'phone-collector-heartbeat.json',
+                                         'phone-collector-heartbeat.json.lock', 1024, optional=True, private=True)
             if pulse is not None:
                 fields = {'schema', 'generation', 'boot_id', 'anchor_tick', 'heartbeat_tick'}
                 if set(pulse) != fields or type(pulse.get('schema')) is not int or pulse['schema'] != 1:
@@ -394,22 +462,65 @@ class IdleCheck:
                 raise IdleError('Phone collector heartbeat is stale or invalid; restore collector health before installation')
         return history
 
-    def inspect(self, baseline=None, repair_collector=False):
+    def retirement_times(self, before, known, missing, evidence):
+        """Use protected baseline facts, or hash-bound old records, never live guesses."""
+        policy = before.get('phone_history_retention')
+        times = {}
+        if policy is not None:
+            if (not isinstance(policy, dict) or set(policy) != {'schema', 'seconds', 'closed_at'}
+                    or type(policy.get('schema')) is not int or policy['schema'] != 1
+                    or type(policy.get('seconds')) is not int or policy['seconds'] != PHONE_HISTORY_SECONDS
+                    or not isinstance(policy.get('closed_at'), dict) or set(policy['closed_at']) - set(known)
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                           or not math.isfinite(value) or value < 0 for value in policy['closed_at'].values())):
+                raise IdleError('Installation phone-retention baseline is invalid')
+            times.update(policy['closed_at'])
+        if evidence is not None:
+            saved = evidence if isinstance(evidence, dict) else read_json(Path(evidence), MAX_STATE, protected=True)
+            if (type(saved.get('schema')) is not int or saved['schema'] != 1
+                    or not isinstance(saved.get('batches'), dict) or len(saved['batches']) > MAX_HISTORY):
+                raise IdleError('Protected phone-history evidence is invalid')
+            for token, batch in saved['batches'].items():
+                if not isinstance(token, str) or not TOKEN.fullmatch(token) or not isinstance(batch, dict):
+                    raise IdleError('Protected phone-history evidence contains an invalid batch')
+                key = hashlib.sha256(token.encode()).hexdigest()
+                if key not in missing:
+                    continue
+                digest = hashlib.sha256(json.dumps(batch, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+                if batch.get('status') != 'closed' or digest != known[key]:
+                    raise IdleError('Protected phone-history evidence does not match the original baseline')
+                closed = batch.get('closed_at', batch.get('updated_at'))
+                if (isinstance(closed, bool) or not isinstance(closed, (int, float))
+                        or not math.isfinite(closed) or closed < 0):
+                    raise IdleError('Protected phone-history evidence has an invalid closed timestamp')
+                if key in times and times[key] != closed:
+                    raise IdleError('Phone-history evidence conflicts with the protected retention baseline')
+                times[key] = closed
+        return times
+
+    def inspect(self, baseline=None, repair_collector=False, *, history_evidence=None):
+        if history_evidence is not None and baseline is None:
+            raise IdleError('Phone-history evidence requires the original protected installation baseline')
         self.no_processes(); self.no_pending(); self.no_playback()
         installed = self.installed()
         collector_required = installed and self.phone_subsystem_present()
         history = self.phone_history(collector_required, repair_collector)
+        retired = 0
         if baseline is not None:
-            before = read_json(Path(baseline), 2 * 1024 * 1024, protected=True)
-            known = before.get('phone_history')
-            if (type(before.get('schema')) is not int or before.get('schema') != 1
-                    or before.get('ok') is not True or not isinstance(known, dict)
-                    or len(known) > MAX_HISTORY or type(before.get('closed_phone_batches')) is not int
-                    or before.get('closed_phone_batches') != len(known)
-                    or any(not isinstance(key, str) or not HASH.fullmatch(key) or not isinstance(value, str) or not HASH.fullmatch(value) for key, value in known.items())):
-                raise IdleError('Installation phone-history baseline is invalid')
-            if any(history.get(key) != value for key, value in known.items()):
+            before, known = history_baseline(baseline)
+            if any(key in history and history[key] != value for key, value in known.items()):
                 raise IdleError('Retained closed phone history changed or disappeared; preserve recovery evidence and never restore an old live ledger')
+            missing = set(known) - set(history)
+            times = self.retirement_times(before, known, missing, history_evidence)
+            now = self.clock()
+            if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now) or now < 0:
+                raise IdleError('Phone-retention verification clock is invalid')
+            for key in missing:
+                if key not in times:
+                    raise IdleError('Closed phone history is missing without retention evidence; preserve the original baseline and supply a protected pre-upgrade ledger copy for verification, never restore it over live state')
+                if key in self.voicemail_sources or not times[key] < now - PHONE_HISTORY_SECONDS:
+                    raise IdleError('Retained closed phone history changed or disappeared before expiry or while required for voicemail; preserve recovery evidence and never restore an old live ledger')
+                retired += 1
             pending = before.get('pending_phone_reconciliation', [])
             if not isinstance(pending, list) or len(pending) > MAX_HISTORY or any(not isinstance(key, str) or not HASH.fullmatch(key) for key in pending):
                 raise IdleError('Collector repair baseline is invalid')
@@ -417,22 +528,118 @@ class IdleCheck:
                 raise IdleError('Collector repair has not closed its independently idle batches; preserve the journal and inspect collector health')
         return {'schema': 1, 'ok': True, 'checked_at': datetime.now(timezone.utc).isoformat(), 'installed': installed,
                 'phone_collector_required': collector_required, 'closed_phone_batches': len(history), 'phone_history': history,
+                'phone_history_retention': {'schema': 1, 'seconds': PHONE_HISTORY_SECONDS, 'closed_at': self.closed_phone_times},
+                'retired_phone_batches': retired,
                 'pending_phone_reconciliation': self.repair_pending, 'missing_phone_ledger': self.repair_missing,
                 'manual_test_active': False, 'notification_playback_active': False, 'pending_announcements': False}
+
+
+def history_baseline(path):
+    before = read_json(Path(path), MAX_BASELINE, protected=True)
+    known = before.get('phone_history')
+    if (type(before.get('schema')) is not int or before.get('schema') != 1
+            or before.get('ok') is not True or not isinstance(known, dict)
+            or len(known) > MAX_HISTORY or type(before.get('closed_phone_batches')) is not int
+            or before.get('closed_phone_batches') != len(known)
+            or any(not isinstance(key, str) or not HASH.fullmatch(key) or not isinstance(value, str)
+                   or not HASH.fullmatch(value) for key, value in known.items())):
+        raise IdleError('Installation phone-history baseline is invalid')
+    return before, known
+
+
+def retain_history_evidence(baseline, source, destination):
+    """Accumulate only original hash-matching closed rows from protected backups."""
+    before, known = history_baseline(baseline)
+    proof = read_json(Path(source), MAX_STATE, protected=True)
+
+    def proven_rows(value):
+        if (type(value.get('schema')) is not int or value['schema'] != 1
+                or not isinstance(value.get('batches'), dict) or len(value['batches']) > MAX_HISTORY):
+            raise IdleError('Protected phone-history evidence is invalid')
+        matched = {}
+        for token, batch in value['batches'].items():
+            if not isinstance(token, str) or not TOKEN.fullmatch(token) or not isinstance(batch, dict):
+                raise IdleError('Protected phone-history evidence contains an invalid batch')
+            key = hashlib.sha256(token.encode()).hexdigest()
+            if key not in known or batch.get('status') != 'closed':
+                continue
+            digest = hashlib.sha256(json.dumps(batch, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+            if digest == known[key]:
+                matched[token] = batch
+        facts = {'schema': 1, 'batches': matched}
+        # This also checks timestamp types and any richer protected baseline.
+        # A backup can predate closure of unrelated, still-retained batches.
+        IdleCheck(DATA).retirement_times(before, known, set(known), facts)
+        return matched
+
+    matched = proven_rows(proof)
+    if known and not matched:
+        raise IdleError('Protected phone-history evidence does not match the original baseline')
+    destination = Path(destination)
+    parent = directory(destination.parent, protected=True)
+    temporary = '.history-evidence-' + os.urandom(12).hex()
+    try:
+        if stat.S_IMODE(os.fstat(parent).st_mode) != 0o700:
+            raise IdleError('Retained phone-history evidence requires a root-private transaction directory')
+        existing = read_json(destination, MAX_STATE, protected=True, optional=True)
+        if existing is not None:
+            retained = proven_rows(existing)
+            if set(existing) != {'schema', 'batches'} or existing['batches'] != retained:
+                raise IdleError('Retained recovery evidence contains unverified data; preserve it for review')
+            for token, batch in retained.items():
+                if token in matched and matched[token] != batch:
+                    raise IdleError('Retained recovery evidence conflicts with another original record')
+            merged = {**retained, **matched}
+            if merged == retained:
+                return
+        else:
+            merged = matched
+        body = (json.dumps({'schema': 1, 'batches': merged}, sort_keys=True,
+                           separators=(',', ':'), allow_nan=False) + '\n').encode()
+        if len(body) > MAX_STATE:
+            raise IdleError('Protected phone-history evidence exceeds its size bound')
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=parent)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        # The installer holds both root transaction coordination locks. Only
+        # root can access this directory. New backups can add verified rows;
+        # every previously retained row remains identical. Neither the original
+        # baseline, the source backup nor the live ledger is written here.
+        os.rename(temporary, destination.name, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data', type=Path, default=DATA)
-    parser.add_argument('action', choices=('inspect',))
+    parser.add_argument('action', choices=('inspect', 'retain-history-evidence'))
     parser.add_argument('--baseline', type=Path)
+    parser.add_argument('--history-evidence', type=Path, help='Root-private pre-upgrade ledger evidence; verified against original hashes and never restored')
+    parser.add_argument('--retained-history-evidence', type=Path)
     parser.add_argument('--repair-collector', action='store_true', help='Inspect independent idleness for collector recovery without changing its journal')
     args = parser.parse_args()
     if os.geteuid() != 0: raise IdleError('Complete installation idle inspection requires root visibility')
-    print(json.dumps(IdleCheck(args.data).inspect(args.baseline, args.repair_collector), sort_keys=True))
+    if args.action == 'retain-history-evidence':
+        if args.baseline is None or args.history_evidence is None or args.retained_history_evidence is None or args.repair_collector:
+            parser.error('Retaining evidence requires --baseline, --history-evidence and --retained-history-evidence')
+        retain_history_evidence(args.baseline, args.history_evidence, args.retained_history_evidence)
+        print(json.dumps({'ok': True, 'protected_history_evidence_retained': True}))
+    else:
+        if args.retained_history_evidence is not None:
+            parser.error('--retained-history-evidence requires retain-history-evidence')
+        print(json.dumps(IdleCheck(args.data).inspect(args.baseline, args.repair_collector, history_evidence=args.history_evidence), sort_keys=True))
 
 if __name__ == '__main__':
     try: main()
     except (IdleError, OSError, ValueError, TypeError, subprocess.SubprocessError) as error:
-        print('SLS installation idle check failed: ' + str(error), file=sys.stderr)
+        print('SLL installation idle check failed: ' + str(error), file=sys.stderr)
         raise SystemExit(1)

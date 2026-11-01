@@ -1,6 +1,6 @@
 # Control API audit collection
 
-SLS records each audited API decision locally before returning the existing action
+SLL records each audited API decision locally before returning the existing action
 result. Records contain a random `audit_` event ID, a UTC creation time, source IP,
 HTTP method, action, response status, success flag and, when authenticated, a
 credential identifier. They exclude bearer credentials and message contents.
@@ -23,7 +23,7 @@ The Control API configuration endpoint accepts a JSON boolean for this field.
 This setting also covers audited denied API requests. The existing exclusion for
 successful legacy loopback health probes remains unchanged.
 
-SLS hands the identical JSON record to `/dev/log`, using a local Unix datagram,
+SLL hands the identical JSON record to `/dev/log`, using a local Unix datagram,
 tag `sls-mass-notify` and facility/severity `local5.info`. A handoff waits at most
 50 ms; the complete API audit helper has a two-second deadline. The independent
 local append still runs if forwarding fails, and forwarding still runs if local
@@ -33,7 +33,7 @@ Configure an existing system logging agent to select that tag and forward it to
 the approved separate collector. Use authenticated TLS, a durable bounded queue,
 certificate/name validation, retention controls and collector access restrictions.
 Source IPs and credential identifiers are operational data. Routing, certificates,
-remote queue limits and remote acknowledgements belong to that agent. SLS does
+remote queue limits and remote acknowledgements belong to that agent. SLL does
 not install/restart logging services or alter firewall rules. Follow your logging
 agent's supported configuration, for example the official
 [rsyslog forwarding module](https://docs.rsyslog.com/doc/configuration/modules/omfwd.html)
@@ -46,7 +46,7 @@ After configuring the collector, make an authorized read-only Control API reques
 from a separate host. Compare its event ID in the protected local audit history
 and the collector. Check that the record is complete and contains no credentials.
 Verify the agent's queue/recovery behavior during a controlled collector outage.
-These checks require the actual logging deployment; SLS's private-socket tests
+These checks require the actual logging deployment; SLL's private-socket tests
 do not certify a remote collector.
 
 Deployment readiness reports the latest local handoff and historical failures.

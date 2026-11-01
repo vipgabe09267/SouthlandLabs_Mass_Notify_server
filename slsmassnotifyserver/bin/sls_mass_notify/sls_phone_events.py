@@ -26,7 +26,7 @@ def collect(store, settings, *, ami_factory=PhoneAmi, should_stop=lambda: False)
             # Observing must never interrupt outcome collection or call routing.
             # Rate-limit diagnostics without logging raw AMI or configuration.
             if time.monotonic() - getattr(record, 'last_error', 0) >= 60:
-                print('SLS emergency observation unavailable; review trigger journal/configuration.', file=sys.stderr)
+                print('SLL emergency observation unavailable; review trigger journal/configuration.', file=sys.stderr)
                 record.last_error = time.monotonic()
     generation = os.urandom(16).hex()
     store.mark_event_gap()
@@ -82,7 +82,7 @@ def main():
     except Exception:
         # Never print socket/config exceptions: these may contain credentials,
         # phone numbers, or arbitrary provider text. systemd records the exit.
-        print('SLS phone event collection stopped. Check the local AMI connection and private admission-storage permissions. Active delivery outcomes may be unknown.', file=sys.stderr)
+        print('SLL phone event collection stopped. Check the local AMI connection and private admission-storage permissions. Active delivery outcomes may be unknown.', file=sys.stderr)
         return 1
     finally:
         os.close(directory_fd)

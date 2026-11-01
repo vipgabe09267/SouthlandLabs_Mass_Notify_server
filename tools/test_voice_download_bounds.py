@@ -61,6 +61,43 @@ class VoiceDownload(unittest.TestCase):
         self.assertEqual((link.lstat().st_uid,link.lstat().st_gid),(0,0))
         shutil.rmtree(piper/'venv')
 
+    def test_compatibility_repair_rejects_nested_bind_mount_before_mutation(self):
+        result=subprocess.run(['/bin/bash','-c',DIRECTORY_FUNCTION+'\nensure_piper_install_directories'],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        piper=Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper');binary=piper/'venv/bin'
+        binary.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='sls-piper-compat-mount-') as directory:
+            outside=Path(directory);outside.chmod(0o700);sentinel=outside/'piper';sentinel.symlink_to('/usr/local/bin/piper')
+            before=(outside.stat().st_uid,outside.stat().st_gid,outside.stat().st_mode,
+                    sentinel.lstat().st_uid,sentinel.lstat().st_gid,os.readlink(sentinel))
+            subprocess.run(['/usr/bin/mount','--bind',str(outside),str(binary)],check=True,capture_output=True,text=True)
+            try:
+                script='set -euo pipefail\nPIPER_ARTIFACTS_CHANGED=0\n'+COMPATIBILITY_FUNCTION+'\ninstall_piper_compatibility_path\n'
+                result=subprocess.run(['/bin/bash','-c',script],capture_output=True,text=True,timeout=5)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('mount boundary',result.stderr)
+                self.assertEqual((outside.stat().st_uid,outside.stat().st_gid,outside.stat().st_mode,
+                                  sentinel.lstat().st_uid,sentinel.lstat().st_gid,os.readlink(sentinel)),before)
+            finally:
+                subprocess.run(['/usr/bin/umount',str(binary)],check=True,capture_output=True,text=True)
+
+    def test_voice_repair_rejects_bind_mounted_file_before_mutation(self):
+        voices=Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices');voices.mkdir(parents=True,exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='sls-piper-voice-mount-') as directory:
+            source=Path(directory)/'external.onnx';source.write_bytes(b'preserved voice');source.chmod(0o600)
+            target=voices/'mount-fixture.onnx';target.write_bytes(b'placeholder')
+            before=(source.read_bytes(),source.stat().st_uid,source.stat().st_gid,source.stat().st_mode)
+            subprocess.run(['/usr/bin/mount','--bind',str(source),str(target)],check=True,capture_output=True,text=True)
+            try:
+                result=subprocess.run(['/usr/bin/python3','-I','-c',VOICE_REPAIR],
+                    env={**os.environ,'PIPER_VOICE_PERMISSION_ROOT':str(voices)},capture_output=True,text=True,timeout=5)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('mount boundary',result.stderr)
+                self.assertEqual((source.read_bytes(),source.stat().st_uid,source.stat().st_gid,source.stat().st_mode),before)
+            finally:
+                subprocess.run(['/usr/bin/umount',str(target)],check=True,capture_output=True,text=True)
+                target.unlink(missing_ok=True)
+
     def test_existing_voice_validation_is_bounded_and_rejects_aliases(self):
         if os.environ.get('SLS_TEST_NAMESPACE') != 'entered': self.fail('Run through the isolation wrapper')
         voices=Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices')

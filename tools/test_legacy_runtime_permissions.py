@@ -108,6 +108,65 @@ class PermissionRecoveryTests(unittest.TestCase):
         recovery.repair(self.data, self.approval)
         self.assertEqual(path.read_bytes(), body); self.assertEqual(path.stat().st_ino, inode)
 
+    def collector_caches(self):
+        values = {
+            'phone-collector-heartbeat.json': {'schema': 1, 'generation': 'b'*32,
+                'boot_id': 'fixture-boot', 'anchor_tick': 100, 'heartbeat_tick': 101.5},
+            'phone-collector-display.json': {'schema': 1, 'connected': True,
+                'boot_id': 'fixture-boot', 'heartbeat_tick': 101.5, 'updated_at': 1000,
+                'active_batches': 0, 'reserved_contacts': 0},
+        }
+        for name, value in values.items():
+            self.file(name + '.lock', b'SLS_JSON_V1\n')
+            self.file(name, json.dumps(value).encode())
+        return values
+
+    def test_collector_caches_recover_native_chown_without_replacing_bytes_or_mutexes(self):
+        values = self.collector_caches()
+        paths = [self.data / (name + suffix) for name in values for suffix in ('', '.lock')]
+        before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in paths}
+        result = recovery.repair(self.data, self.approval)
+        for path in paths:
+            self.assertIn(path.name, result['repaired_files'])
+            self.assertEqual((path.stat().st_ino, path.read_bytes()), before[path.name])
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+        self.assertEqual(recovery.repair(self.data, self.approval)['repaired_files'], [])
+
+    def test_collector_cache_lost_mutex_or_malformed_content_never_changes_metadata(self):
+        values = self.collector_caches()
+        name = 'phone-collector-heartbeat.json'
+        invalid = [b'{"schema":1}', b'{"schema":1,"generation":"b","boot_id":"fixture-boot","anchor_tick":0,"heartbeat_tick":0}']
+        for raw in invalid:
+            self.file(name, raw); before = self.metadata()
+            with self.assertRaises(recovery.PermissionRecoveryError):
+                recovery.repair(self.data, self.approval)
+            self.assertEqual(self.metadata(), before)
+        self.file(name, json.dumps(values[name]).encode())
+        (self.data / (name + '.lock')).unlink(); before = self.metadata()
+        with self.assertRaises(recovery.PermissionRecoveryError):
+            recovery.repair(self.data, self.approval)
+        self.assertEqual(self.metadata(), before)
+
+    def test_busy_collector_cache_lock_leaves_every_file_unchanged(self):
+        self.collector_caches()
+        path = self.data / 'phone-collector-display.json.lock'
+        with path.open('rb') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            before = self.metadata()
+            with self.assertRaisesRegex(recovery.PermissionRecoveryError, 'lock is active'):
+                recovery.repair(self.data, self.approval, timeout=.03)
+            self.assertEqual(self.metadata(), before)
+
+    def test_interrupted_root_collector_cache_mutex_is_repaired_on_its_original_inode(self):
+        self.collector_caches()
+        path = self.data / 'phone-collector-display.json.lock'
+        path.write_bytes(b'SLS_JSON_'); os.chown(path, 0, 0); path.chmod(0o600)
+        before = path.stat().st_ino, path.read_bytes()
+        recovery.repair(self.data, self.approval)
+        self.assertEqual((path.stat().st_ino, path.read_bytes()), before)
+        self.assertEqual((path.stat().st_uid, path.stat().st_gid, stat.S_IMODE(path.stat().st_mode)),
+                         (self.account.pw_uid, self.account.pw_gid, 0o640))
+
     def test_permanent_history_marker_mode_is_repaired_without_replacement(self):
         marker=self.file(recovery.PHONE_HISTORY_MARKER_NAME,recovery.PHONE_HISTORY_MARKER)
         body=marker.read_bytes();inode=marker.stat().st_ino
@@ -120,6 +179,67 @@ class PermissionRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(recovery.PermissionRecoveryError,'marker is malformed'):
             recovery.repair(self.data,self.approval)
         self.assertEqual(self.metadata(),before)
+
+    def test_weather_history_permissions_are_tightened_only_after_validation(self):
+        lock = self.file('weather-delivery.lock', recovery.WEATHER_HISTORY_MARKER)
+        state = self.file('weather-delivery.json', json.dumps({
+            'schema': 1, 'jobs': {}, 'snapshots': {}
+        }, separators=(',', ':')).encode())
+        before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in (lock, state)}
+        result = recovery.repair(self.data, self.approval)
+        self.assertTrue({'weather-delivery.lock', 'weather-delivery.json'}.issubset(result['repaired_files']))
+        for path in (lock, state):
+            self.assertEqual((path.stat().st_ino, path.read_bytes()), before[path.name])
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+        state.write_bytes(b'{"schema":1,"jobs":[],"snapshots":{}}')
+        state.chmod(0o644); lock.chmod(0o644)
+        snapshot = self.metadata()
+        with self.assertRaisesRegex(recovery.PermissionRecoveryError, 'Weather delivery journal'):
+            recovery.repair(self.data, self.approval)
+        self.assertEqual(self.metadata(), snapshot)
+
+    def test_weather_history_matches_runtime_schema_before_permission_recovery(self):
+        self.file('weather-delivery.lock', recovery.WEATHER_HISTORY_MARKER)
+        identifier = 'd' * 64
+        valid = {
+            'schema': 1,
+            'jobs': {identifier: {
+                'service': 'nws', 'group_id': 'default', 'key': 'event|identifier',
+                'state': 'complete', 'created_at': 100, 'updated_at': 101,
+                'priority': [100, 2],
+            }},
+            'snapshots': {'default': {'zone': 'TXZ192', 'observed_at': 101, 'active': {}}},
+            'dispatch_metrics': {
+                'updated_at': 101, 'max_workers': 2, 'running': 0,
+                'oldest_queued_age_seconds': 0, 'oldest_running_age_seconds': 0,
+                'deadline_misses': 0,
+            },
+        }
+        path = self.file('weather-delivery.json', json.dumps(valid, separators=(',', ':')).encode())
+        body, inode = path.read_bytes(), path.stat().st_ino
+        recovery.repair(self.data, self.approval)
+        self.assertEqual((path.read_bytes(), path.stat().st_ino), (body, inode))
+
+        invalid = json.loads(body)
+        del invalid['jobs'][identifier]['priority']
+        path.write_text(json.dumps(invalid, separators=(',', ':')))
+        path.chmod(0o644)
+        before = self.metadata()
+        with self.assertRaisesRegex(recovery.PermissionRecoveryError, 'delivery record'):
+            recovery.repair(self.data, self.approval)
+        self.assertEqual(self.metadata(), before)
+
+    def test_weather_history_rejects_non_utf8_unicode_without_metadata_changes(self):
+        lock = self.file('weather-delivery.lock', recovery.WEATHER_HISTORY_MARKER)
+        state = self.file('weather-delivery.json',
+            b'{"schema":1,"jobs":{},"snapshots":{"default":{"zone":"\\ud800","observed_at":0,"active":{}}}}')
+        before = {path.name: (path.stat().st_ino, path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                  for path in (lock, state)}
+        with self.assertRaisesRegex(recovery.PermissionRecoveryError, 'invalid structure'):
+            recovery.repair(self.data, self.approval)
+        after = {path.name: (path.stat().st_ino, path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+                 for path in (lock, state)}
+        self.assertEqual(after, before)
 
     def add_configs(self):
         self.file('announcement-activity.lock'); self.file('mass-notifications.config.lock')
@@ -353,6 +473,30 @@ class PermissionRecoveryTests(unittest.TestCase):
         finally: release.join()
         self.assertEqual(path.stat().st_ino, before)
 
+    def test_interrupted_installer_retention_mutex_is_repaired_before_collector_start(self):
+        path=self.file('phone-history-retention.lock',mode=0o600)
+        os.chown(path,0,0);before=path.stat().st_ino
+        ledger=(self.data/'phone-admission.json').read_bytes()
+        result=recovery.repair(self.data,self.approval)
+        info=path.stat()
+        self.assertIn(path.name,result['repaired_files'])
+        self.assertEqual((info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)),
+                         (before,self.account.pw_uid,self.account.pw_gid,0o640))
+        self.assertEqual((self.data/'phone-admission.json').read_bytes(),ledger)
+
+    def test_busy_root_retention_mutex_metadata_is_never_changed(self):
+        path=self.file('phone-history-retention.lock',mode=0o600);os.chown(path,0,0)
+        held=os.open(path,os.O_RDONLY);fcntl.flock(held,fcntl.LOCK_EX)
+        try:
+            before=self.metadata();original=path.stat()
+            with mock.patch.object(recovery.time,'monotonic',side_effect=[0,6]):
+                with self.assertRaisesRegex(recovery.PermissionRecoveryError,'active'):
+                    recovery.repair(self.data,self.approval,timeout=1)
+            self.assertEqual(self.metadata(),before)
+            info=path.stat();self.assertEqual((info.st_ino,info.st_uid,info.st_gid,info.st_mode),
+                (original.st_ino,original.st_uid,original.st_gid,original.st_mode))
+        finally:os.close(held)
+
     def test_active_worker_fails_boundedly_without_touching_modes(self):
         held = os.open(self.data / 'enterprise-worker.lock', os.O_RDONLY); fcntl.flock(held, fcntl.LOCK_EX)
         try:
@@ -489,14 +633,20 @@ class PermissionRecoveryTests(unittest.TestCase):
         if not all(path.is_file() for path in (native, chown, autoload)) or shutil.which('php') is None:
             self.skipTest('Native FreePBX parser/Chown classes are unavailable in this isolated environment')
         original = b'[blacklist]\ndirectory=/srv/other\n[blacklist](+)\ndirectory=/srv/third\n[custom]\nfile=/srv/test,root,root,0600\n'
-        self.config_body(original); self.protect()
+        self.config_body(original)
+        recovery.protect_chown(self.config,self.root/'recovery-chown-snapshot.json',self.approval,scope='recovery')
+        protected_recovery_body=self.config.read_bytes()
+        self.protect()
         script = "require $argv[1]; $c=new \\FreePBX\\LoadConfig(new \\stdClass(),null,dirname($argv[2])); echo json_encode($c->getConfig(basename($argv[2]),dirname($argv[2])));"
         parsed = json.loads(subprocess.check_output(['php', '-r', script, str(native), str(self.config)], text=True))
-        self.assertEqual(parsed['blacklist']['directory'], ['/srv/other', '/srv/third', recovery.DATA])
+        self.assertEqual(parsed['blacklist']['directory'], ['/srv/other', '/srv/third', recovery.RECOVERY_ROOT, recovery.DATA])
         self.assertEqual(parsed['custom']['file'], '/srv/test,root,root,0600')
         recovery.repair(self.data, self.approval)
         before = self.metadata(); unrelated = self.root / 'unrelated'; unrelated.mkdir(mode=0o700)
         item = unrelated / 'file'; item.write_bytes(b'ordinary'); item.chmod(0o600)
+        private=self.root/'module-backups';private.mkdir(mode=0o700)
+        private_file=private/'approved-old-code';private_file.write_bytes(b'private previous code');private_file.chmod(0o600)
+        private_before={p:(p.stat().st_ino,p.stat().st_uid,p.stat().st_gid,stat.S_IMODE(p.stat().st_mode)) for p in (private,private_file)}
         # Invoke only the native normalization methods on this private tree;
         # never bootstrap FreePBX or execute fwconsole against the live PBX.
         operation = r'''
@@ -505,22 +655,57 @@ class PermissionRecoveryTests(unittest.TestCase):
             if (!str_starts_with($root, '/tmp/sls-legacy-permissions-') || $data !== $root.'/data') exit(4);
             $c=new \FreePBX\LoadConfig(new \stdClass(),null,$root);
             $parsed=$c->getConfig('freepbx_chown.conf',$root);
-            $dirs=array_map(fn($path)=>$path===$argv[6]?$data:$path,$parsed['blacklist']['directory']);
+            $map=[$argv[6]=>$data,$argv[8]=>$argv[7]];
+            $dirs=array_map(fn($path)=>$map[$path]??$path,$parsed['blacklist']['directory']);
             $reflection=new \ReflectionClass(\FreePBX\Console\Command\Chown::class);
             $object=$reflection->newInstanceWithoutConstructor();
             $blacklist=$reflection->getProperty('blacklist'); $blacklist->setAccessible(true);
             $blacklist->setValue($object,['files'=>[],'dirs'=>$dirs]);
             $object->output=new \Symfony\Component\Console\Output\NullOutput();
             $method=$reflection->getMethod('systemSetRecursivePermissions'); $method->setAccessible(true);
-            $method->invoke($object,$root,0755,'root','root','rdir');
+            $method->invoke($object,$root,0755,'asterisk','asterisk','rdir');
             $object->chmod(null,$root,0755,0000,true,true);
-            $object->chown(null,$root,'root',true); $object->chgrp(null,$root,'root',true);
+            $object->chown(null,$root,'asterisk',true); $object->chgrp(null,$root,'asterisk',true);
             echo json_encode(['ok'=>true]);
         '''
         self.assertTrue(json.loads(subprocess.check_output(['php', '-r', operation, str(autoload), str(native), str(chown),
-            str(self.root), str(self.data), recovery.DATA], text=True))['ok'])
+            str(self.root), str(self.data), recovery.DATA,str(private),recovery.RECOVERY_ROOT], text=True))['ok'])
         self.assertEqual(self.metadata(), before)
         self.assertEqual(stat.S_IMODE(item.stat().st_mode), 0o644)
+        for path,expected in private_before.items():
+            self.assertEqual((path.stat().st_ino,path.stat().st_uid,path.stat().st_gid,stat.S_IMODE(path.stat().st_mode)),expected)
+        self.assertEqual(private_file.read_bytes(),b'private previous code')
+
+    def test_module_recovery_exclusion_survives_data_rollback_and_removal(self):
+        original=self.config_body(b'; administrator rules\n[blacklist]\ndirectory=/srv/private\n')
+        recovery.protect_chown(self.config,self.root/'anchor-before.json',self.approval,scope='recovery')
+        anchor_body=self.config.read_bytes();self.assertIn(recovery.RECOVERY_ROOT.encode(),anchor_body)
+        self.assertTrue(anchor_body.startswith(original))
+        self.protect();recovery.restore_chown(self.config,self.snapshot)
+        self.assertEqual(self.config.read_bytes(),anchor_body)
+        recovery.protect_chown(self.config,self.root/'data-second.json',self.approval)
+        self.assertTrue(recovery.remove_chown(self.config)['changed'])
+        self.assertEqual(self.config.read_bytes(),anchor_body)
+        result=recovery.protect_chown(self.config,self.root/'anchor-second.json',self.approval,scope='recovery')
+        self.assertFalse(result['changed']);self.assertEqual(self.config.read_bytes(),anchor_body)
+
+    def test_recovery_exclusion_conflicts_preserve_unrelated_administrator_rules(self):
+        for body in (b'[custom]\nrdir='+b'/var/www/html/admin/modules/.sls-mass-notify-recovery'+b',asterisk,asterisk,0775\n',
+                     b'#include other-permissions.conf\n',b'; BEGIN SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n'):
+            with self.subTest(body=body):
+                self.config_body(body);snapshot=self.root/'anchor-rejected.json'
+                with self.assertRaises(recovery.PermissionRecoveryError):
+                    recovery.protect_chown(self.config,snapshot,self.approval,scope='recovery')
+                self.assertEqual(self.config.read_bytes(),body);self.assertFalse(snapshot.exists())
+
+    def test_existing_data_exclusion_can_be_removed_beside_owned_recovery_metadata(self):
+        original=self.config_body(b'; original independent rules\n')
+        self.protect()
+        recovery.protect_chown(self.config,self.root/'anchor-added-after-data.json',self.approval,scope='recovery')
+        self.assertTrue(self.config.read_bytes().endswith(recovery.CHOWN_BLOCK),
+                        'The restored legacy uninstaller requires its ordinary data block to remain last')
+        self.assertTrue(recovery.remove_chown(self.config)['changed'])
+        self.assertEqual(self.config.read_bytes(),original+recovery.RECOVERY_CHOWN_BLOCK)
 
 
 if __name__ == '__main__': unittest.main()

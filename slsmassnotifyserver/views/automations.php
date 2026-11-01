@@ -10,7 +10,7 @@ $revision=substr(hash('sha256',hash_file('sha256',__DIR__.'/automations.js').has
 <section class="sls-location-card"><div class="sls-location-card-body">
 <h2><i class="fa fa-sign-in" aria-hidden="true"></i> Connect a source</h2>
 <ol class="sls-auto-setup"><li><strong>Prepare the notification.</strong> Save an incident template with the message and its phone, desktop, SMS, email, browser or webhook recipients.</li><li><strong>Add a trigger.</strong> Choose the source, assign its location and template, then copy its one-time enrollment secret into the authorized device.</li><li><strong>Review and apply.</strong> Enable the source when its routing is ready. Save and Apply Config, then use a test audience to verify the complete path.</li></ol>
-<p class="help-block">A trigger can use a notification template, saved device/script actions, or both. SLS checks the source signature, age, replay protection and current recipient authorization before delivery.</p>
+<p class="help-block">A trigger can use a notification template, saved device/script actions, or both. SLL checks the source signature, age, replay protection and current recipient authorization before delivery.</p>
 <p><a href="config.php?display=slsmassnotifyserver_incidents">Manage incident templates</a> · <a href="modules/slsmassnotifyserver/docs/TRIGGERS.md" target="_blank" rel="noopener noreferrer">Signed requests and device examples</a></p>
 </div></section>
 <div class="alert alert-info" id="sls-auto-pending" hidden><i class="fa fa-info-circle" aria-hidden="true"></i> Pending settings are shown. Apply Config to activate them.</div>

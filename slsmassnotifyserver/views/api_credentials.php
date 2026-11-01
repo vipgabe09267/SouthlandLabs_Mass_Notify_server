@@ -42,7 +42,7 @@ $credentialLabels = ['extensions' => 'Phones', 'desktop_client_ids' => 'Desktop 
   <div class="sls-credential-secret alert alert-success" hidden>
     <label for="sls-credential-secret-value">One-time secret</label>
     <div class="sls-credential-secret-controls"><input id="sls-credential-secret-value" class="form-control" readonly autocomplete="off" spellcheck="false"><button type="button" class="btn btn-default" data-credential-copy><i class="fa fa-copy" aria-hidden="true"></i> Copy</button><button type="button" class="btn btn-default" data-credential-hide>Hide</button></div>
-    <p class="help-block">Save this secret in the integration's credential store. SLS stores only its hash.</p>
+    <p class="help-block">Save this secret in the integration's credential store. SLL stores only its hash.</p>
   </div>
   <div class="table-responsive" tabindex="0" aria-label="API credentials; scroll horizontally on small screens"><table class="table table-striped"><thead><tr><th>Name</th><th>Permissions</th><th>Audience</th><th>Status</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody data-credential-rows></tbody></table></div>
   <details><summary><i class="fa fa-plus-circle" aria-hidden="true"></i> Create a credential</summary>

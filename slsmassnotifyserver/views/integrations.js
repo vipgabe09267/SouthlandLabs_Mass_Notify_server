@@ -160,8 +160,8 @@
       const fields=node('div',undefined,'sls-integration-fields');card.append(fields);
       field(fields,'Name',radio.name,value=>{radio.name=value;});
       field(fields,'Existing PJSIP extension',radio.extension,value=>{radio.extension=value;},{choices:[{id:'',name:'Select an extension'},...state.extensions.map(id=>({id,name:id}))]});
-      field(fields,'Gateway model / SIP profile',radio.model,value=>{radio.model=value;},{choices:[{id:'',name:'Select a gateway'},...(state.radio_catalog||[{model:'Generic SIP-to-radio gateway'}]).map(entry=>({id:entry.model,name:entry.model}))],required:true,help:'These devices expose SIP audio interfaces. SLS calls the registered PJSIP extension; the gateway must control auto-answer and PTT. Selecting a model does not configure the radio or certify RF operation.'});
-      field(fields,'Radio channel label',radio.channel_label,value=>{radio.channel_label=value;},{placeholder:'Maintenance — channel 2',help:'A descriptive label for the channel already configured on the gateway. SLS does not change radio frequency or talkgroup.'});
+      field(fields,'Gateway model / SIP profile',radio.model,value=>{radio.model=value;},{choices:[{id:'',name:'Select a gateway'},...(state.radio_catalog||[{model:'Generic SIP-to-radio gateway'}]).map(entry=>({id:entry.model,name:entry.model}))],required:true,help:'These devices expose SIP audio interfaces. SLL calls the registered PJSIP extension; the gateway must control auto-answer and PTT. Selecting a model does not configure the radio or certify RF operation.'});
+      field(fields,'Radio channel label',radio.channel_label,value=>{radio.channel_label=value;},{placeholder:'Maintenance — channel 2',help:'A descriptive label for the channel already configured on the gateway. SLL does not change radio frequency or talkgroup.'});
       field(fields,'Maximum complete audio (seconds)',radio.maximum_audio_seconds,value=>{radio.maximum_audio_seconds=Number(value);},{number:true,min:5,max:120});
       toggle(card,'Enabled',radio.enabled,value=>{radio.enabled=value?'1':'0';});
     });
@@ -216,7 +216,7 @@
       if (destination.provider === 'ntfy') field(fields, 'Topic', destination.topic, value => { destination.topic = value; });
       if (destination.provider === 'matrix') {
         field(fields, 'Room ID (!room:server)', destination.topic, value => { destination.topic = value; });
-        card.append(node('p', 'Use a dedicated bot already joined to an unencrypted room. Encrypted Matrix rooms are not supported. SLS sends plain text with a stable transaction ID.', 'help-block'));
+        card.append(node('p', 'Use a dedicated bot already joined to an unencrypted room. Encrypted Matrix rooms are not supported. SLL sends plain text with a stable transaction ID.', 'help-block'));
       }
       tlsEditor(card, destination.tls, value => { destination.tls = value; });
       toggle(card, 'Enabled', destination.enabled, value => { destination.enabled = value ? '1' : '0'; });
@@ -271,7 +271,7 @@
       if (entry.join_url) { const link = node('a', ' Open coordination meeting'); link.href = entry.join_url; link.target = '_blank'; link.rel = 'noopener noreferrer'; item.append(link); }
       if (entry.state === 'uncertain') {
         const details = node('details'); details.append(node('summary', 'Record reviewed provider evidence'));
-        details.append(node('p', 'Wait at least five minutes, verify the provider or device outside SLS, then record the evidence. This closes local review and never repeats the original request.', 'help-block'));
+    details.append(node('p', 'Wait at least five minutes, verify the provider or device outside SLL, then record the evidence. This closes local review and never repeats the original request.', 'help-block'));
         const form = node('form'), outcomeLabel = node('label', 'Reviewed outcome'), outcome = node('select'), referenceLabel = node('label', 'Evidence reference'), reference = node('input'), submit = node('button', 'Close reviewed uncertainty', 'btn btn-default btn-sm');
         outcome.id = `sls-integration-resolution-${entry.request_id}`; outcomeLabel.htmlFor = outcome.id;
         reference.id = `sls-integration-evidence-${entry.request_id}`; referenceLabel.htmlFor = reference.id;
@@ -360,6 +360,10 @@
         button.disabled = state.config.enabled !== '1' || state.config.access_control.enabled !== '1';
         const key = entry.id + ':' + operation; if (!doorIds.has(key)) doorIds.set(key, requestId());
         button.addEventListener('click', async () => {
+          if (operation !== 'read') {
+            const duration = operation === 'access' ? ` for up to ${entry.maximum_access_seconds ?? 10} seconds` : '';
+            if (!window.confirm(`Send the ${operation} command to “${entry.name || 'this door'}”${duration}? Confirm the door and surrounding area are safe before continuing.`)) return;
+          }
           button.disabled = true;
           try { const result = await post('integrations_door', { request_id: doorIds.get(key), door_id: entry.id, operation }); feedback((result.detail ?? result.state) + (result.observed ? ' ' + Object.entries(result.observed).map(([key, value]) => `${key}: ${value}`).join(', ') : '')); }
           catch (error) { feedback(error.message, true); }

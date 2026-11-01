@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Bound local SLS mail submission; never inspect or modify queued messages."""
+"""Bound local SLL mail submission; never inspect or modify queued messages."""
 from __future__ import annotations
 import argparse
 import fcntl
@@ -30,10 +30,10 @@ LIMITS = {
     86400: {'total': (5000, 25000), 'system': (20, 1000), 'account': (500, 500)},
 }
 MESSAGES = {
-    'mail_queue_full': 'PBX mail backlog reached the SLS safety limit. No new email was submitted. Review Postfix connectivity and its queue before retrying explicitly.',
+    'mail_queue_full': 'PBX mail backlog reached the SLL safety limit. No new email was submitted. Review Postfix connectivity and its queue before retrying explicitly.',
     'mail_queue_unavailable': 'The local Postfix queue could not be checked. No email was submitted. Check the Postfix service and postqueue permissions.',
-    'mail_rate_limited': 'The SLS mail submission safety limit was reached. No email was submitted. Review recurring faults or excessive requests before retrying explicitly.',
-    'mail_admission_unavailable': 'Protected SLS mail admission state is unavailable, busy or damaged. No email was submitted. Preserve its journal and run protected repair.',
+    'mail_rate_limited': 'The SLL mail submission safety limit was reached. No email was submitted. Review recurring faults or excessive requests before retrying explicitly.',
+    'mail_admission_unavailable': 'Protected SLL mail admission state is unavailable, busy or damaged. No email was submitted. Preserve its journal and run protected repair.',
 }
 
 

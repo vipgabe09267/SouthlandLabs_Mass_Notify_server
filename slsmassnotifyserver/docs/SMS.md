@@ -26,16 +26,16 @@ retains drafts in the form; saving blank secret fields preserves saved credentia
   account auth token for verifying callbacks.
 - Telnyx needs an API key, messaging profile ID, and account Ed25519 webhook public
   key. Configure a short outgoing queue lifetime in the provider profile.
-- BulkVS needs its API username and password. SLS submits one recipient per
+- BulkVS needs its API username and password. SLL submits one recipient per
   HTTPS request using Basic authentication and BulkVS's documented
   `POST /api/v1.0/messageSend` schema. Sender and recipient use country-code digits
   without `+` on that provider's wire format; saved configuration remains `+` format.
 The response must match the exact sender and recipient and contain a valid RefId.
 
 **BulkVS currently reports API acceptance only.** Its published API specification
-does not define authenticated delivery or inbound opt-out callbacks. SLS does not
+does not define authenticated delivery or inbound opt-out callbacks. SLL does not
 accept unsigned callbacks or invent signature rules. Manage opt-outs in BulkVS,
-disable affected SLS recipients before another send, and verify the provider account
+disable affected SLL recipients before another send, and verify the provider account
 before live use. Automatic delivery updates and inbound STOP handling for BulkVS
 remain unsupported pending a verified callback contract. Its outbound adapter has
 isolated tests; live provider/carrier acceptance remains pending. See the
@@ -45,7 +45,7 @@ isolated tests; live provider/carrier acceptance remains pending. See the
 The UI shows the canonical callback URL derived from the saved advertised HTTPS
 Control API address. Forwarded HTTPS ports are supported through that existing
 setting; distribution defaults do not contain an installation-specific port.
-For Twilio and Telnyx, configure inbound messaging webhooks at that address for STOP handling. SLS adds
+For Twilio and Telnyx, configure inbound messaging webhooks at that address for STOP handling. SLL adds
 an individual delivery callback URL to each outbound request. Callback validation
 uses the saved address, not untrusted proxy or Host headers. Confirm the provider
 can reach the configured port and presents valid callbacks before relying on it.
@@ -61,7 +61,7 @@ Set a budgeted cost per segment, account currency, daily/monthly cost limits and
 segment limits before enabling. Defaults allow 3 segments per message, 100 per
 UTC day and 1,000 per UTC month; cost limits default to 10 and 100 currency units.
 Cost per segment starts unset. Use a value accounting for applicable provider and
-carrier charges, and also set limits in the provider account. SLS reserves the
+carrier charges, and also set limits in the provider account. SLL reserves the
 configured amount; it does not determine or reconcile the provider's final bill.
 
 ## Select and preview
@@ -76,7 +76,7 @@ A Twilio `21610` rejection also records an opt-out, even when the original STOP
 webhook never reached the PBX. The result and block are committed together;
 duplicate callbacks cannot overwrite a later consent timestamp. The recipient
 must opt in at the provider and an administrator must record renewed consent in
-SLS before another alert is eligible. See [Twilio's opt-out error](https://www.twilio.com/docs/api/errors/21610).
+SLL before another alert is eligible. See [Twilio's opt-out error](https://www.twilio.com/docs/api/errors/21610).
 
 The dashboard, saved announcement groups, schedules and incident templates can
 select saved SMS recipient IDs. SMS-only announcements use Audio: None. **Preview
@@ -127,7 +127,11 @@ blocks sending; do not remove it to clear an error. Delivery claims are retained
 for 90 days. Accepted inbound opt-out callback identities remain so an old signed
 STOP replay cannot renew suppression after new consent. Both inventories are
 capped at 100,000; reaching a bound requires reviewed ledger maintenance rather
-than silently forgetting replay protection. Opt-out tombstones and cost
+than silently forgetting replay protection. A full opt-out replay inventory blocks
+new provider submissions until that maintenance is complete; previously accepted
+claims and callback receipts remain available. SLL also checks current local
+opt-out state after MMS preparation and immediately before a new provider request.
+This does not replace the provider's own opt-out controls. Opt-out tombstones and cost
 reservations remain. No SMS sends occur during maintenance or restore.
 
 Native FreePBX backups include a portable SMS data snapshot when a ledger exists.
@@ -162,7 +166,7 @@ provenance ship under `api/sls-mass-notify/sms/vendor/twilio` and appear in the 
 
 Twilio, Telnyx and BulkVS support **MMS · alert image and text** in General
 Settings → Delivery providers → SMS and MMS alerts. SMS remains the default.
-Enabling MMS at the provider does not switch the SLS format automatically. Set a
+Enabling MMS at the provider does not switch the SLL format automatically. Set a
 budgeted MMS price in the account currency, including provider and carrier fees.
 Amounts show two decimal places for whole values and retain sub-cent precision.
 MMS is not necessarily cheaper: compare one MMS price against the SMS segment
@@ -191,7 +195,7 @@ Existing `sms_recipient_ids` and channel `sms` remain compatible; receipt rows a
 unchanged. Signed Twilio/Telnyx receipts and opt-outs work for both formats.
 BulkVS acceptance remains unconfirmed handset delivery; its inbound STOP/receipt
 webhook is still unsupported and opt-outs must be managed at the provider and in
-SLS recipients. No paid/provider delivery is claimed by fixture tests.
+SLL recipients. No paid/provider delivery is claimed by fixture tests.
 
 MMS ledger evidence is included in continuity V2 backups. Current code also reads
 legacy V1; SMS-only snapshots remain V1. Older candidates cannot restore V2 MMS

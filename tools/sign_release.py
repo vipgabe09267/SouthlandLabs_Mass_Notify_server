@@ -9,10 +9,12 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('release_verifier', ROOT / 'slsmassnotifyserver/bin/sls_mass_notify/sls_release_verify.py')
 if spec is None or spec.loader is None:
     raise RuntimeError('Release verifier could not be loaded.')

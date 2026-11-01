@@ -252,7 +252,7 @@ import stat
 import sys
 import tempfile
 prefix = sys.argv[1]
-if not re.fullmatch(r'sls-uninstall-(?:signer|decoder|transaction)', prefix):
+if not re.fullmatch(r'sls-uninstall-(?:signer|decoder|transaction|stock-review)', prefix):
     raise SystemExit('Invalid uninstall recovery workspace.')
 parent = Path('/var/lib/sls-mass-notify-uninstaller')
 account = pwd.getpwnam('asterisk')
@@ -515,7 +515,7 @@ release_uninstall_workers() {
 assert_uninstall_workers() {
   [ "$UNINSTALL_GUARD_REQUIRED" != 1 ] || {
     [ -n "$UNINSTALL_WORKER_PID" ] && kill -0 "$UNINSTALL_WORKER_PID" 2>/dev/null || {
-      log 'The protected uninstall worker guard exited. Teardown stopped; preserve the signed recovery evidence and retry when SLS workers are idle.'
+      log 'The protected uninstall worker guard exited. Teardown stopped; preserve the signed recovery evidence and retry when SLL workers are idle.'
       return 1
     }
   }
@@ -541,7 +541,7 @@ acquire_uninstall_workers() {
       || ! exec {UNINSTALL_WORKER_PIPE}>&"$guard_input" \
       || ! IFS= read -r -t 125 status <&"$guard_output" || [ "$status" != ready ]; then
       release_uninstall_workers
-      log 'Unable to drain SLS workers safely. Wait for announcements/pages to finish, stop external SLS supervisors and review the named unsafe lock before retrying. No teardown was started.'
+      log 'Unable to drain SLL workers safely. Wait for announcements/pages to finish, stop external SLL supervisors and review the named unsafe lock before retrying. No teardown was started.'
       return 1
     fi
     assert_uninstall_workers || return 1
@@ -550,14 +550,14 @@ acquire_uninstall_workers() {
     # removed module/registry and public runtime before allowing this state.
     inspect_module_registry || return 1
     [ "$MODULE_REGISTRY_PRESENT" != 1 ] || {
-      log 'SLS data is missing while its module registry entry remains. Preserve the signed evidence and review this incomplete teardown; no removal was started.'
+      log 'SLL data is missing while its module registry entry remains. Preserve the signed evidence and review this incomplete teardown; no removal was started.'
       return 1
     }
     local entry
     for entry in /var/www/html/admin/modules/slsmassnotifyserver /usr/local/bin/sls_mass_notify \
       /var/www/html/api/sipnotify /var/www/html/api/sls-mass-notify /var/www/html/mass-notify; do
       if [ -e "$entry" ] || [ -L "$entry" ]; then
-        log 'SLS data is missing while delivery entry points remain. Preserve the signed evidence and review this incomplete teardown; no removal was started.'
+        log 'SLL data is missing while delivery entry points remain. Preserve the signed evidence and review this incomplete teardown; no removal was started.'
         return 1
       fi
     done
@@ -585,7 +585,7 @@ try:
                     executable = os.readlink('/proc/' + name + '/exe')
                 except (FileNotFoundError, ProcessLookupError): continue
                 if Path(executable.removesuffix(' (deleted)')).name == 'asterisk':
-                    raise idle.IdleError('Asterisk is running but its channel inventory is unavailable. Restore local control-socket access before removing SLS.')
+                    raise idle.IdleError('Asterisk is running but its channel inventory is unavailable. Restore local control-socket access before removing SLL.')
         finally: os.close(proc)
         check.channels = lambda: ''
     check.no_processes(); check.no_pending(); check.no_playback()
@@ -597,7 +597,7 @@ try:
     options = {'allow_pending_voicemail': True} if 'allow_pending_voicemail' in parameters else {}
     check.phone_history(False, False, **options)
 except (idle.IdleError, OSError, ValueError, TypeError) as error:
-    raise SystemExit('SLS uninstall safety check: ' + str(error) + '. No teardown was started; allow delivery to finish and preserve unknown state for review.')
+    raise SystemExit('SLL uninstall safety check: ' + str(error) + '. No teardown was started; allow delivery to finish and preserve unknown state for review.')
 PYUNINSTALLIDLE
 )
 
@@ -674,7 +674,7 @@ exit(0);
     log "Unable to remove the $MODULE registry row. Module files were not deleted."
     return 1
   fi
-  rm -rf "/var/www/html/admin/modules/$MODULE"
+  remove_managed_path "/var/www/html/admin/modules/$MODULE"
 }
 
 capture_signing_fingerprint() {
@@ -696,11 +696,11 @@ capture_pbx_running_state() {
 
 reload_removed_pbx_integration() {
   if [ "$PBX_RUNNING" != 1 ]; then
-    log "SLS removal was verified. Asterisk is stopped or its control socket is unavailable; run fwconsole reload after PBX service is available. No PBX service was started."
+    log "SLL removal was verified. Asterisk is stopped or its control socket is unavailable; run fwconsole reload after PBX service is available. No PBX service was started."
     return 0
   fi
   if ! run_fwconsole reload >>"$MODULE_UNINSTALL_LOG" 2>&1; then
-    log "SLS removal was verified, but the PBX integration reload failed. Review $MODULE_UNINSTALL_LOG_PATH, resolve the PBX reload error, and run fwconsole reload."
+    log "SLL removal was verified, but the PBX integration reload failed. Review $MODULE_UNINSTALL_LOG_PATH, resolve the PBX reload error, and run fwconsole reload."
   fi
 }
 
@@ -819,7 +819,7 @@ if (!is_string($body) || !is_array($after) || strlen($body) !== $metadata['size'
 $settings = \FreePBX\modules\SlsConfigCrypto::decode($body);
 $username = (string)($settings['ami']['username'] ?? '');
 if ($username !== '' && !preg_match('/^[A-Za-z0-9_.-]{1,80}$/D', $username)) {
-    fwrite(STDERR, "The configured SLS AMI username is invalid; no manager account was removed.\n"); exit(1);
+    fwrite(STDERR, "The configured SLL AMI username is invalid; no manager account was removed.\n"); exit(1);
 }
 echo $username, "\t", hash('sha256', (string)($settings['ami']['password'] ?? ''));
 PHPAMI
@@ -834,7 +834,7 @@ from pathlib import Path
 import os, pwd, stat, sys
 path = Path(sys.argv[1]); account = pwd.getpwnam('asterisk')
 if not path.is_absolute() or '..' in path.parts:
-    raise SystemExit('Invalid retained SLS data path')
+    raise SystemExit('Invalid retained SLL data path')
 flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 fd = os.open('/', flags)
 try:
@@ -844,7 +844,7 @@ try:
         os.close(fd); fd = child
         info = os.fstat(fd)
         if info.st_uid not in (0, account.pw_uid) or info.st_gid not in (0, account.pw_gid) or info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
-            raise SystemExit('Retained SLS data has an unsafe owner or writable parent; no data was deleted')
+            raise SystemExit('Retained SLL data has an unsafe owner or writable parent; no data was deleted')
 finally: os.close(fd)
 PYRETAIN
 }
@@ -1163,7 +1163,7 @@ try:
         expected = '../conf-available/sls-mass-notify.conf'
         if (not stat.S_ISLNK(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
                 or os.readlink(parts[-1], dir_fd=parent) != expected):
-            raise RuntimeError('Apache enablement path is not the managed SLS link')
+            raise RuntimeError('Apache enablement path is not the managed SLL link')
     else:
         descriptor = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC,
                              dir_fd=parent)
@@ -1193,7 +1193,7 @@ try:
                         expected = ast.literal_eval(node.value).encode()
                         break
             if expected is None or body != expected:
-                raise RuntimeError('Apache configuration differs from the authenticated SLS template')
+                raise RuntimeError('Apache configuration differs from the authenticated SLL template')
         else:
             match = __import__('re').fullmatch(
                 rb'/var/log/sls_mass_notify\.log \{\n'
@@ -1209,7 +1209,7 @@ try:
                 rb'    su root asterisk\n'
                 rb'\}\n', body)
             if match is None or not 1 <= int(match.group(1)) <= 365:
-                raise RuntimeError('Logrotate configuration differs from an SLS-managed template')
+                raise RuntimeError('Logrotate configuration differs from an SLL-managed template')
     current = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
     if (before.st_dev, before.st_ino, before.st_ctime_ns) != (current.st_dev, current.st_ino, current.st_ctime_ns):
         raise RuntimeError('managed root file changed before removal')
@@ -1263,7 +1263,7 @@ require_once (string)getenv('SLS_AMI_OWNERSHIP_HELPER');
     (string)getenv('SLS_AMI_SECRET_HASH'), (string)\FreePBX::Config()->get('AMPMGRUSER'));
 exit(0);
 PHP
-  rm -f /etc/asterisk/slsmassnotify
+  remove_managed_path /etc/asterisk/slsmassnotify
 }
 
 remove_bundled_system_recordings() {
@@ -1273,10 +1273,10 @@ $bootstrap_settings = ['freepbx_auth' => false, 'skip_astman' => true];
 require '/etc/freepbx.conf';
 $dataDir = rtrim((string)getenv('SLS_DATA_DIR'), '/');
 $recordings = [
-    ['custom/SLS_Mass_Notify_Paging_Tone_Opening', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Opening.wav', $dataDir . '/sounds/tones/opening_Paging_Tone_Opening.wav', 'SLS Mass Notify - Paging Tone Opening', 'Default Southland Servers regular announcement opening tone.'],
-    ['custom/SLS_Mass_Notify_Paging_Tone_Closing', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Closing.wav', $dataDir . '/sounds/tones/closing_Paging_Tone_Closing.wav', 'SLS Mass Notify - Paging Tone Closing', 'Default Southland Servers regular announcement closing tone.'],
-    ['custom/SLS_Mass_Notify_NWS_Alert', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_NWS_Alert.wav', $dataDir . '/sounds/tones/opening_NWS_alert.wav', 'SLS Mass Notify - NWS Alert', 'Default Southland Servers NWS alert opening tone.'],
-    ['custom/SLS_Mass_Notify_Lightning_Alert', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Lightning_Alert.wav', $dataDir . '/sounds/tones/opening_Lightning_alert.wav', 'SLS Mass Notify - Lightning Alert', 'Default Southland Servers cloud-to-ground lightning warning opening tone.'],
+    ['custom/SLS_Mass_Notify_Paging_Tone_Opening', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Opening.wav', $dataDir . '/sounds/tones/opening_Paging_Tone_Opening.wav', 'SLL Mass Notify Server - Paging Tone Opening', 'Default Southland Labs regular announcement opening tone.'],
+    ['custom/SLS_Mass_Notify_Paging_Tone_Closing', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Closing.wav', $dataDir . '/sounds/tones/closing_Paging_Tone_Closing.wav', 'SLL Mass Notify Server - Paging Tone Closing', 'Default Southland Labs regular announcement closing tone.'],
+    ['custom/SLS_Mass_Notify_NWS_Alert', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_NWS_Alert.wav', $dataDir . '/sounds/tones/opening_NWS_alert.wav', 'SLL Mass Notify Server - NWS Alert', 'Default Southland Labs NWS alert opening tone.'],
+    ['custom/SLS_Mass_Notify_Lightning_Alert', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Lightning_Alert.wav', $dataDir . '/sounds/tones/opening_Lightning_alert.wav', 'SLL Mass Notify Server - Lightning Alert', 'Default Southland Labs cloud-to-ground lightning warning opening tone.'],
 ];
 $database = \FreePBX::Database();
 $tables = $database->query("SHOW TABLES LIKE 'recordings'");
@@ -1290,9 +1290,11 @@ foreach ($recordings as [$filename, $path, $tone, $name, $description]) {
     $fileOwned = is_string($toneHash) && $toneHash !== '' && is_string($fileHash) && hash_equals($toneHash, $fileHash);
     $lookup->execute([$filename]);
     $row = $lookup->fetch(PDO::FETCH_ASSOC);
-    $rowOwned = is_array($row)
-        && hash_equals($name, (string)($row['displayname'] ?? ''))
-        && hash_equals($description, (string)($row['description'] ?? ''));
+    $rowOwned = is_array($row) && (
+        (hash_equals($name, (string)($row['displayname'] ?? ''))
+            && hash_equals($description, (string)($row['description'] ?? '')))
+        || (hash_equals(str_replace('SLL Mass Notify Server - ', 'SLS Mass Notify - ', $name), (string)($row['displayname'] ?? ''))
+            && hash_equals(str_replace('Default Southland Labs ', 'Default Southland Servers ', $description), (string)($row['description'] ?? ''))));
     if ($rowOwned && (!$fileExists || $fileOwned)) {
         $delete->execute([$filename]);
     }
@@ -1483,7 +1485,7 @@ try:
             os.unlink('piper', dir_fd=parent)
             os.fsync(parent)
         else:
-            print('Leaving non-SLS Piper symbolic link unchanged.', file=sys.stderr)
+            print('Leaving unrelated Piper symbolic link unchanged.', file=sys.stderr)
         raise SystemExit(0)
     match = re.search(rb"expected=\"\$\(cat <<'EOF'\n(.*?)\nEOF\n\)\"", protected_read(approved_installer, 2 * 1024 * 1024), re.S)
     if match is None:
@@ -1495,7 +1497,7 @@ try:
         if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0 or opened.st_gid != 0
                 or opened.st_nlink != 1 or stat.S_IMODE(opened.st_mode) != 0o755
                 or opened.st_size > 16384):
-            print('Leaving non-SLS Piper wrapper unchanged.', file=sys.stderr)
+            print('Leaving unrelated Piper wrapper unchanged.', file=sys.stderr)
             raise SystemExit(0)
         fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
         body = os.read(descriptor, 16385)
@@ -1519,22 +1521,7 @@ PYPIPERREMOVE
 }
 
 remove_managed_sound_link() {
-  local link_path="$1"
-  local expected_target="$DATA_DIR/sounds"
-  local actual_target=""
-
-  if [ -L "$link_path" ]; then
-    actual_target="$(readlink -- "$link_path" 2>/dev/null || true)"
-    if [ "$actual_target" = "$expected_target" ]; then
-      rm -f -- "$link_path"
-    else
-      log "Leaving non-module sound link unchanged: $link_path"
-    fi
-  elif [ -e "$link_path" ]; then
-    # A managed install creates a symbolic link here. Never recursively delete
-    # a real directory or file that may contain user-owned recordings.
-    log "Leaving non-link sound path unchanged: $link_path"
-  fi
+  remove_managed_path "$1"
 }
 
 verify_managed_sound_link_removed() {
@@ -1545,34 +1532,297 @@ verify_managed_sound_link_removed() {
   fi
 }
 
+remove_managed_path() {
+  /usr/bin/python3 -I - "$1" "$DATA_DIR" "${2:-remove}" <<'PYMANAGEDREMOVE'
+import errno
+import os
+from pathlib import Path
+import pwd
+import stat
+import sys
+
+path = Path(sys.argv[1])
+data = Path(sys.argv[2])
+action = sys.argv[3]
+account = pwd.getpwnam('asterisk')
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+kinds = {
+    '/usr/local/bin/sls_mass_notify': 'tree',
+    '/usr/local/bin/slsconsole': 'entry',
+    '/usr/local/bin/nwsalerts_ensure_menu_patch.sh': 'entry',
+    '/usr/local/sbin/sign_sls_mass_notify_local_sig.sh': 'entry',
+    '/etc/freepbx.secure/slsmassnotifyserver.sig': 'entry',
+    '/etc/asterisk/slsmassnotify': 'entry',
+    '/var/lib/asterisk/bin/sls_mass_notify': 'entry',
+    '/var/lib/asterisk/bin/sls_mass_notify_test.sh': 'entry',
+    '/var/www/html/admin/modules/slsmassnotifyserver': 'tree',
+    '/var/www/html/admin/modules/dashboard/sections/SlsMassNotifyAnnouncement.class.php': 'entry',
+    '/var/www/html/admin/modules/dashboard/views/sections/sls-mass-notify-announcement.php': 'entry',
+    '/var/www/html/api/sls-mass-notify': 'tree',
+    '/var/www/html/api/sipnotify': 'tree',
+    '/var/www/html/mass-notify': 'tree',
+    '/var/www/html/sls_mass_notify': 'tree',
+    '/var/lib/asterisk/sounds/SLS_Mass_Notifications_Plugin': 'sound-link',
+    '/var/lib/asterisk/sounds/en/SLS_Mass_Notifications_Plugin': 'sound-link',
+    '/var/log/sls_mass_notify.log': 'entry',
+    '/var/log/sls_mass_notify_events.jsonl': 'entry',
+    '/var/log/sls_mass_notify_push.log': 'entry',
+    '/var/tmp/nws_last_clear.ts': 'entry',
+    str(data): 'tree',
+    str(data / 'piper/venv/bin/piper'): 'entry',
+    str(data / 'piper/venv/bin'): 'empty-directory',
+    str(data / 'piper/venv'): 'empty-directory',
+}
+if (not path.is_absolute() or str(path) != sys.argv[1] or '..' in path.parts
+        or str(data) != sys.argv[2] or data != Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin')
+        or str(path) not in kinds
+        or action not in ('check', 'remove')):
+    raise SystemExit('Refusing an unsupported managed removal path.')
+kind = kinds[str(path)]
+protected = (str(path).startswith(('/usr/', '/etc/', '/var/log/'))
+             and not str(path).startswith('/etc/asterisk/'))
+
+def identity(info):
+    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+            info.st_uid, info.st_gid, info.st_nlink)
+
+def stable_identity(info):
+    return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+            info.st_uid, info.st_gid)
+
+def mount_id(descriptor):
+    try:
+        with open('/proc/self/fdinfo/' + str(descriptor), encoding='ascii') as details:
+            for line in details:
+                if line.startswith('mnt_id:'):
+                    value = line.split(':', 1)[1].strip()
+                    if value.isdigit(): return int(value)
+    except OSError as error:
+        raise RuntimeError('Managed removal mount boundary could not be verified.') from error
+    raise RuntimeError('Managed removal mount boundary could not be verified.')
+
+def parent():
+    descriptor = os.open('/', flags)
+    try:
+        for component in path.parts[1:-1]:
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            info = os.fstat(descriptor)
+            sticky_root = info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+            owners = (0,) if protected else (0, account.pw_uid)
+            if (info.st_uid not in owners or info.st_gid not in (0, account.pw_gid)
+                    or info.st_mode & (0o022 if protected else 0o002) and not sticky_root):
+                raise RuntimeError('Managed removal ancestor has unsafe ownership or permissions.')
+        result, descriptor = descriptor, -1
+        return result
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+visited = 0
+
+def validate_file(descriptor, name, before, tree_mount):
+    child = os.open(name, file_flags, dir_fd=descriptor)
+    try:
+        if identity(before) != identity(os.fstat(child)):
+            raise RuntimeError('Managed removal file changed during inspection.')
+        if mount_id(child) != tree_mount:
+            raise RuntimeError('Managed removal tree crosses a mount boundary.')
+    finally:
+        os.close(child)
+
+def validate_tree(descriptor, tree_mount, depth=0):
+    global visited
+    if depth > 128:
+        raise RuntimeError('Managed removal tree exceeds its depth bound.')
+    with os.scandir(descriptor) as entries:
+        for entry in entries:
+            visited += 1
+            if visited > 100000:
+                raise RuntimeError('Managed removal tree exceeds its entry bound.')
+            before = entry.stat(follow_symlinks=False)
+            if (before.st_uid not in (0, account.pw_uid)
+                    or not (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                            or stat.S_ISREG(before.st_mode) and before.st_nlink == 1)):
+                raise RuntimeError('Managed removal tree contains an unsafe entry.')
+            if stat.S_ISDIR(before.st_mode):
+                child = os.open(entry.name, flags, dir_fd=descriptor)
+                try:
+                    if identity(before) != identity(os.fstat(child)):
+                        raise RuntimeError('Managed removal directory changed during inspection.')
+                    if mount_id(child) != tree_mount:
+                        raise RuntimeError('Managed removal tree crosses a mount boundary.')
+                    validate_tree(child, tree_mount, depth + 1)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(before.st_mode):
+                validate_file(descriptor, entry.name, before, tree_mount)
+
+def remove_tree(descriptor, tree_mount, depth=0):
+    if depth > 128:
+        raise RuntimeError('Managed removal tree exceeds its depth bound.')
+    names = os.listdir(descriptor)
+    if len(names) > 100000:
+        raise RuntimeError('Managed removal tree exceeds its entry bound.')
+    for name in names:
+        before = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if (before.st_uid not in (0, account.pw_uid)
+                or not (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                        or stat.S_ISREG(before.st_mode) and before.st_nlink == 1)):
+            raise RuntimeError('Managed removal tree contains an unsafe entry.')
+        if stat.S_ISDIR(before.st_mode):
+            child = os.open(name, flags, dir_fd=descriptor)
+            try:
+                if identity(before) != identity(os.fstat(child)):
+                    raise RuntimeError('Managed removal directory changed before deletion.')
+                if mount_id(child) != tree_mount:
+                    raise RuntimeError('Managed removal tree crosses a mount boundary.')
+                remove_tree(child, tree_mount, depth + 1)
+            finally:
+                os.close(child)
+            current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stable_identity(before) != stable_identity(current):
+                raise RuntimeError('Managed removal directory changed before deletion.')
+            os.rmdir(name, dir_fd=descriptor)
+        else:
+            if stat.S_ISREG(before.st_mode):
+                validate_file(descriptor, name, before, tree_mount)
+            current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if identity(before) != identity(current):
+                raise RuntimeError('Managed removal entry changed before deletion.')
+            os.unlink(name, dir_fd=descriptor)
+
+try:
+    anchor = parent()
+except FileNotFoundError:
+    raise SystemExit(0)
+opened = -1
+try:
+    try:
+        before = os.stat(path.name, dir_fd=anchor, follow_symlinks=False)
+    except FileNotFoundError:
+        raise SystemExit(0)
+    if (before.st_uid not in (0, account.pw_uid)
+            or not (stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                    or stat.S_ISREG(before.st_mode) and before.st_nlink == 1)):
+        raise RuntimeError('Managed removal destination has unsafe type or ownership.')
+    if kind == 'sound-link':
+        if not stat.S_ISLNK(before.st_mode) or os.readlink(path.name, dir_fd=anchor) != str(data / 'sounds'):
+            print('Leaving a non-module sound path unchanged: ' + str(path))
+            raise SystemExit(0)
+    elif kind == 'entry' and stat.S_ISDIR(before.st_mode):
+        raise RuntimeError('Managed single-file removal destination is a directory.')
+    anchor_mount = mount_id(anchor)
+    if stat.S_ISDIR(before.st_mode):
+        opened = os.open(path.name, flags, dir_fd=anchor)
+        if identity(before) != identity(os.fstat(opened)):
+            raise RuntimeError('Managed removal root changed during inspection.')
+        if mount_id(opened) != anchor_mount:
+            raise RuntimeError('Managed removal root crosses a mount boundary.')
+        if kind == 'tree': validate_tree(opened, anchor_mount)
+    elif stat.S_ISREG(before.st_mode):
+        validate_file(anchor, path.name, before, anchor_mount)
+    current_anchor = parent()
+    try:
+        if identity(os.fstat(anchor)) != identity(os.fstat(current_anchor)):
+            raise RuntimeError('Managed removal parent changed before removal.')
+    finally:
+        os.close(current_anchor)
+    current = os.stat(path.name, dir_fd=anchor, follow_symlinks=False)
+    if identity(before) != identity(current):
+        raise RuntimeError('Managed removal destination changed before removal.')
+    if action == 'check':
+        raise SystemExit(0)
+    if stat.S_ISDIR(current.st_mode):
+        if kind == 'empty-directory':
+            if opened < 0 or identity(before) != identity(os.fstat(opened)) or mount_id(opened) != anchor_mount:
+                raise RuntimeError('Managed empty directory changed before removal.')
+            try:
+                os.rmdir(path.name, dir_fd=anchor)
+            except OSError as error:
+                if error.errno not in (errno.ENOTEMPTY, errno.EEXIST):
+                    raise
+        elif kind == 'tree':
+            if opened < 0 or identity(before) != identity(os.fstat(opened)) or mount_id(opened) != anchor_mount:
+                raise RuntimeError('Managed removal root changed before deletion.')
+            validate_tree(opened, anchor_mount)
+            remove_tree(opened, anchor_mount)
+            current = os.stat(path.name, dir_fd=anchor, follow_symlinks=False)
+            if stable_identity(before) != stable_identity(current):
+                raise RuntimeError('Managed removal root changed before deletion.')
+            os.rmdir(path.name, dir_fd=anchor)
+        else:
+            raise RuntimeError('Unsupported managed directory removal.')
+    else:
+        if kind == 'empty-directory':
+            raise RuntimeError('Managed empty-directory destination has changed type.')
+        os.unlink(path.name, dir_fd=anchor)
+    os.fsync(anchor)
+finally:
+    if opened >= 0: os.close(opened)
+    os.close(anchor)
+PYMANAGEDREMOVE
+}
+
+preflight_managed_removals() {
+  local path
+  local -a paths=(
+    "/var/www/html/admin/modules/$MODULE"
+    /etc/asterisk/slsmassnotify
+    /var/www/html/admin/modules/dashboard/sections/SlsMassNotifyAnnouncement.class.php
+    /var/www/html/admin/modules/dashboard/views/sections/sls-mass-notify-announcement.php
+    /usr/local/bin/sls_mass_notify /usr/local/bin/slsconsole
+    /usr/local/bin/nwsalerts_ensure_menu_patch.sh
+    /usr/local/sbin/sign_sls_mass_notify_local_sig.sh
+    /etc/freepbx.secure/slsmassnotifyserver.sig
+    /var/lib/asterisk/bin/sls_mass_notify /var/lib/asterisk/bin/sls_mass_notify_test.sh
+    /var/www/html/api/sls-mass-notify /var/www/html/api/sipnotify
+    /var/www/html/mass-notify /var/www/html/sls_mass_notify
+    /var/lib/asterisk/sounds/SLS_Mass_Notifications_Plugin
+    /var/lib/asterisk/sounds/en/SLS_Mass_Notifications_Plugin
+    "$DATA_DIR/piper/venv/bin/piper" "$DATA_DIR/piper/venv/bin" "$DATA_DIR/piper/venv"
+    /var/tmp/nws_last_clear.ts
+  )
+  if [ "$PURGE_CONFIG" = 1 ]; then
+    paths+=("$DATA_DIR" /var/log/sls_mass_notify.log /var/log/sls_mass_notify_events.jsonl /var/log/sls_mass_notify_push.log)
+  fi
+  for path in "${paths[@]}"; do
+    remove_managed_path "$path" check || return 1
+  done
+}
+
+
 remove_runtime_files() {
   remove_piper_wrapper
   if [ -L "$DATA_DIR/piper/venv/bin/piper" ] && [ "$(readlink "$DATA_DIR/piper/venv/bin/piper")" = "/usr/local/bin/piper" ]; then
-    rm -f "$DATA_DIR/piper/venv/bin/piper"
-    rmdir "$DATA_DIR/piper/venv/bin" "$DATA_DIR/piper/venv" 2>/dev/null || true
+    remove_managed_path "$DATA_DIR/piper/venv/bin/piper"
+    remove_managed_path "$DATA_DIR/piper/venv/bin"
+    remove_managed_path "$DATA_DIR/piper/venv"
   fi
-  rm -rf /usr/local/bin/sls_mass_notify
-  rm -f /usr/local/bin/slsconsole
-  rm -f /usr/local/bin/nwsalerts_ensure_menu_patch.sh
-  rm -f /usr/local/sbin/sign_sls_mass_notify_local_sig.sh
-  rm -f /etc/freepbx.secure/slsmassnotifyserver.sig
+  remove_managed_path /usr/local/bin/sls_mass_notify
+  remove_managed_path /usr/local/bin/slsconsole
+  remove_managed_path /usr/local/bin/nwsalerts_ensure_menu_patch.sh
+  remove_managed_path /usr/local/sbin/sign_sls_mass_notify_local_sig.sh
+  remove_managed_path /etc/freepbx.secure/slsmassnotifyserver.sig
   remove_managed_sound_link /var/lib/asterisk/sounds/SLS_Mass_Notifications_Plugin
   remove_managed_sound_link /var/lib/asterisk/sounds/en/SLS_Mass_Notifications_Plugin
-  rm -f /var/lib/asterisk/bin/sls_mass_notify
-  rm -f /var/lib/asterisk/bin/sls_mass_notify_test.sh
-  rm -rf /var/www/html/api/sls-mass-notify
-  rm -rf /var/www/html/api/sipnotify
-  rm -rf /var/www/html/mass-notify
-  rm -rf /var/www/html/sls_mass_notify
+  remove_managed_path /var/lib/asterisk/bin/sls_mass_notify
+  remove_managed_path /var/lib/asterisk/bin/sls_mass_notify_test.sh
+  remove_managed_path /var/www/html/api/sls-mass-notify
+  remove_managed_path /var/www/html/api/sipnotify
+  remove_managed_path /var/www/html/mass-notify
+  remove_managed_path /var/www/html/sls_mass_notify
   if [ "$PURGE_CONFIG" = 1 ]; then
-    rm -rf "$DATA_DIR"
-    rm -f /var/log/sls_mass_notify.log
-    rm -f /var/log/sls_mass_notify_events.jsonl
-    rm -f /var/log/sls_mass_notify_push.log
+    remove_managed_path "$DATA_DIR"
+    remove_managed_path /var/log/sls_mass_notify.log
+    remove_managed_path /var/log/sls_mass_notify_events.jsonl
+    remove_managed_path /var/log/sls_mass_notify_push.log
   fi
   # Leave downloaded installers and unrelated recovery directories untouched;
-  # remove only the obsolete SLS weather-poller timestamp.
-  rm -f /var/tmp/nws_last_clear.ts
+  # remove only the obsolete SLL weather-poller timestamp.
+  remove_managed_path /var/tmp/nws_last_clear.ts
 }
 
 read_uninstall_crontab() {
@@ -1634,9 +1884,9 @@ remove_cron() {
         fi
       done
       if [ "$rollback_failed" = 1 ]; then
-        log "The $user SLS cron entries could not be removed and cron rollback was incomplete. Preserve $work and restore the named crontab before retrying."
+        log "The $user SLL cron entries could not be removed and cron rollback was incomplete. Preserve $work and restore the named crontab before retrying."
       else
-        log "The $user SLS cron entries could not be removed. Earlier replacements were rolled back; original crontabs remain in $work for review."
+        log "The $user SLL cron entries could not be removed. Earlier replacements were rolled back; original crontabs remain in $work for review."
       fi
       return 1
     fi
@@ -1668,7 +1918,7 @@ verify_removed_cron() {
     fi
     if ! cmp -s "$work/$user.before" "$work/$user.after"; then
       rm -rf "$work"
-      log "Uninstall verification failed; an SLS scheduled job remains in the $user crontab."
+      log "Uninstall verification failed; an SLL scheduled job remains in the $user crontab."
       return 1
     fi
   done
@@ -1676,8 +1926,8 @@ verify_removed_cron() {
 }
 
 restore_stock_modules() {
-  rm -f /var/www/html/admin/modules/dashboard/sections/SlsMassNotifyAnnouncement.class.php
-  rm -f /var/www/html/admin/modules/dashboard/views/sections/sls-mass-notify-announcement.php
+  remove_managed_path /var/www/html/admin/modules/dashboard/sections/SlsMassNotifyAnnouncement.class.php
+  remove_managed_path /var/www/html/admin/modules/dashboard/views/sections/sls-mass-notify-announcement.php
   remove_legacy_dashboard_patch
   local stock_module
   for stock_module in dashboard framework; do
@@ -1690,7 +1940,7 @@ restore_stock_modules() {
       return 1
     fi
     KEEP_SIGNING_TRUST=1
-    log "Preserved and verified approved $stock_module files after removing SLS integration."
+    log "Preserved and verified approved $stock_module files after removing SLL integration."
   done
 }
 
@@ -1782,21 +2032,21 @@ def read(path, maximum):
             raise RuntimeError('Uninstall evidence changed during inspection')
         return body
 reference = decode(read(root / 'slsmassnotifyserver.active.json', 1024))
-if not isinstance(reference, dict): raise SystemExit('Invalid protected SLS publisher reference')
+if not isinstance(reference, dict): raise SystemExit('Invalid protected SLL publisher reference')
 digest = reference.get('sha256', '')
 if not isinstance(digest, str) or not re.fullmatch('[a-f0-9]{64}', digest) or reference.get('generation') != 'slsmassnotifyserver-' + digest:
-    raise SystemExit('Invalid protected SLS publisher generation')
+    raise SystemExit('Invalid protected SLL publisher generation')
 generation = root / reference['generation']
 raw = read(generation / 'inventory.json', 8 * 1024 * 1024)
-if hashlib.sha256(raw).hexdigest() != digest: raise SystemExit('Protected SLS publisher inventory changed')
+if hashlib.sha256(raw).hexdigest() != digest: raise SystemExit('Protected SLL publisher inventory changed')
 inventory = decode(raw)
-if not isinstance(inventory, dict) or not isinstance(inventory.get('files'), dict): raise SystemExit('Invalid protected SLS publisher inventory')
+if not isinstance(inventory, dict) or not isinstance(inventory.get('files'), dict): raise SystemExit('Invalid protected SLL publisher inventory')
 name = 'bin/sls_mass_notify/sls_module_trust.py'
 entry = inventory.get('files', {}).get(name)
 path = generation / 'module' / name
 body = read(path, 2 * 1024 * 1024)
 if not isinstance(entry, dict) or hashlib.sha256(body).hexdigest() != entry.get('sha256'):
-    raise SystemExit('Protected SLS trust helper changed')
+    raise SystemExit('Protected SLL trust helper changed')
 trust = types.ModuleType('sls_uninstall_trust'); trust.__file__ = str(path)
 exec(compile(body, str(path), 'exec'), trust.__dict__)
 data, approved_generation = trust.load(root, 'slsmassnotifyserver')
@@ -1867,11 +2117,11 @@ verify_uninstall_inventories() {
   inspect_module_registry || return 1
   if [ -e "$module_dir" ] || [ -L "$module_dir" ]; then
     /usr/bin/python3 -I "$helper" --root /var/lib/sls-mass-notify-trust check --module slsmassnotifyserver --web-root /var/www/html || {
-      log "The installed SLS module differs from its signed inventory. Preserve the changed files for review before retrying."
+      log "The installed SLL module differs from its signed inventory. Preserve the changed files for review before retrying."
       return 1
     }
   elif [ "$MODULE_REGISTRY_PRESENT" = 1 ]; then
-    log "The SLS directory is missing but its FreePBX registry row remains. Preserve the signed release evidence and repair this incomplete removal before retrying."
+    log "The SLL directory is missing but its FreePBX registry row remains. Preserve the signed release evidence and repair this incomplete removal before retrying."
     return 1
   fi
   for reviewed_module in dashboard framework; do
@@ -1889,7 +2139,7 @@ uninstall_usage() {
   printf '%s\n' \
     'Usage: sls_mass_notify_uninstall.sh' \
     '       sls_mass_notify_uninstall.sh --help' \
-    'Normal removal preserves SLS settings, media and delivery history.' \
+    'Normal removal preserves SLL settings, media and delivery history.' \
     'For deliberate removal of retained data, use sudo slsconsole uninstall --purge.'
 }
 
@@ -1916,6 +2166,7 @@ main() {
   capture_signing_fingerprint
   validate_retained_user_data
   preflight_uninstall_integrations
+  preflight_managed_removals
   capture_pbx_running_state
   acquire_uninstall_workers
   inspect_uninstall_idle
@@ -1961,9 +2212,9 @@ main() {
   cleanup_recovery_signer
   trap - EXIT
   if [ "$PURGE_CONFIG" = "1" ]; then
-    log "SLS Mass Notify uninstall cleanup finished. Configuration and user data were purged."
+    log "SLL Mass Notify Server uninstall cleanup finished. Configuration and user data were purged."
   else
-    log "SLS Mass Notify uninstall cleanup finished. Central config, media, delivery history and audit logs were preserved."
+    log "SLL Mass Notify Server uninstall cleanup finished. Central config, media, delivery history and audit logs were preserved."
   fi
   if [ -e /etc/sls-mass-notify/config-keys.json ] || [ -L /etc/sls-mass-notify/config-keys.json ]; then
     log "Configuration recovery keys were retained at /etc/sls-mass-notify/config-keys.json, including after a data purge. Keep this protected keyring while older encrypted configurations or backups may still be needed."

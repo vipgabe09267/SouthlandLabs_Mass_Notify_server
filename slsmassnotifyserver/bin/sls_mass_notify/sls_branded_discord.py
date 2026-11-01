@@ -77,7 +77,7 @@ def main():
     fields = [(name, os.environ.get("SLS_DISCORD_" + name.upper(), "")) for name in field_names]
     results = dispatch_discord_destinations(
         config,
-        os.environ.get("SLS_DISCORD_SUBJECT", "Southland Servers Mass Notification"),
+        os.environ.get("SLS_DISCORD_SUBJECT", "SLL Mass Notify Server"),
         os.environ.get("SLS_DISCORD_BODY", "A notification was issued."),
         os.environ.get("SLS_DISCORD_EVENT", ""),
         os.environ.get("SLS_DISCORD_SEVERITY", ""),

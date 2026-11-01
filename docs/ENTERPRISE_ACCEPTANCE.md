@@ -22,7 +22,7 @@ Provider contracts: [ntfy publication](https://docs.ntfy.sh/publish/), [Gotify m
 
 Configure an authorized Zoom, Google Meet or Webex application with meeting permissions. Supply the selected provider's access token, absolute expiry, client ID/secret and refresh token before enabling renewal. The refresh response must contain a bounded bearer token and expiry; replacement refresh tokens are saved atomically with encrypted configuration.
 
-Test token expiry, one explicit refresh, provider-issued rotation, an interrupted refresh, and local revocation. An uncertain rotating-token request is fenced from automatic replay; obtain replacement authorization before another attempt. Revocation disables local meeting access before contacting the provider. Webex app authorization must also be revoked in the provider portal. SLS creates coordination meetings/spaces, not Calendar invitations or confirmed attendance.
+Test token expiry, one explicit refresh, provider-issued rotation, an interrupted refresh, and local revocation. An uncertain rotating-token request is fenced from automatic replay; obtain replacement authorization before another attempt. Revocation disables local meeting access before contacting the provider. Webex app authorization must also be revoked in the provider portal. SLL creates coordination meetings/spaces, not Calendar invitations or confirmed attendance.
 
 Contracts: [Zoom OAuth](https://developers.zoom.us/docs/integrations/oauth/), [Google offline access](https://developers.google.com/identity/protocols/oauth2/web-server#offline), [Webex authentication](https://developer.webex.com/create/docs/authentication).
 
@@ -36,7 +36,7 @@ Run a dry run for each complete snapshot. Review additions, updates and deactiva
 
 For each saved speaker, record the exact brand, model, firmware and local acceptance notes. Register its existing PJSIP extension and configure vendor auto-answer. Verify complete opening tone, speech and closing tone; check idle, busy, offline and multiple-contact cases. Axis's read-only last-test report is device evidence, not confirmation that a person heard an announcement. Other brands use the normal PBX audio evidence path.
 
-For an Axis door, save the exact permitted token and allowed operations. Prefer **timed access** when temporary access is intended: SLS reads the controller's `AccessTime`, rejects an unknown/ambiguous/excessive timer, and uses the device's `AccessDoor` operation. Device firmware owns relocking. Confirm the physical door and controller telemetry before and after the operation, then repeat with the PBX disconnected. Permanent unlock is a separate explicit permission. No fire-panel supervision or life-safety certification is claimed.
+For an Axis door, save the exact permitted token and allowed operations. Prefer **timed access** when temporary access is intended: SLL reads the controller's `AccessTime`, rejects an unknown/ambiguous/excessive timer, and uses the device's `AccessDoor` operation. Device firmware owns relocking. Confirm the physical door and controller telemetry before and after the operation, then repeat with the PBX disconnected. Permanent unlock is a separate explicit permission. No fire-panel supervision or life-safety certification is claimed.
 
 Contract: [Axis door control](https://www.developer.axis.com/vapix/physical-access-control/door-control-service/).
 
@@ -44,7 +44,7 @@ Contract: [Axis door control](https://www.developer.axis.com/vapix/physical-acce
 
 Use **Review channel continuity** for a configuration-only list of channel dependencies and enrolled local recovery administrators. That report opens no connection and measures no outage. Test local password/TOTP recovery while the IdP/WAN is isolated in a separate lab. Local phone/speaker delivery requires running Asterisk, current collector health, registered contacts and local audio assets. Desktop delivery needs a reachable certificate-valid PBX origin. SMS, browser push, meetings, new weather data and many carrier routes depend on external connectivity.
 
-Notification HA requires independently operated peers and the reviewed witness/fencing design. Exercise one-way and total partitions, witness outage/restart, lost replies, stale authority, peer reboot, duplicate immutable jobs, bounded offline jobs, credential revocation and manual failback. Preserve uncertain effect evidence; a takeover must not repeat an uncertain call, SMS, webhook or physical command. Matching SLS settings do not replicate trunk state, active calls, voicemail or all FreePBX configuration. This is not complete PBX failover qualification.
+Notification HA requires independently operated peers and the reviewed witness/fencing design. Exercise one-way and total partitions, witness outage/restart, lost replies, stale authority, peer reboot, duplicate immutable jobs, bounded offline jobs, credential revocation and manual failback. Preserve uncertain effect evidence; a takeover must not repeat an uncertain call, SMS, webhook or physical command. Matching SLL settings do not replicate trunk state, active calls, voicemail or all FreePBX configuration. This is not complete PBX failover qualification.
 
 ## CAP and IPAWS
 

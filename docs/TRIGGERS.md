@@ -81,7 +81,7 @@ a real emergency-call test.
 
 Configure a trusted public HTTPS URL, exact CAP sender and exact event name.
 Select a language tag such as `en`, `en-US` or `es`. Matching source text includes
-the headline, description, instructions and affected areas. SLS does not
+the headline, description, instructions and affected areas. SLL does not
 translate it. Complete context is limited to 3,000 characters and rejects
 oversized text rather than truncating it. A reviewed incident template still
 enforces its title, field and 500-character message bounds; long descriptions

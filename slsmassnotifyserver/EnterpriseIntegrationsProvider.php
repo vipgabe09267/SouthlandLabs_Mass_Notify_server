@@ -14,7 +14,7 @@ class EnterpriseIntegrationsProvider
         $options=[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>$body,CURLOPT_HTTPHEADER=>$headers,
             CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,CURLOPT_FOLLOWLOCATION=>false,CURLOPT_MAXREDIRS=>0,
             CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,CURLOPT_PROXY=>'',CURLOPT_CONNECTTIMEOUT_MS=>2500,
-            CURLOPT_TIMEOUT_MS=>10000,CURLOPT_NOSIGNAL=>true,CURLOPT_USERAGENT=>'SLS-Mass-Notify-Labs/1',
+            CURLOPT_TIMEOUT_MS=>10000,CURLOPT_NOSIGNAL=>true,CURLOPT_USERAGENT=>'SLL-Mass-Notify-Labs/1',
             CURLOPT_WRITEFUNCTION=>static function($handle,string $chunk) use(&$response): int {
                 if (strlen($response)+strlen($chunk)>131072) { return 0; } $response.=$chunk; return strlen($chunk);
             }];

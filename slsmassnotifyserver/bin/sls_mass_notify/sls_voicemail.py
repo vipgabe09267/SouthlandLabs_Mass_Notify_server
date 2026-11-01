@@ -698,6 +698,12 @@ def check_native_target(store, token, recipient, settings, ami):
     media = VoicemailMedia(store.directory)
     lease = media.validate(target['source_token'])
     check_mailbox_audio(target['mailbox'], media.path / (target['source_token'] + '.wav'), lease)
+    # Mailbox lookup and audio checks can outlast the original policy decision.
+    # A consumed child claim remains consumed when this later check refuses it.
+    current_settings = read_settings(store.directory)
+    native_transport_guard(current_settings)
+    if not current_policy(current_settings, parent, store.directory):
+        raise PhoneAdmissionError('phone_voicemail_policy_changed')
     return target
 
 
@@ -821,10 +827,24 @@ def _drain_voicemail(directory, ami_factory):
                     raise
                 # The claim is durable before the AMI write. Lost replies never
                 # permit a second deposit attempt for the same source/mailbox.
-                ami.action({'Action': 'Originate', 'Channel': 'Local/' + recipient + '@' + VM_CONTEXT + '/n',
-                    'Context': 'sls-voicemail-playback', 'Exten': 's', 'Priority': '1', 'Timeout': '10000',
-                    'Async': 'true', 'Variable': '__SLS_PHONE_TOKEN=' + child + ',__SLS_PHONE_RECIPIENT=' + recipient,
-                    'Account': accountcode(child), 'CallerID': 'SLS Mass Notify System <SLS>'})
+                try:
+                    ami.action({'Action': 'Originate', 'Channel': 'Local/' + recipient + '@' + VM_CONTEXT + '/n',
+                        'Context': 'sls-voicemail-playback', 'Exten': 's', 'Priority': '1', 'Timeout': '10000',
+                        'Async': 'true', 'Variable': '__SLS_PHONE_TOKEN=' + child + ',__SLS_PHONE_RECIPIENT=' + recipient,
+                        'Account': accountcode(child), 'CallerID': 'SLL Mass Notify Server <SLL>'})
+                except PhoneAdmissionError as error:
+                    if str(error) == 'phone_ami_action_rejected':
+                        try:
+                            store.reject_voicemail_submission(child, recipient)
+                            report_problem('phone_voicemail_submission_rejected')
+                        except (OSError, ValueError, PhoneAdmissionError):
+                            report_problem('phone_voicemail_submission_unconfirmed')
+                    else:
+                        report_problem('phone_voicemail_submission_unconfirmed')
+                    continue
+                except (OSError, TimeoutError):
+                    report_problem('phone_voicemail_submission_unconfirmed')
+                    continue
                 submitted += 1
     return submitted
 
@@ -854,7 +874,7 @@ def report_problem(code):
     if now - _problem_times.get(code, 0) >= 60:
         if len(_problem_times) >= 32: _problem_times.clear()
         _problem_times[code] = now
-        print('SLS voicemail: ' + code + '. ' + operator_message(code), file=sys.stderr)
+        print('SLL voicemail: ' + code + '. ' + operator_message(code), file=sys.stderr)
 
 
 def start_voicemail_worker(directory=DATA):

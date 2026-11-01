@@ -62,7 +62,7 @@ trait SlsOperatorRecovery
         $lock=null;
         try {
             $principal=$this->currentOperator();
-            if ($principal['operator_role']!=='administrator') { throw new \DomainException('Only an SLS administrator can manage password reset links.'); }
+            if ($principal['operator_role']!=='administrator') { throw new \DomainException('Only an SLL administrator can manage password reset links.'); }
             if (!in_array($action,['generate_reset_link','revoke_reset_link'],true) || array_keys($input)!==['id']
                 || !is_string($input['id']) || !preg_match('/^api_[a-f0-9]{24}$/D',$input['id'])) {
                 throw new \DomainException('Select one saved operator login.');
@@ -188,8 +188,8 @@ trait SlsOperatorRecovery
         }finally{$this->releaseSettingsLock($lock);}
         if($envelope===null){return;}
         // Count the attempt before launching Postfix; an uncertain handoff is never retried.
-        $delivery=$this->sendOperatorRecoveryEmail($envelope['settings'],$envelope['account']['email'],'SLS operator password reset',
-            "A password reset was requested for your SLS operator login.\n\n".$envelope['url']
+        $delivery=$this->sendOperatorRecoveryEmail($envelope['settings'],$envelope['account']['email'],'SLL operator password reset',
+            "A password reset was requested for your SLL operator login.\n\n".$envelope['url']
             ."\n\nThis link expires in 24 hours and works once. Saving a new password requires your current authenticator code.\n\nIf you did not request this, contact your PBX administrator. Two recovery emails or two failed recovery attempts require administrator assistance.");
         $lock=$this->acquireSettingsLock(true);
         try{
@@ -253,8 +253,8 @@ trait SlsOperatorRecovery
         }finally{$this->releaseSettingsLock($lock);}
         if($failure!==''){$this->operatorSecurityEvent('operator_password_reset_failed',$result,false);throw new \DomainException($failure);}
         $this->operatorSecurityEvent('operator_password_reset_completed',$result);
-        if(($result['email']??'')!==''&&$this->sendOperatorRecoveryEmail($active,$result['email'],'SLS operator password changed',
-            "Your SLS operator password has been changed. Existing sessions and reset links were revoked; your authenticator remains enrolled.\n\nIf you did not make this change, contact your PBX administrator immediately.")!=='accepted'){
+        if(($result['email']??'')!==''&&$this->sendOperatorRecoveryEmail($active,$result['email'],'SLL operator password changed',
+            "Your SLL operator password has been changed. Existing sessions and reset links were revoked; your authenticator remains enrolled.\n\nIf you did not make this change, contact your PBX administrator immediately.")!=='accepted'){
             $this->operatorSecurityEvent('operator_reset_confirmation_failed',$result,false);
         }
         return ['id'=>$result['id'],'username'=>$result['username']];

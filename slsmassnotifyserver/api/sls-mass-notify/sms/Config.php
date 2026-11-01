@@ -134,7 +134,7 @@ final class Config
     public static function body(array $config, string $title, string $message, bool $test): string
     {
         $body=($test?'[TEST] ':'').$config['organization'].": ".$title."\n".$message;
-        // These providers have authenticated inbound STOP handling in SLS.
+        // These providers have authenticated inbound STOP handling in SLL.
         // Do not promise a working reply route for an unsupported integration.
         return $body.(in_array($config['provider']??'', ['twilio','telnyx'], true)?"\nReply STOP to opt out.":'');
     }

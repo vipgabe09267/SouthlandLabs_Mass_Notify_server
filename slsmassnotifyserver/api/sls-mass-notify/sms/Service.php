@@ -172,19 +172,23 @@ final class Service
             if (($row['error_detail']??'')!=='') { $detail.=' Provider reason: '.$row['error_detail']; }
         }
         if ($row['error_code']==='sms_expired') { $detail='The SMS submission deadline passed before the provider request. No SMS was submitted.'; }
+        if ($row['error_code']==='sms_authorization_changed') { $state='cancelled'; $detail='The current sender permission or alert policy no longer allows SMS submission. No SMS was submitted.'; }
+        if ($row['error_code']==='sms_recipient_opted_out') { $state='cancelled'; $detail='This recipient opted out before the provider request. No SMS was submitted.'; }
+        if ($row['error_code']==='sms_opt_out_history_full') { $state='cancelled'; $detail='The permanent SMS opt-out replay history requires reviewed maintenance. No SMS was submitted.'; }
         if ($row['error_code']==='mms_image_unavailable') { $detail='The MMS image could not be stored safely. No provider request was sent. Check generated-media ownership, free space and the original image snapshot.'; }
         if (($row['provider']??'')==='twilio' && $row['error_code']==='provider_21610') {
-            $detail='Twilio reports that this recipient opted out. SLS has blocked further SMS to this number until new consent is recorded; the provider must also accept their opt-in.';
+            $detail='Twilio reports that this recipient opted out. SLL has blocked further SMS to this number until new consent is recorded; the provider must also accept their opt-in.';
         }
         if ($row['error_code']!=='') { $detail.=' Code: '.$row['error_code'].'.'; }
         $type=$row['message_type']??'SMS';
         if ($type==='MMS') { $detail='MMS · '.$detail; }
         return ['channel'=>'sms','target'=>$row['recipient_id'],'state'=>$state,'detail'=>$detail,'retryable'=>false,'message_type'=>$type,
             'sms_delivery_id'=>$row['id'],'provider_message_id'=>$row['provider_id'],'segments'=>(int)$row['segments'],
-            'budgeted_cost_micros'=>(int)$row['cost_micros'],'currency'=>$row['currency'], 'submission_started'=>!in_array($row['error_code'],['sms_expired','mms_image_unavailable'],true)];
+            'budgeted_cost_micros'=>(int)$row['cost_micros'],'currency'=>$row['currency'], 'submission_started'=>!in_array($row['error_code'],['sms_expired','mms_image_unavailable','sms_authorization_changed','sms_recipient_opted_out','sms_opt_out_history_full'],true)];
     }
-    public function send(array $settings, array $frozen, string $delivery, string $job, int $expires, int $now, string $mediaData=''): array
+    public function send(array $settings, array $frozen, string $delivery, string $job, int $expires, int $now, string $mediaData='', ?callable $authorize=null): array
     {
+        $started=hrtime(true);
         $config=Config::normalize($settings['announcement_sms']??[]); $id=$frozen['id']??'';
         $type=$frozen['message_type']??'SMS'; $media=$frozen['media']??[];
         if (!is_array($media) || !in_array($type,['SMS','MMS'],true) || ($type==='MMS' && $config['message_format']!=='mms')) { throw new \DomainException('sms_format_changed'); }
@@ -212,13 +216,41 @@ final class Service
             'cost_micros'=>$type==='MMS'?$config['mms_cost_micros']:$segments['segments']*$config['segment_cost_micros'],'currency'=>$config['currency'],
             'message_type'=>$type,'media_hash'=>$media['sha256']??''],$config,strtotime($current['consent_at']),$now);
         if (!$claim['claimed']) { return self::receipt($claim['row']); }
-        $outcome=null;
+        $outcome=null;$authorizationDeadline=null;$authorizationMonotonicDeadline=null;
         if ($type==='MMS') {
             try { $this->publishMedia($media,$mediaData); }
             catch (\Throwable $error) { $outcome=['state'=>'failed','provider_id'=>'','error_code'=>'mms_image_unavailable','submission_started'=>false]; }
         }
-        try { if ($outcome===null) { $outcome=$type==='MMS'?$this->provider->send($config,$current['number'],$frozen['body'],$frozen['callback'].'?delivery='.$local,$expires,$now,$media['url'])
-            :$this->provider->send($config,$current['number'],$frozen['body'],$frozen['callback'].'?delivery='.$local,$expires,$now); } }
+        if ($outcome===null && $authorize!==null) {
+            try {
+                $authorization=$authorize();$allowed=$authorization===true;
+                if (is_array($authorization) && count($authorization)===3 && ($authorization['allowed']??null)===true
+                    && is_int($authorization['valid_until']??null) && $authorization['valid_until']>0
+                    && is_int($authorization['monotonic_until']??null) && $authorization['monotonic_until']>0) {
+                    $allowed=true;$authorizationDeadline=$authorization['valid_until'];
+                    $authorizationMonotonicDeadline=$authorization['monotonic_until'];
+                }
+            } catch (\Throwable $error) { $allowed=false; }
+            if (!$allowed) { $outcome=['state'=>'failed','provider_id'=>'','error_code'=>'sms_authorization_changed','submission_started'=>false]; }
+        }
+        if ($outcome===null) {
+            try { $this->store->assertSubmissionConsent($numberHash,(int)strtotime($current['consent_at'])); }
+            catch (\DomainException $error) { $outcome=['state'=>'failed','provider_id'=>'','error_code'=>$error->getMessage(),'submission_started'=>false]; }
+        }
+        // Durable admission and image publication can consume the original
+        // start window. Monotonic elapsed time also survives clock rollback.
+        $submissionTick=hrtime(true);$elapsed=max(0,$submissionTick-$started);
+        $submissionNow=$now+intdiv($elapsed,1000000000);
+        // The original now is an integer second. Round partial elapsed
+        // seconds upward for authorization, conservatively covering a later
+        // consent read that crossed a wall-clock expiry boundary.
+        $authorizationNow=$now+intdiv($elapsed+999999999,1000000000);
+        if ($outcome===null && (($authorizationDeadline!==null && $authorizationNow>=$authorizationDeadline)
+            || ($authorizationMonotonicDeadline!==null && $submissionTick>=$authorizationMonotonicDeadline))) {
+            $outcome=['state'=>'failed','provider_id'=>'','error_code'=>'sms_authorization_changed','submission_started'=>false];
+        }
+        try { if ($outcome===null) { $outcome=$type==='MMS'?$this->provider->send($config,$current['number'],$frozen['body'],$frozen['callback'].'?delivery='.$local,$expires,$submissionNow,$media['url'])
+            :$this->provider->send($config,$current['number'],$frozen['body'],$frozen['callback'].'?delivery='.$local,$expires,$submissionNow); } }
         catch (\Throwable $error) { $outcome=['state'=>'uncertain','provider_id'=>'','error_code'=>'sms_submission_unconfirmed']; }
         try { $row=$this->store->outcome($local,$frozen['route'],$numberHash,$outcome['provider_id'],$outcome['state'],$outcome['error_code'],$now,$outcome['error_detail']??''); }
         catch (\DomainException $error) { throw new \RuntimeException('sms_receipt_commit_failed',0,$error); }

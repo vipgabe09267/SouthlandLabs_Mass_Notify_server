@@ -109,7 +109,7 @@ final class SlsConfigCrypto
     }
 
     /** No links, shared inodes, public read access, or unsafe keyring ownership. */
-    private static function readProtected(string $path, int $maximum, bool $keyring): string
+    private static function readProtected(string $path, int $maximum, bool $keyring, bool $retryAtomicReplacement = true): string
     {
         $runtimeUid=function_exists('posix_geteuid')?posix_geteuid():-1;$runtimeGid=function_exists('posix_getegid')?posix_getegid():-1;
         $asterisk=function_exists('posix_getpwnam')?@posix_getpwnam('asterisk'):false;
@@ -154,12 +154,44 @@ final class SlsConfigCrypto
                 throw new \RuntimeException('The opened configuration is not a safe regular file.');
             }
             foreach (['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtime', 'ctime'] as $field) {
-                if ($opened[$field] !== $before[$field]) { throw new \RuntimeException('The protected configuration changed while it was being opened.'); }
+                if ($opened[$field] !== $before[$field]) {
+                    clearstatcache(true, $path);
+                    $current = @lstat($path);
+                    $sameOpenedName = $safeFile($current);
+                    if ($sameOpenedName) {
+                        foreach (['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtime', 'ctime'] as $identityField) {
+                            if ($opened[$identityField] !== $current[$identityField]) { $sameOpenedName = false; break; }
+                        }
+                    }
+                    if (!$keyring && $retryAtomicReplacement && $sameOpenedName
+                        && [$opened['dev'], $opened['ino']] !== [$before['dev'], $before['ino']]
+                    ) {
+                        // A valid atomic writer replaced the named file after
+                        // lstat. Start one complete new inspection; no stale
+                        // settings or weakened metadata checks are returned.
+                        return self::readProtected($path, $maximum, false, false);
+                    }
+                    throw new \RuntimeException('The protected configuration changed while it was being opened.');
+                }
             }
             $raw = stream_get_contents($handle, $maximum + 1);
             $after = fstat($handle);
             clearstatcache(true, $path);
             $current = @lstat($path);
+            if (!$keyring && $retryAtomicReplacement && $safeFile($current) && is_array($after)
+                && ($after['mode'] & 0170000) === 0100000 && $after['nlink'] === 0
+                && [$current['dev'], $current['ino']] !== [$opened['dev'], $opened['ino']]) {
+                $unchangedRetiredFile = true;
+                foreach (['dev', 'ino', 'mode', 'uid', 'gid', 'size', 'mtime'] as $field) {
+                    if ($opened[$field] !== $after[$field]) { $unchangedRetiredFile = false; break; }
+                }
+                if ($unchangedRetiredFile) {
+                    // rename-over retires the old single-link inode. Its
+                    // unlink changes nlink/ctime; an in-place edit, unsafe new
+                    // file, keyring change or second replacement still fails.
+                    return self::readProtected($path, $maximum, false, false);
+                }
+            }
             foreach (['dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtime', 'ctime'] as $field) {
                 if (!$safeFile($after)||!$safeFile($current)||$before[$field] !== $after[$field] || $after[$field] !== $current[$field]) {
                     throw new \RuntimeException('The protected configuration changed while it was being read.');

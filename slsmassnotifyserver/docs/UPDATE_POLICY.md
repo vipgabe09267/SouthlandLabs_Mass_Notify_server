@@ -11,7 +11,7 @@ General Settings → Updates and Retention stores these preferences in `updates`
 
 A manual installation bypasses the automatic window and delay. It still respects the applied channel and exact pin. Check-only requests never install anything. No matching release is a successful hold, not an installation failure. The release search considers the latest 100 published-feed entries; a pin outside that window stays on hold and reports why.
 
-The repository is fixed to the official SLS server repository. Neither a channel nor a version pin bypasses publisher signature checks. The updater binds the installer to the release commit, verifies the signed manifest, installer and package, and passes the exact verified package bytes to installation. Bad metadata, signatures or protected configuration stop installation.
+The repository is fixed to the official SLL server repository. Neither a channel nor a version pin bypasses publisher signature checks. The updater binds the installer to the release commit, verifies the signed manifest, installer and package, and passes the exact verified package bytes to installation. Bad metadata, signatures or protected configuration stop installation.
 
 This is per-PBX policy. There is no central rollout coordinator, automatic canary assessment, or rollback triggered by another PBX. The installer retains its local recovery checks and configuration/history protection.
 

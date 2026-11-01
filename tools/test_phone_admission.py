@@ -364,6 +364,75 @@ class PhoneAdmissionTests(unittest.TestCase):
         self.assertNotIn(first, self.contents()['batches'])
         self.assertIn(active, self.contents()['batches'])
 
+    def retention_guard(self):
+        path=self.root/'phone-history-retention.lock'
+        path.touch(mode=0o640);path.chmod(0o640);os.chown(path,*phone._account_ids())
+        handle=path.open('rb');fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        self.addCleanup(handle.close)
+        return handle
+
+    def test_installer_retention_lease_preserves_expiring_rows_until_release(self):
+        token=self.admit()
+        with self.store.locked() as state:state['batches'][token].update(status='closed',closed_at=self.now)
+        guard=self.retention_guard();self.now+=phone.HISTORY_SECONDS+1
+        self.store.collector_heartbeat('b'*32)
+        self.assertIn(token,self.contents()['batches'])
+        fcntl.flock(guard,fcntl.LOCK_UN)
+        self.store.collector_heartbeat('c'*32)
+        self.assertNotIn(token,self.contents()['batches'])
+
+    def test_installer_retention_lease_preserves_nonexpired_rows_under_byte_pressure(self):
+        token=self.admit()
+        with self.store.locked() as state:state['batches'][token].update(status='closed',closed_at=self.now)
+        guard=self.retention_guard()
+        with mock.patch.object(phone,'MAX_CLOSED_BYTES',1):
+            self.store.collector_heartbeat('b'*32)
+            self.assertIn(token,self.contents()['batches'])
+            fcntl.flock(guard,fcntl.LOCK_UN)
+            with self.store.locked():pass
+        self.assertNotIn(token,self.contents()['batches'])
+
+    def test_installer_retention_lease_preserves_nonexpired_rows_under_count_pressure(self):
+        first=self.admit()
+        with self.store.locked() as state:state['batches'][first].update(status='closed',closed_at=self.now)
+        second=self.admit()
+        with self.store.locked() as state:state['batches'][second].update(status='closed',closed_at=self.now)
+        guard=self.retention_guard()
+        with mock.patch.object(phone,'MAX_CLOSED',1):
+            self.store.collector_heartbeat('b'*32)
+            self.assertEqual(set(self.contents()['batches']),{first,second})
+            fcntl.flock(guard,fcntl.LOCK_UN)
+            with self.store.locked():pass
+        self.assertEqual(len(self.contents()['batches']),1)
+
+    def test_unsafe_retention_mutex_never_changes_the_live_ledger(self):
+        lock=self.root/'phone-history-retention.lock'
+        original=(self.root/'phone-admission.json').read_bytes()
+        for kind in ('symlink','hardlink','directory','fifo','nonempty','writable','executable','foreign-owner'):
+            with self.subTest(kind=kind):
+                lock.unlink()
+                outside=self.root.parent/(self.root.name+'-retention-target')
+                if kind in ('symlink','hardlink'):
+                    outside.write_bytes(b'preserve outside file');outside.chmod(0o640)
+                    if kind=='symlink':lock.symlink_to(outside)
+                    else:os.link(outside,lock)
+                elif kind=='directory':lock.mkdir(mode=0o640)
+                elif kind=='fifo':os.mkfifo(lock,0o640)
+                else:
+                    lock.write_bytes(b'not a mutex' if kind=='nonempty' else b'')
+                    lock.chmod(0o666 if kind=='writable' else 0o750 if kind=='executable' else 0o640)
+                    if kind=='foreign-owner':os.chown(lock,65534,65534)
+                try:
+                    with self.assertRaises(phone.PhoneAdmissionError):
+                        with self.store.locked():pass
+                    self.assertEqual((self.root/'phone-admission.json').read_bytes(),original)
+                    if outside.exists():self.assertEqual(outside.read_bytes(),b'preserve outside file')
+                finally:
+                    if kind=='directory':lock.rmdir()
+                    else:lock.unlink()
+                    if outside.exists():outside.unlink()
+                    lock.touch(mode=0o640);os.chown(lock,*phone._account_ids())
+
     def test_origin_hangup_does_not_release_still_active_child(self):
         token = self.admit()
         self.store.bind_origin(token, '1000', '1.1', 'Local/1000@sls-alert-audio-1;2')
@@ -795,6 +864,16 @@ class LiveGroupAdmissionTests(unittest.TestCase):
                 with self.assertRaisesRegex(phone.PhoneAdmissionError, 'phone_live_origin_invalid'):
                     phone.admit_audience(['1001', '1002'], service='live', settings=self.settings(),
                                          ami_factory=ami, **identity)
+                ami.assert_not_called()
+                self.assertEqual(store.return_value.mock_calls, [])
+
+    def test_lite_profile_capacity_conflicts_fail_before_ami_or_state_mutation(self):
+        for settings in ({'deployment_profile': 'invalid', 'phone_device_limit': 25},
+                         {'deployment_profile': 'lite', 'phone_device_limit': 26}):
+            with self.subTest(settings=settings), mock.patch.object(phone, 'PhoneAdmissionStore') as store:
+                ami = mock.Mock(side_effect=AssertionError('Invalid Lite profile reached AMI'))
+                with self.assertRaisesRegex(phone.PhoneAdmissionError, 'phone_deployment_profile_invalid'):
+                    phone.admit_audience(['1000'], service='announcement', settings=settings, ami_factory=ami)
                 ami.assert_not_called()
                 self.assertEqual(store.return_value.mock_calls, [])
 

@@ -40,7 +40,7 @@ trait SlsEnterpriseAnnouncementChannels
         if(!\SLS\MassNotify\RuntimeState::running($settings)){return false;}
         if(!empty($request['automation_context'])&&!$this->automationContextPermitted($request['automation_context'])){return false;}
         if(method_exists($this,'enterpriseApprovalPermitted')&&!$this->enterpriseApprovalPermitted($request)){return false;}
-        if(isset($request['api_credential_id'])){$principal=ApiSecurity::currentCredential($settings,$request['api_credential_id']);if(!$principal||($principal['id']??'')==='legacy'||!ApiSecurity::permitsResolvedAnnouncement($principal,$request,$settings)){return false;}}
+        if(isset($request['api_credential_id'])){$principal=ApiSecurity::currentCredential($settings,$request['api_credential_id'],$request['api_credential_revision']??null);if(!$principal||($principal['id']??'')==='legacy'||!ApiSecurity::permitsResolvedAnnouncement($principal,$request,$settings)){return false;}}
         return true;
     }
     protected function transmitEnterpriseBrowserPush(string $url,string $body,array $headers): array { return BrowserPush::transmit($url,$body,$headers); }

@@ -128,7 +128,7 @@ def _dial_options(value):
     """Permit inert ringing/caller-transfer flags and numeric stock time limits.
 
     In particular t, callbacks, dial strings and variable expansions are never
-    accepted. T is safe on the unattended Playback side of the SLS origin.
+    accepted. T is safe on the unattended Playback side of the SLL origin.
     """
     if not isinstance(value, str) or len(value) > 128:
         _fail('outbound_dial_options_unsupported')
@@ -209,7 +209,7 @@ class _Proof:
         if context in scripts:
             self.callback_script(scripts[context])
         if context == 'sub-send-obroute-email':
-            # The exact stock branch skips macro-confirm for a fresh SLS origin.
+            # The exact stock branch skips macro-confirm for a fresh SLL origin.
             # Other contexts cannot set FORCE_CONFIRM or supply a U callback.
             if self.variable('FORCE_CONFIRM'):
                 _fail('outbound_confirmation_callback_unsupported')
@@ -375,7 +375,7 @@ class _Proof:
     def extension_only_hook(self, data):
         """Prove a desk-phone-only callback returns before any side effect.
 
-        SLS outbound admission binds a Local/ origin, so the exact PJSIP
+        SLL outbound admission binds a Local/ origin, so the exact PJSIP
         channel guard below cannot pass. Retain the full observed context in
         the fingerprint without executing or trusting its unreachable body.
         """
@@ -482,7 +482,7 @@ class _Proof:
                     and data == '$["${FORCE_CONFIRM}"!="" ]?Set(DIAL_TRUNK_OPTIONS=${DIAL_TRUNK_OPTIONS}U(macro-confirm))'):
                 if self.variable('FORCE_CONFIRM'):
                     _fail('outbound_confirmation_callback_unsupported')
-                return  # New SLS origin has no confirmation flag; assignments are forbidden.
+                return  # New SLL origin has no confirmation flag; assignments are forbidden.
             pieces = _split(data, '?')
             if len(pieces) != 2:
                 _fail('outbound_dialplan_control_unsupported')
@@ -681,7 +681,7 @@ class _Proof:
             _fail('outbound_route_inventory_invalid')
         if override_exists == '1' and 'i' not in override:
             _fail('outbound_trunk_forwarding_override_unsupported')
-        # A channel variable shadows the global only on the SLS origin. The
+        # A channel variable shadows the global only on the SLL origin. The
         # stock per-trunk AstDB override wins, so it must already be safe.
         self.channel_variables['TRUNK_OPTIONS'] = global_options + ('' if 'i' in global_options else 'i')
         if self.variable('OUTFAIL_' + trunk):

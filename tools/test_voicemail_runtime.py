@@ -448,6 +448,58 @@ class VoicemailRuntimeTests(unittest.TestCase):
         batch['voicemail_failures'] = {'1001': 'phone_voicemail_mailbox_duration'}
         self.assertFalse(vm.may_need_fallback(batch, batch['vm_fallback']['targets']['1001'], '1001'))
 
+    def test_explicit_originate_rejection_is_closed_and_does_not_block_next_recipient(self):
+        row = lambda mailbox: {'dials': [], 'mailbox': mailbox, 'claimed_token': None}
+        batch = {'purpose': 'page', 'status': 'closed', 'created_at': time.time(), 'channels': {},
+            'vm_fallback': {'sound': vm.canonical_sound(self.token), 'expires_at': time.time() + 100,
+                'expires_tick': time.monotonic() + 100, 'targets': {'1001': row('1001@default'), '1002': row('1002@default')}}}
+        store = mock.MagicMock(); store.boot_id = 'fixture'; store.require_collector.return_value = {'generation': 'fixture'}
+        store.admit_voicemail.side_effect = ['c' * 32, 'd' * 32]
+        store.locked.return_value.__enter__.return_value = {'batches': {}}
+        ami = mock.MagicMock(); ami.mailboxes.side_effect = lambda extensions: {extension: extension + '@default' for extension in extensions}
+        ami.action.side_effect = [vm.PhoneAdmissionError('phone_ami_action_rejected'), None]
+        ami.inventory.return_value = {'complete': True, 'started_tick': time.monotonic(),
+            'generation': 'fixture', 'boot_id': 'fixture', 'channels': []}
+        factory = mock.MagicMock(); factory.return_value.__enter__.return_value = ami
+        with mock.patch.object(vm, 'PhoneAdmissionStore', return_value=store), \
+                mock.patch.object(vm, 'read_private_json', return_value={'batches': {self.token: batch}}), \
+                mock.patch.object(vm, 'read_settings', return_value={'phone_device_limit': 25}), \
+                mock.patch.object(vm, 'current_policy', return_value=True), \
+                mock.patch.object(vm.VoicemailMedia, 'validate', return_value={}), \
+                mock.patch.object(vm, 'check_mailbox_audio'), \
+                mock.patch.object(vm, 'native_transport_guard'), \
+                mock.patch.object(vm, 'report_problem') as problem:
+            self.assertEqual(vm.drain_voicemail(self.root, factory), 1)
+        store.reject_voicemail_submission.assert_called_once_with('c' * 32, '1001')
+        problem.assert_any_call('phone_voicemail_submission_rejected')
+        self.assertEqual(ami.action.call_count, 2)
+
+    def test_ambiguous_originate_failure_keeps_claim_and_continues_without_replay(self):
+        row = {'dials': [], 'mailbox': '1001@default', 'claimed_token': None}
+        batch = {'purpose': 'page', 'status': 'closed', 'created_at': time.time(), 'channels': {},
+            'vm_fallback': {'sound': vm.canonical_sound(self.token), 'expires_at': time.time() + 100,
+                'expires_tick': time.monotonic() + 100, 'targets': {'1001': row}}}
+        store = mock.MagicMock(); store.boot_id = 'fixture'; store.require_collector.return_value = {'generation': 'fixture'}
+        store.admit_voicemail.return_value = 'c' * 32
+        store.locked.return_value.__enter__.return_value = {'batches': {}}
+        ami = mock.MagicMock(); ami.mailboxes.return_value = {'1001': '1001@default'}
+        ami.action.side_effect = vm.PhoneAdmissionError('phone_ami_response_incomplete')
+        ami.inventory.return_value = {'complete': True, 'started_tick': time.monotonic(),
+            'generation': 'fixture', 'boot_id': 'fixture', 'channels': []}
+        factory = mock.MagicMock(); factory.return_value.__enter__.return_value = ami
+        with mock.patch.object(vm, 'PhoneAdmissionStore', return_value=store), \
+                mock.patch.object(vm, 'read_private_json', return_value={'batches': {self.token: batch}}), \
+                mock.patch.object(vm, 'read_settings', return_value={'phone_device_limit': 25}), \
+                mock.patch.object(vm, 'current_policy', return_value=True), \
+                mock.patch.object(vm.VoicemailMedia, 'validate', return_value={}), \
+                mock.patch.object(vm, 'check_mailbox_audio'), \
+                mock.patch.object(vm, 'native_transport_guard'), \
+                mock.patch.object(vm, 'report_problem') as problem:
+            self.assertEqual(vm.drain_voicemail(self.root, factory), 0)
+        store.reject_voicemail_submission.assert_not_called()
+        problem.assert_any_call('phone_voicemail_submission_unconfirmed')
+        ami.action.assert_called_once()
+
     def test_malformed_lease_cannot_block_cleanup_of_valid_expired_audio(self):
         self.snapshot()
         bad = self.media.path / (self.token + '.json')

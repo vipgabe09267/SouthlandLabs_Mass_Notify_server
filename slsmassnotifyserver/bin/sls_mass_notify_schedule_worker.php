@@ -1,7 +1,7 @@
 #!/usr/bin/php
 <?php
 
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 declare(strict_types=1);
 
@@ -62,9 +62,9 @@ function sls_schedule_runner_lock(string $directory)
 $runnerLock = null;
 if (!$selfTest) {
 	try { $runnerLock = sls_schedule_runner_lock($dataDirectory); }
-	catch (\Throwable $error) { fwrite(STDERR, 'SLS scheduling runner: ' . $error->getMessage() . "\n"); exit(1); }
+	catch (\Throwable $error) { fwrite(STDERR, 'SLL scheduling runner: ' . $error->getMessage() . "\n"); exit(1); }
 	if ($runnerLock === null) {
-		fwrite(STDOUT, "SLS scheduling runner is already active or paused for maintenance; no work was started.\n");
+		fwrite(STDOUT, "SLL scheduling runner is already active or paused for maintenance; no work was started.\n");
 		exit(0);
 	}
 }
@@ -112,7 +112,7 @@ try {
 		if (!@unlink($writeProbe)) {
 			throw new \RuntimeException('Scheduling data-directory cleanup probe failed.');
 		}
-		fwrite(STDOUT, "SLS Mass Notify scheduling worker self-test passed.\n");
+		fwrite(STDOUT, "SLL Mass Notify Server scheduling worker self-test passed.\n");
 		exit(0);
 	}
 
@@ -135,20 +135,20 @@ try {
 	if ($result === false || (is_array($result) && array_key_exists('success', $result) && empty($result['success']))) {
 		throw new \RuntimeException('Scheduled-announcement processing reported a failure.');
 	}
-	if ($automationFailed) { error_log('SLS trigger reconciliation failed; review the protected trigger journal.'); }
+	if ($automationFailed) { error_log('SLL trigger reconciliation failed; review the protected trigger journal.'); }
     if ($incidentFailed) {
         foreach (array_slice(is_array($incidentResult['errors'] ?? null) ? $incidentResult['errors'] : [], 0, 3) as $error) {
             if (is_array($error) && is_string($error['message'] ?? null)) {
                 $detail = ['message' => substr($error['message'], 0, 1000)];
                 if (is_string($error['incident_id'] ?? null) && preg_match('/^inc_[a-f0-9]{32}$/D', $error['incident_id'])) { $detail['incident_id'] = $error['incident_id']; }
-                error_log('SLS incident policy detail: ' . json_encode($detail, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES));
+                error_log('SLL incident policy detail: ' . json_encode($detail, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES));
             }
         }
         throw new \RuntimeException('Incident policy processing could not confirm completion. Review the preceding policy/storage error and worker health.');
     }
 } catch (\Throwable $exception) {
-	error_log('SLS Mass Notify scheduling worker failed: ' . $exception->getMessage());
-	fwrite(STDERR, "SLS Mass Notify scheduling worker failed. Review Notification Logs and Dashboard health.\n");
+	error_log('SLL Mass Notify Server scheduling worker failed: ' . $exception->getMessage());
+	fwrite(STDERR, "SLL Mass Notify Server scheduling worker failed. Review Notification Logs and Dashboard health.\n");
 	exit(1);
 }
 

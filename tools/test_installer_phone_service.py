@@ -17,7 +17,17 @@ class PhoneServiceTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.unit = self.root / 'collector.service'
         self.source = self.root / 'installer.sh'
-        self.source.write_text(SOURCE.replace('/etc/systemd/system/sls-mass-notify-phone-events.service', str(self.unit)))
+        fixture_source = SOURCE.replace(
+            '/etc/systemd/system/sls-mass-notify-phone-events.service', str(self.unit))
+        # Production deliberately replaces a caller-controlled PATH before it
+        # resolves utilities. Give this isolated fixture an equally explicit
+        # PATH whose first entry contains the mock systemctl implementation.
+        fixture_source = fixture_source.replace(
+            'PATH=/usr/sbin:/usr/bin:/sbin:/bin',
+            f'PATH={self.root}:/usr/sbin:/usr/bin:/sbin:/bin',
+            1,
+        )
+        self.source.write_text(fixture_source)
         self.mock = self.root / 'systemctl'
         self.mock.write_text('''#!/bin/sh
 printf '%s\\n' "$*" >> "$SLS_PHONE_TEST_ROOT/calls"
@@ -91,6 +101,71 @@ esac
                 path.write_text(json.dumps(result))
                 completed = subprocess.run(['bash', '-c', 'source "$1"; validate_phone_collector_probe_file "$2" "$3"', '_', str(self.source), kind, str(path)], env=self.env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(completed.returncode == 0, expected, completed.stderr)
+
+    def startup_probe(self, active_after=1, disabled=False, healthy=True):
+        probe=self.root/'startup-probe'
+        probe.write_text('''#!/bin/bash
+printf '%s\\n' "${@: -1}" >>"$SLS_PHONE_TEST_ROOT/probe-calls"
+if [ "${@: -1}" = --probe-ami ]; then
+ printf '%s\\n' '{"ok":true,"ping":true,"show_dialplan":true}'
+else
+ printf '%s\\n' "$FIXTURE_HEALTH"
+fi
+''');probe.chmod(0o755)
+        source=self.root/'startup-installer.sh'
+        source.write_text(self.source.read_text().replace('/usr/sbin/runuser',str(probe)))
+        harness=r'''
+source "$1"
+INSTALL_TEMP_ROOT="$SLS_PHONE_TEST_ROOT";LOG_FILE="$SLS_PHONE_TEST_ROOT/log"
+log(){ printf '%s\n' "$*"; }
+sleep(){ :; }
+systemctl(){
+ printf '%s\n' "$*" >>"$SLS_PHONE_TEST_ROOT/startup-calls"
+ if [ "$1" = is-enabled ]; then [ "$FIXTURE_DISABLED" != 1 ]; return; fi
+ if [ "$1" = is-active ]; then
+  local count=0
+  [ ! -e "$SLS_PHONE_TEST_ROOT/active-count" ] || read -r count <"$SLS_PHONE_TEST_ROOT/active-count"
+  count=$((count+1));printf '%s\n' "$count" >"$SLS_PHONE_TEST_ROOT/active-count"
+  [ "$count" -ge "$FIXTURE_ACTIVE_AFTER" ];return
+ fi
+ return 99
+}
+verify_phone_collector
+'''
+        health={'ok':healthy,'connected':healthy,'heartbeat_age_seconds':1,'active_batches':0,'reserved_contacts':0}
+        return subprocess.run(['bash','-c',harness,'_',str(source)],env={**self.env,
+            'FIXTURE_DISABLED':'1' if disabled else '0','FIXTURE_ACTIVE_AFTER':str(active_after),
+            'FIXTURE_HEALTH':json.dumps(health)},capture_output=True,text=True,timeout=10)
+
+    def test_collector_startup_waits_through_systemd_restart_before_authentication(self):
+        result=self.startup_probe(active_after=3)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual((self.root/'active-count').read_text().strip(),'3')
+        self.assertEqual((self.root/'probe-calls').read_text().splitlines(),['--probe-ami','--health'])
+        self.assertTrue(all(row.startswith(('is-enabled ','is-active '))
+            for row in (self.root/'startup-calls').read_text().splitlines()))
+
+    def test_collector_startup_remains_bounded_and_rejects_disabled_services(self):
+        result=self.startup_probe(active_after=50)
+        self.assertNotEqual(result.returncode,0)
+        self.assertLessEqual(int((self.root/'active-count').read_text()),10)
+        self.assertFalse((self.root/'probe-calls').exists())
+        (self.root/'active-count').unlink()
+        result=self.startup_probe(disabled=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertFalse((self.root/'active-count').exists())
+        self.assertFalse((self.root/'probe-calls').exists())
+
+    def test_active_collector_without_authenticated_heartbeat_is_rejected(self):
+        result=self.startup_probe(healthy=False)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('fresh authenticated heartbeat',result.stdout)
+
+    def test_main_checks_collector_readiness_after_freepbx_reload_before_static_verification(self):
+        main=SOURCE.split('main() {',1)[1]
+        reload=main.index('SLS_MASS_NOTIFY_PRESERVE_PENDING=1 run_without_install_maintenance_lock fwconsole reload')
+        verify=main.index('protected_install_phase verify',reload)
+        self.assertIn('verify_phone_collector',main[reload:verify])
 
     def test_uninstaller_twins_preserve_authenticated_worker_and_service_ordering(self):
         # Offline teardown has stronger lifecycle requirements than installer
@@ -173,7 +248,7 @@ restore_previous_phone_collector
         self.assertIn('No candidate runtime or maintenance schedule was activated',result.stdout)
 
     @unittest.skipUnless(os.geteuid()==0,'requires root for protected chown snapshot fixtures')
-    def test_failed_pretransaction_restores_original_chown_file_or_absence(self):
+    def test_failed_pretransaction_restores_runtime_exclusion_and_keeps_private_backup_protection(self):
         helper=ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_legacy_permissions.py'
         approval=self.root/'previous-root-approval.json'
         approval.write_text(json.dumps({'schema':1,'source':'fresh-install','files':{},'root_jobs':[]}));approval.chmod(0o600)
@@ -183,6 +258,7 @@ restore_previous_phone_collector
                 original=b'; preserved local comment\n[blacklist]\ndirectory = /other/private\n'
                 if existed: config.write_bytes(original); config.chmod(0o640)
                 snapshot=self.root/'freepbx-chown.snapshot';snapshot.unlink(missing_ok=True)
+                recovery_snapshot=self.root/'freepbx-module-recovery-chown.snapshot';recovery_snapshot.unlink(missing_ok=True)
                 harness=r'''
 source "$1"
 UPGRADE_TRUST_DIR="$SLS_PHONE_TEST_ROOT"; LEGACY_PERMISSION_TOOL="$HELPER"
@@ -195,11 +271,20 @@ exit 37
 '''
                 result=subprocess.run(['bash','-c',harness,'_',str(self.source)],env={**self.env,'HELPER':str(helper)},capture_output=True,text=True,timeout=10)
                 self.assertEqual(result.returncode,37,result.stdout+result.stderr)
-                if existed:
-                    self.assertEqual(config.read_bytes(),original)
-                    self.assertEqual(config.stat().st_mode & 0o777,0o640)
-                    config.unlink()
-                else: self.assertFalse(config.exists())
+                permanent=(b'\n; BEGIN SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n[blacklist]\n'
+                    b'directory = /var/www/html/admin/modules/.sls-mass-notify-recovery\n'
+                    b'; END SLS MASS NOTIFY MODULE RECOVERY PERMISSIONS\n')
+                expected=(original if existed else b'')+permanent
+                self.assertEqual(config.read_bytes(),expected)
+                self.assertEqual(config.stat().st_mode & 0o777,0o640 if existed else 0o644)
+                import base64
+                infrastructure=json.loads(recovery_snapshot.read_bytes())
+                self.assertEqual(infrastructure['scope'],'recovery')
+                self.assertEqual(infrastructure['existed'],existed)
+                self.assertEqual(base64.b64decode(infrastructure['original_base64']),original if existed else b'')
+                self.assertEqual(base64.b64decode(json.loads(snapshot.read_bytes())['original_base64']),expected)
+                self.assertNotIn(b'BEGIN SLS MASS NOTIFY DATA PERMISSIONS',config.read_bytes())
+                config.unlink()
 
     @unittest.skipUnless(os.geteuid()==0,'requires root for protected chown snapshot fixtures')
     def test_failed_install_preserves_snapshot_when_admin_changes_chown_file(self):

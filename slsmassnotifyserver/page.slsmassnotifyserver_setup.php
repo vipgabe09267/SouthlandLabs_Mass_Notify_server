@@ -1,5 +1,5 @@
 <?php
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 $slsmassnotifyserver = \FreePBX::create()->Slsmassnotifyserver;
 $slsmassnotifyserver->enforceOperatorPageAccess('slsmassnotifyserver_setup');

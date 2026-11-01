@@ -297,7 +297,7 @@ final class WeatherDeliveryReceipts
                         'group'=>is_string($label) ? substr($label, 0, 100) : '', 'status'=>$status,
                         'http_status'=>is_int($http) && $http >= 100 && $http <= 599 ? $http : null,
                         'error'=>$error, 'recorded_at'=>is_int($receipt['recorded_at'] ?? null) ? gmdate('c', $receipt['recorded_at']) : '',
-                        'queue_state'=>in_array($record['terminal_status'] ?? '', ['complete','expired','cancelled','uncertain','failed'], true)
+                        'queue_state'=>in_array($record['terminal_status'] ?? '', ['complete','expired','cancelled','partial_cancelled','uncertain','failed'], true)
                             ? $record['terminal_status'] : (empty($record['completed_at']) ? 'pending' : 'complete')];
                     if (count($result['rows']) >= 100) { $result['warnings'][] = 'Only the first 100 matching destination results are shown.'; break 3; }
                 }

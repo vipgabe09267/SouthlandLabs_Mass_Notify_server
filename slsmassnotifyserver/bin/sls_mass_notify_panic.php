@@ -22,5 +22,5 @@ try {
             return $m && realpath($path)===$path && ($m['mode']&0170000)===0100000 && $m['nlink']===1 && !($m['mode']&0022) && $m['size']>44 && is_readable($path);
         });
     $session->run($environment);
-} catch (Throwable $error) { error_log('SLS panic shortcut could not confirm activation; review Trigger history and prompt/configuration readiness.'); }
+} catch (Throwable $error) { error_log('SLL panic shortcut could not confirm activation; review Trigger history and prompt/configuration readiness.'); }
 try { $agi->hangup(); } catch (Throwable $ignored) {}

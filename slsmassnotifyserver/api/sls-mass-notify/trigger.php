@@ -32,10 +32,14 @@ try {
     }
     if (!str_starts_with(ltrim($raw),'{')) { slsTriggerResponse(400,['ok'=>false,'error'=>'trigger_request_must_be_an_object']); }
     $input=ApiSecurity::jsonObject($raw,false,12);
+    // Preserve the exact authenticated bytes outside caller-controlled input.
+    // The current admission snapshot must still accept this enrollment proof.
+    $authentication=['raw'=>$raw,'headers'=>['timestamp'=>$_SERVER['HTTP_X_SLS_TIMESTAMP']??'',
+        'signature'=>$_SERVER['HTTP_X_SLS_SIGNATURE']??'']];
     $bootstrap_settings=['freepbx_auth'=>false,'skip_astman'=>true]; require '/etc/freepbx.conf';
     $module=\FreePBX::create()->Slsmassnotifyserver;
     slsTriggerResponse(200,($input['operation'] ?? '')==='heartbeat'
-        ? $module->receiveSensorHeartbeat($id,$input) : $module->automationRequest($id,$input));
+        ? $module->receiveSensorHeartbeat($id,$input,$authentication) : $module->automationRequest($id,$input,$authentication));
 } catch (InvalidArgumentException | DomainException | JsonException $error) {
     slsTriggerResponse($error->getCode() === 429 ? 429 : 422,['ok'=>false,'error'=>$error->getCode() === 429 ? 'trigger_cooldown' : 'trigger_request_rejected','message'=>$error instanceof JsonException ? 'Invalid JSON request.' : $error->getMessage()]);
 } catch (Throwable $error) {

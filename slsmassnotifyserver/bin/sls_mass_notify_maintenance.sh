@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Southland Servers Mass Notifications Server by the Southland Servers Group
+# SLL Mass Notify Server by the Southland Labs
 set -euo pipefail
 
 umask 027
@@ -12,7 +12,6 @@ UPDATE_REQUEST_FILE="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/update.requ
 UPDATE_PROGRESS_FILE="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/update-progress.json"
 MAINTENANCE_PROGRESS_FILE="/run/asterisk/sls-mass-notify-maintenance-progress.json"
 CONFIG_FILE="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config"
-UNINSTALL_REQUEST_FILE="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/uninstall.request"
 INSTALL_FAILURE_FILE="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/install-failure.json"
 INTEGRATION_REPAIR_FILE="/var/lib/asterisk/SLS_Mass_Notifications_Plugin/integration-repair-required.json"
 RUNTIME_DIR="/usr/local/bin/sls_mass_notify"
@@ -173,7 +172,7 @@ run_without_maintenance_lock() (
 )
 
 # Admit the protected helper before importing or executing any runtime Python.
-# The helper then verifies all root-executable SLS bytes against the enrolled
+# The helper then verifies all root-executable SLL bytes against the enrolled
 # publisher generation. Local signature status never authorizes execution.
 admit_root_runtime() {
   /usr/bin/python3 -I - "$PRIVILEGED_HELPER" <<'PYGUARD' || return 1
@@ -186,10 +185,10 @@ for file in (path, path.with_name('sls_module_trust.py')):
     for item in [file] + list(file.parents)[:-1]:
         info = item.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-            raise SystemExit('Untrusted SLS protected runtime path: ' + str(item))
+            raise SystemExit('Untrusted SLL protected runtime path: ' + str(item))
     info = file.lstat()
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-        raise SystemExit('Unsafe SLS protected helper file')
+        raise SystemExit('Unsafe SLL protected helper file')
 PYGUARD
   run_without_maintenance_lock /usr/bin/timeout --signal=TERM --kill-after=5 120 \
     /usr/bin/python3 -I "$PRIVILEGED_HELPER" admit
@@ -356,7 +355,7 @@ elif kind == 'maintenance':
                'updated_at': now, 'error_category': category, 'exit_code': int(status)}
 elif kind == 'install':
     payload = {'version': 1, 'failed_at': now, 'stage': first[:80],
-               'message': 'SLS Mass Notify installation repair did not complete.',
+               'message': 'SLL Mass Notify Server installation repair did not complete.',
                'solution': second[:400], 'log': '/var/log/sls_mass_notify.log'}
 else:
     raise SystemExit('Unknown maintenance status type')
@@ -517,7 +516,7 @@ require "/etc/freepbx.conf";
 \FreePBX::Notifications()->add_error(
     "slsmassnotifyserver",
     "INSTALLFAILED",
-    "SLS Mass Notify installation repair failed",
+    "SLL Mass Notify Server installation repair failed",
     "The protected repair did not complete. " . $argv[1] . " Review /var/log/sls_mass_notify.log before retrying.",
     "",
     true,
@@ -603,7 +602,7 @@ PY
 
 [ "${EUID:-$(id -u)}" -eq 0 ] || exit 1
 open_maintenance_log LOG_FD "$LOG_FILE" || {
-  printf '%s\n' 'SLS maintenance refused an unsafe log file.' >&2
+  printf '%s\n' 'SLL maintenance refused an unsafe log file.' >&2
   exit 1
 }
 trap finish_maintenance EXIT
@@ -617,7 +616,7 @@ open_root_owned_file MAINTENANCE_LOCK_FD "$LOCK_FILE" || {
 flock -n "$MAINTENANCE_LOCK_FD" || exit 0
 if ! admit_root_runtime >&"$LOG_FD" 2>&1; then
   ACTIVE_ACTION="trust"
-  fail_maintenance "publisher_runtime_verification_failed" "The protected SLS runtime does not match an enrolled publisher release. Use the verified release installer to restore it; no automatic baseline was enrolled." 2
+  fail_maintenance "publisher_runtime_verification_failed" "The protected SLL runtime does not match an enrolled publisher release. Use the verified release installer to restore it; no automatic baseline was enrolled." 2
 fi
 if ! secure_central_config; then
   ACTIVE_ACTION="config"
@@ -629,7 +628,7 @@ if ! encryption_result="$(/usr/bin/timeout --signal=TERM --kill-after=5 120 \
   /usr/bin/python3 -I "$RUNTIME_DIR/sls_config_crypto.py" daily 2>&"$LOG_FD")"; then
   log "$encryption_result"
   ACTIVE_ACTION="config"
-  fail_maintenance "configuration_encryption_failed" "SLS configuration encryption or annual key rotation could not be verified. Preserve the protected keyring and review the maintenance log before restoring settings." 2
+  fail_maintenance "configuration_encryption_failed" "SLL configuration encryption or annual key rotation could not be verified. Preserve the protected keyring and review the maintenance log before restoring settings." 2
 fi
 case "$encryption_result" in
   *'"rotated":true'*|*'"encrypted_files":'[1-9]*) log "$encryption_result" ;;
@@ -732,7 +731,7 @@ if [ "$integration_drift" -eq 1 ] && ! acquire_mutation_coordination >&"$LOG_FD"
 fi
 if [ "$integration_drift" -eq 1 ] && ! verify_installed_sls_module >&"$LOG_FD" 2>&1; then
   integration_drift=0
-  log "Dashboard/menu repair deferred: the installed SLS module differs from its authenticated publisher inventory. Run Repair Installation from a verified release."
+  log "Dashboard/menu repair deferred: the installed SLL module differs from its authenticated publisher inventory. Run Repair Installation from a verified release."
   release_mutation_coordination
 fi
 if [ "$integration_drift" -eq 1 ]; then
@@ -801,7 +800,7 @@ def restore_failed_claim():
             os.link(claim_name, parts[-1], src_dir_fd=parent,
                     dst_dir_fd=parent, follow_symlinks=False)
         except FileExistsError:
-            print('SLS maintenance preserved the failed private claim because a newer request exists: '
+            print('SLL maintenance preserved the failed private claim because a newer request exists: '
                   + os.path.join(os.path.dirname(path), claim_name), file=sys.stderr)
             return
         restored = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
@@ -811,7 +810,7 @@ def restore_failed_claim():
         os.unlink(claim_name, dir_fd=parent)
         os.fsync(parent)
     except (OSError, RuntimeError) as error:
-        print('SLS maintenance preserved a failed private claim for review ('
+        print('SLL maintenance preserved a failed private claim for review ('
               + str(error) + '): ' + os.path.join(os.path.dirname(path), claim_name),
               file=sys.stderr)
 try:
@@ -896,11 +895,11 @@ try:
     print(os.path.join(os.path.dirname(path), claim_name) + '\t' + mode)
 except RuntimeError as error:
     restore_failed_claim()
-    print('SLS maintenance request rejected: ' + str(error), file=sys.stderr)
+    print('SLL maintenance request rejected: ' + str(error), file=sys.stderr)
     raise SystemExit(2)
 except OSError:
     restore_failed_claim()
-    print('SLS maintenance request rejected: unsafe request storage', file=sys.stderr)
+    print('SLL maintenance request rejected: unsafe request storage', file=sys.stderr)
     raise SystemExit(2)
 finally:
     if fd >= 0:
@@ -1069,23 +1068,6 @@ if [ -x "$RUNTIME_DIR/sls_system_notifications.py" ]; then
   fi
 fi
 
-if uninstall_claim_result="$(claim_request "$UNINSTALL_REQUEST_FILE" "uninstall" "uninstall")"; then
-  uninstall_claim="${uninstall_claim_result%%$'\t'*}"
-  ACTIVE_ACTION="uninstall"
-  finish_request_claim consume "$uninstall_claim" >&"$LOG_FD" 2>&1 || fail_maintenance "uninstall_request_cleanup_failed" "The complete-uninstall request could not be consumed safely. No uninstall was started." 2
-  log "Starting queued complete uninstall"
-  write_maintenance_progress "uninstall" "running" "Removing Mass Notify runtime, FreePBX integration, APIs, logs, and protected configuration."
-  if SLS_MASS_NOTIFY_PURGE_CONFIG=1 /usr/bin/timeout --signal=TERM --kill-after=30 3600 \
-    "$RUNTIME_DIR/sls_mass_notify_uninstall.sh" >&"$LOG_FD" 2>&1; then
-    rm -f "$MAINTENANCE_PROGRESS_FILE"
-  else
-    uninstall_status=$?
-    log "Queued complete uninstall reported an error"
-    fail_maintenance "process_failed" "Complete uninstall reported an error. Review the PBX console and uninstall log before retrying." "$uninstall_status"
-  fi
-  exit 0
-fi
-
 update_claim_status=0
 update_claim_result="$(claim_request "$UPDATE_REQUEST_FILE" "manual update" "update")" || update_claim_status=$?
 if [ "$update_claim_status" -eq 0 ]; then
@@ -1143,7 +1125,7 @@ if ! acquire_mutation_coordination >&"$LOG_FD" 2>&1; then
   fail_maintenance "active_delivery_or_configuration" "Repair did not start because notifications, paging, configuration editing, or collector health could not be confirmed idle. Allow current activity to finish and retry; no delivery was interrupted." 2
 fi
 if ! verify_installed_sls_module >&"$LOG_FD" 2>&1; then
-  fail_maintenance "publisher_module_verification_failed" "Repair stopped because the installed SLS module differs from its authenticated publisher inventory. Restore the same verified release before retrying." 2
+  fail_maintenance "publisher_module_verification_failed" "Repair stopped because the installed SLL module differs from its authenticated publisher inventory. Restore the same verified release before retrying." 2
 fi
 # Root operations use only the immutable publisher generation. All FreePBX
 # bootstrap, module hooks, DB access and reload hooks run as asterisk.

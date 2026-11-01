@@ -1,14 +1,29 @@
 # Capacity, storage and retention
 
-The installer and General Settings use the same combined PBX/SLS resource policy.
+The installer and General Settings use the same combined PBX/SLL resource policy.
 These are engineering admission budgets, not load certification. Existing calls,
 codecs, transcoding, conferencing, recording and backups need their own margin.
 
 ## CPU and memory
 
-Default capacity is **25 desktops and 25 phone contacts**, requiring **2 effective
-CPU cores and 4 GiB RAM**. The baseline includes up to 50 desktops and 100 contacts.
-For ordinary PBX traffic or call recording, allow at least 4 cores and 8 GiB.
+Standard mode is the default. Its initial **25 desktops and 25 phone contacts**
+require **2 effective CPU cores and 4 GiB RAM**; the baseline includes up to 50
+desktops and 100 contacts. For ordinary PBX traffic or call recording, allow at
+least 4 cores and 8 GiB.
+
+Standard remains the default. Below its 4 GiB RAM baseline (with bounded kernel reservations), the interactive installer offers Lite only after checking all Lite prerequisites. The displayed limits require explicit acceptance; No, EOF or a 120-second timeout cancels. Unattended callers must pass `--lite` explicitly. A Standard-capable host cannot select Lite.
+
+The signed installer's `--lite` profile admits a nominal 2 GiB host only
+at 1–25 desktops and 1–25 phone contacts with two effective CPU cores. It fixes
+speech at one renderer and at most two waiting jobs, permits four simultaneous
+SSE streams, uses one Weather/Lightning delivery worker and two Weather.gov fetch
+workers. Enterprise Labs and enterprise SSO are unavailable in Lite. Their saved configuration and credentials are retained, but activation, administrator actions and PHP/Python runtime entry points are blocked. Returning to Standard does not automatically reactivate these features.
+
+Lite mode keeps the same local authentication, encryption, journaling, storage,
+signature and rollback checks. It never truncates detected contacts or recipients.
+It is an engineering admission profile for low-volume beta testing, not measured
+throughput certification. Switch profiles only through the verified installer;
+configuration import and restore cannot bypass resource admission.
 
 | Desktop limit | Required cores / vCPUs | Required RAM | Recommended cores / RAM |
 | --- | --- | --- | --- |
@@ -53,8 +68,9 @@ and red X indicators. Previewing does not save settings.
 
 ## Desktop transport
 
-Under Apache module PHP, the server allows 32 simultaneous SSE connections, with
-two per desktop username. PHP-FPM does not hold streaming workers: it returns
+Under Apache module PHP, Standard mode allows 32 simultaneous SSE connections,
+with two per desktop username. Lite mode allows four, with one per username.
+PHP-FPM does not hold streaming workers: it returns
 `stream_capacity_reached` with `reason: php_fpm_worker_pool` and a 300-second
 `Retry-After`, and clients use authenticated cursor-aware JSON polling.
 The reviewed app falls back to authenticated five-second JSON polling after a
@@ -66,9 +82,26 @@ Throttled responses include `Retry-After`.
 The identity and limiter stores support up to 1,000 clients. Test fleet size,
 burst rate and PBX call load together; this is not a 1,000-device certification.
 
+## Runtime audio temporary space
+
+Audio generation still uses `/tmp`, including Weather/test speech files and
+composition. Installer scratch can fall back to `/var/tmp`; that does not move
+these runtime files. The installer, General Settings and doctor now check both
+locations separately before reporting resource readiness.
+
+The runtime check preserves the configured `generated_media_min_free_mib`
+floor and reserves the supported 600-second render bound for each configured
+renderer. With the default 128 MiB floor this requires about 221 MiB free in
+`/tmp` for one renderer, or 499 MiB for four. Lite uses one renderer. A custom
+free-space floor increases this requirement. `/tmp` must be writable and
+traversable by the PBX account, with safe ownership and permissions, free inodes
+and a writable mount. An undersized mount is rejected before installation
+changes anything; increase it or free space and retry. Active rendering and
+other PBX workloads can still consume space after a successful preflight.
+
 ## Additional free workspace
 
-SLS checks **additional free headroom**, not total disk size or a fixed partition
+SLL checks **additional free headroom**, not total disk size or a fixed partition
 minimum. Existing managed trees are measured again on each check. The installer
 distinguishes runtime, preparation and installation budgets and reports every
 component, path, required byte count and inode requirement.
@@ -89,7 +122,7 @@ State writes, bounded backup growth and log compaction account for approximately
 283 MiB. These are workspaces, not installed size or disk quotas. Sparse/compressed
 recovery copies use logical size when larger than allocated size. Budgets add
 only when paths share a filesystem; separate or bind-mounted destinations are
-checked by device identity. Persistent SLS paths cannot use tmpfs.
+checked by device identity. Persistent SLL paths cannot use tmpfs.
 
 Scratch uses `/tmp`, or `/var/tmp` when the first is too small and the complete
 recalculated check passes. Dedicated mounts are checked directly; an unused parent
@@ -114,8 +147,9 @@ custom recordings and each file's first 15 minutes. Protected usage above target
 raises a current warning, cleared by a later healthy measurement. Incomplete
 inventories preserve files rather than risk deleting active media.
 
-Speech generation uses a shared bounded queue: one active job, eight waiting
-jobs and a 15-second wait by default. Media admission reserves workspace and
+Speech generation uses a shared bounded queue: Standard defaults to one active
+job and eight waiting jobs; Lite fixes one active job and at most two waiting
+jobs. Both default to a 15-second wait. Media admission reserves workspace and
 leaves at least 128 MiB free. Neither a cache target nor successful admission
 guarantees arbitrary workload capacity.
 

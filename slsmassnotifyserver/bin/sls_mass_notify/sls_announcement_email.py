@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from email.message import EmailMessage
 from email.policy import SMTP
@@ -44,6 +45,67 @@ class InputError(ValueError):
     pass
 
 
+class EmailAuthorizationBlocked(RuntimeError):
+    """Current policy refused the handoff before any MTA process started."""
+
+
+def validate_authorization(payload):
+    context = payload.get('authorization')
+    if context is None and 'authorization' not in payload:
+        return
+    if (not isinstance(context, dict) or set(context) - {'recipient_id', 'target_hashes', 'expires_at',
+            'schedule_deadline', 'api_credential_id', 'api_credential_revision', 'automation_context', 'weather_context'}
+            or context.get('recipient_id') != payload['recipient_id']
+            or not isinstance(context.get('target_hashes'), list) or not 1 <= len(context['target_hashes']) <= 3
+            or any(not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value) for value in context['target_hashes'])
+            or len(set(context['target_hashes'])) != len(context['target_hashes'])
+            or type(context.get('expires_at')) is not int or 'schedule_deadline' not in context
+            or (context['schedule_deadline'] is not None and type(context['schedule_deadline']) is not int)
+            or ('api_credential_id' in context and not isinstance(context['api_credential_id'], str))
+            or ('api_credential_revision' in context and (not isinstance(context['api_credential_revision'], str)
+                or not re.fullmatch(r'[a-f0-9]{64}', context['api_credential_revision'])))
+            or ('automation_context' in context and not isinstance(context['automation_context'], dict))
+            or ('weather_context' in context and not isinstance(context['weather_context'], dict))):
+        raise InputError('The email authorization context is invalid.')
+
+
+def current_email_authorization(payload):
+    context = payload.get('authorization')
+    if context is None:
+        return True  # Preserve the legacy standalone transport contract.
+    now = int(time.time())
+    if context['expires_at'] <= now or (context['schedule_deadline'] is not None and context['schedule_deadline'] <= now):
+        return False
+    try:
+        if 'weather_context' in context:
+            import sls_weather_channels as weather
+            source = {**context['weather_context'], 'channels': {'voice_recipient_ids': [], 'sms_recipient_ids': [], 'fingerprints': {}}}
+            if weather.authorize(weather.read_config(), source).get('status') != 'eligible':
+                return False
+        encoded = json.dumps({key: value for key, value in context.items() if key != 'weather_context'},
+                             separators=(',', ':'), allow_nan=False).encode('utf-8')
+        if len(encoded) > 16384:
+            return False
+        result = subprocess.run(['/usr/bin/php', '/usr/local/bin/sls_mass_notify/sls_mass_notify_delivery_authorization.php', '--email'],
+                    input=encoded, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    timeout=1, check=False, env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'})
+        if result.returncode != 0 or len(result.stdout) >= 256:
+            return False
+        reply = json.loads(result.stdout, object_pairs_hook=strict_object)
+        checked_at = int(time.time())
+        weather_expires_at = context.get('weather_context', {}).get('source_validity', {}).get('expires_at')
+        return (isinstance(reply, dict) and set(reply) == {'allowed', 'valid_until'}
+                and reply['allowed'] is True and type(reply['valid_until']) is int
+                and checked_at < reply['valid_until'] <= context['expires_at']
+                and (context['schedule_deadline'] is None or checked_at < context['schedule_deadline'])
+                and ('weather_context' not in context or (
+                    checked_at < context['weather_context'].get('deadline_at', 0)
+                    and type(weather_expires_at) is int and checked_at < weather_expires_at)))
+    except Exception:
+        # This function only reads policy; no MTA process has been started.
+        return False
+
+
 def checked_text(value, maximum, *, single_line=False, nonempty=True):
     if not isinstance(value, str) or (nonempty and not value.strip()):
         raise InputError('Required text is missing or has the wrong type.')
@@ -61,10 +123,11 @@ def checked_text(value, maximum, *, single_line=False, nonempty=True):
 
 
 def validate(payload):
-    if not isinstance(payload, dict) or set(payload) != FIELDS:
+    if not isinstance(payload, dict) or set(payload) not in (FIELDS, FIELDS | {'authorization'}):
         raise InputError('The announcement envelope has missing or unknown fields.')
     if not isinstance(payload['recipient_id'], str) or not re.fullmatch(r'email_[a-f0-9]{24}', payload['recipient_id']):
         raise InputError('The saved email recipient ID is invalid.')
+    validate_authorization(payload)
     address = checked_text(payload['address'], 254, single_line=True)
     if address != address.strip() or not valid_recipient(address):
         raise InputError('The destination email address is invalid.')
@@ -112,7 +175,7 @@ def build_message(payload, *, logo_paths=LOGO_PATHS):
     logo = read_logo(logo_paths, MAX_LOGO)
     if logo is not None:
         message.get_payload()[1].add_related(logo, maintype='image', subtype='png',
-                    cid='<sls-mass-notify-logo>', filename='Southland-Servers-Group.png', disposition='inline')
+                    cid='<sls-mass-notify-logo>', filename='Southland-Labs.png', disposition='inline')
     wire = message.as_bytes()
     if len(wire) > MAX_MIME:
         raise InputError('Rendered email exceeds the one MiB message limit.')
@@ -129,14 +192,30 @@ def submit(payload, *, sendmail=SENDMAIL, timeout=TIMEOUT, logo_paths=LOGO_PATHS
     wire = build_message(payload, logo_paths=logo_paths)
     claim = None
     try:
+        if not current_email_authorization(payload):
+            raise EmailAuthorizationBlocked()
         _mail_admission.reserve('alert', 1)
         created_at = int(datetime.fromisoformat(payload['created_at'].replace('Z', '+00:00')).timestamp())
-        claim = _cluster_guard.begin('email', payload['recipient_id'], payload,
+        # Policy metadata is mutable authority, outside the immutable delivery.
+        cluster_payload = {key: value for key, value in payload.items() if key != 'authorization'}
+        claim = _cluster_guard.begin('email', payload['recipient_id'], cluster_payload,
                                      delivery_id='email-' + __import__('hashlib').sha256(payload['message_id'].encode()).hexdigest(),
                                      created_at=created_at)
+        if not current_email_authorization(payload):
+            raise EmailAuthorizationBlocked()
         process = subprocess.Popen([str(sendmail), '-oi', '-f', payload['sender']['address'], '--', payload['address']],
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True, close_fds=True, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C'})
+    except EmailAuthorizationBlocked:
+        if claim is not None:
+            try:
+                _cluster_guard.finish(claim, uncertain=False, category='submission_suppressed', timeout=1)
+            except _cluster_guard.ClusterFenced:
+                pass  # The consumed claim is retained; no transport was started.
+        result = outcome(payload, 'rejected', 'email_authorization_changed',
+                         'Current policy no longer permits this email. No MTA process was started.', False)
+        result['submission_started'] = False
+        return result
     except _cluster_guard.ClusterFenced:
         return outcome(payload, 'rejected', 'cluster_authority_unavailable', 'Cluster exclusive authority is unavailable; no email process was started.', False)
     except _mail_admission.MailAdmissionBlocked as error:

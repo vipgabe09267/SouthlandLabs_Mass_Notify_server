@@ -27,6 +27,20 @@ REPAIR_PERMISSIONS = 'repair_piper_permissions_only() {' + VOICE_INSTALLER.split
 
 
 class PiperDependencyTests(unittest.TestCase):
+    def test_optional_voice_selection_does_not_create_root_only_runtime_bytecode(self):
+        block = VOICE_INSTALLER.split("<<'SLS_OPTIONAL_VOICES'\n", 1)[1].split('\nSLS_OPTIONAL_VOICES', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='sls-optional-voice-bytecode-') as directory:
+            root = Path(directory)
+            (root / 'sls_config_crypto.py').write_bytes((RUNTIME / 'sls_config_crypto.py').read_bytes())
+            program = block.replace('/usr/local/bin/sls_mass_notify', str(root)).replace(
+                '/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config', str(root / 'absent.config'))
+            result = subprocess.run(['/usr/bin/python3', '-I', '-'], input=program, capture_output=True,
+                                    text=True, timeout=5, umask=0o027)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, '')
+            self.assertFalse(any(root.rglob('__pycache__')),
+                             'Root-only bytecode makes the normal PBX capacity check report unreadable storage')
+
     def test_wrapper_admission_uses_exact_historical_hashes(self):
         block = VOICE_INSTALLER.split('install_piper_wrapper() {', 1)[1].split('\nensure_piper_install_directories() {', 1)[0]
         self.assertNotIn("grep -Eq 'sls_mass_notify/piper|SLS_Mass_Notifications_Plugin/piper'", block)
@@ -50,6 +64,22 @@ repair_piper_permissions_only
             result=subprocess.run(['/bin/bash','-c',script,'fixture',str(root)],capture_output=True,text=True,timeout=5)
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(binary.stat().st_mode&0o777,0o755)
+
+    @unittest.skipUnless(os.geteuid() == 0, 'Mount containment requires the isolated root fixture')
+    def test_runtime_permission_repair_rejects_nested_bind_mount_before_mutation(self):
+        with tempfile.TemporaryDirectory(prefix='sls-piper-mount-',dir='/root') as directory:
+            base=Path(directory);runtime=base/'runtime';mounted=runtime/'venv/lib/python';mounted.mkdir(parents=True)
+            outside=base/'outside';outside.mkdir();sentinel=outside/'private.py';sentinel.write_text('preserved')
+            sentinel.chmod(0o600);before=(sentinel.read_bytes(),sentinel.stat().st_uid,sentinel.stat().st_mode)
+            subprocess.run(['/usr/bin/mount','--bind',str(outside),str(mounted)],check=True,capture_output=True,text=True)
+            try:
+                script=VALIDATE_RUNTIME+'\n'+SECURE_RUNTIME+'\nPIPER_DIR="$1"; secure_piper_runtime_tree'
+                result=subprocess.run(['/bin/bash','-c',script,'fixture',str(runtime)],capture_output=True,text=True,timeout=5)
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('mount boundary',result.stderr)
+                self.assertEqual((sentinel.read_bytes(),sentinel.stat().st_uid,sentinel.stat().st_mode),before)
+            finally:
+                subprocess.run(['/usr/bin/umount',str(mounted)],check=True,capture_output=True,text=True)
 
     def test_post_restore_verifies_every_supported_voice_artifact(self):
         names = set(re.findall(r'\["([^"\n]+\.onnx(?:\.json)?)"\]', VOICE_INSTALLER))

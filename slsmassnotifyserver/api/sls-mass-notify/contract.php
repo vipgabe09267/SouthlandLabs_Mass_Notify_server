@@ -10,12 +10,17 @@ final class ControlContract
     public static function labsEnabled(array $settings): bool
     {
         $value = $settings['enterprise_labs'] ?? [];
-        return is_array($value) && !array_diff(array_keys($value), ['enabled']) && ($value['enabled'] ?? false) === true;
+        return ($settings['deployment_profile'] ?? 'standard') === 'standard'
+            && is_array($value) && !array_diff(array_keys($value), ['enabled']) && ($value['enabled'] ?? false) === true;
     }
 
     /** API readers see effective flags; settings storage and SSO stay independent. */
     public static function effectiveLabs(array $settings): array
     {
+        if (($settings['deployment_profile'] ?? 'standard') !== 'standard') {
+            $settings['enterprise_labs'] = ['enabled'=>false];
+            if (is_array($settings['enterprise_identity'] ?? null)) { $settings['enterprise_identity']['enabled'] = false; }
+        }
         if (!self::labsEnabled($settings)) {
             foreach (['enterprise_cluster','directory_sync','subscriber_browser','enterprise_integrations','enterprise_operations'] as $key) {
                 if (is_array($settings[$key] ?? null)) { $settings[$key]['enabled'] = $key === 'enterprise_integrations' ? '0' : false; }

@@ -32,7 +32,7 @@ Save policies for selected channels and at least two distinct enabled human acco
 
 Policy selectors are `phones`, `desktops`, `webhooks`, `voice_recipient_ids`, `email_recipient_ids`, `sms_recipient_ids`, `browser_recipient_ids` and `connector_ids`. Browser/connector delivery remains subject to its explicit enablement and sender restrictions; adding a review policy does not grant channel permission.
 
-All matching policies must be satisfied. Reviews expire after the configured 60–900 seconds. The final sender must be assigned to every policy, and every approving account must still have the same login identity and permission for the entire audience. Policy edits, recipient/content changes, identity replacement, revocation and clock rollback block submission.
+All matching policies must be satisfied. Reviews expire after the configured 60–900 seconds. The final sender must be assigned to at least one applicable policy, and every approving account must still have the same login identity and permission for the entire audience. Policy edits, recipient/content changes, identity replacement, revocation and clock rollback block submission.
 
 Submission records a permanent claim before admitting a delivery job. The worker rechecks approval before execution. An expired approval can therefore stop a delayed queue entry; it does not silently authorize a later send. Rejection closes only an unsubmitted review. Already sent messages remain immutable. An incident awaiting review must be submitted or rejected before another update can be sent.
 

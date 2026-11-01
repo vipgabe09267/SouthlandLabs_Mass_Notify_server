@@ -114,6 +114,7 @@ def hold(data, timeout=120, settings=False):
         # through exit. Acquire its exclusive lease FIRST so a supervisor cannot
         # load mutable code after the ordinary activity guard was established.
         entries = [(parent, 'enterprise-worker.lock', fcntl.LOCK_EX, True)]
+        entries += [(parent, 'phone-history-retention.lock', fcntl.LOCK_EX, True)]
         entries += [(parent, name, fcntl.LOCK_EX, True) for name in legacy + required + zones + tail]
         entries += [(paging, 'global-' + str(slot) + '.lock', fcntl.LOCK_EX, True) for slot in range(16)]
         # Both generations of audio writers are excluded during installation.
@@ -142,6 +143,10 @@ def hold(data, timeout=120, settings=False):
                 raise RuntimeError('unsafe worker lock: ' + name)
             if name == 'enterprise-worker.lock' and (info.st_mode & 0o7027 or info.st_size > 4096):
                 raise RuntimeError('enterprise worker lock permissions or size are unsafe')
+            if name == 'phone-history-retention.lock' and (info.st_size != 0
+                    or info.st_gid not in (0, account.pw_gid)
+                    or stat.S_IMODE(info.st_mode) not in (0o600, 0o640, 0o644)):
+                raise RuntimeError('phone history retention lock is unsafe')
             if name == 'mass-notifications.config.lock':
                 settings_metadata(fd, lock_parent, account)
             if name in ('audio-reservations.lock', 'audio-reservations.json'):
@@ -159,6 +164,13 @@ def hold(data, timeout=120, settings=False):
                     time.sleep(0.1)
             entry = os.stat(name, dir_fd=lock_parent, follow_symlinks=False)
             if (info.st_dev, info.st_ino) != (entry.st_dev, entry.st_ino): raise RuntimeError('worker lock identity changed')
+            if name == 'phone-history-retention.lock':
+                # Normalize only this verified, empty mutex under its exclusive
+                # lease. Existing busy lock metadata is never changed.
+                if info.st_uid != account.pw_uid or info.st_gid != account.pw_gid:
+                    os.fchown(fd, account.pw_uid, account.pw_gid)
+                if stat.S_IMODE(info.st_mode) != 0o640:
+                    os.fchmod(fd, 0o640)
             if name == 'mass-notifications.config.lock':
                 settings_metadata(fd, lock_parent, account)
         check_current_directory(data, parent)

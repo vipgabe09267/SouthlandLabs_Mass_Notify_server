@@ -8,7 +8,7 @@ trait SlsPhoneEventService
 	protected function phoneCollectorFailure(string $code): array
 	{
 		$messages = [
-			'phone_collector_helper_missing' => 'The installed phone collector helper is missing. Restore the signed runtime with SLS Repair Installation.',
+			'phone_collector_helper_missing' => 'The installed phone collector helper is missing. Restore the signed runtime with SLL Repair Installation.',
 			'phone_collector_helper_unsafe' => 'The phone collector helper has unsafe ownership, permissions or links. Preserve it for review; restore the verified signed runtime.',
 			'phone_collector_posix_unavailable' => 'This web PHP handler lacks posix_geteuid or posix_getpwnam. Enable the POSIX extension for the actual web PHP version and reload that PHP handler.',
 			'phone_collector_exec_disabled' => 'The web PHP handler disables exec. Review its disable_functions setting; CLI PHP and web PHP may use different configuration files.',
@@ -119,7 +119,7 @@ trait SlsPhoneEventService
 		return <<<'UNIT'
 # Managed by SLS Mass Notify Server
 [Unit]
-Description=SLS Mass Notify phone outcome collector
+Description=SLL Mass Notify Server phone outcome collector
 After=network.target asterisk.service freepbx.service
 StartLimitIntervalSec=0
 
@@ -205,7 +205,7 @@ UNIT;
 	/** FreePBX has generated manager_additional.conf and reloaded Asterisk. */
 	public function postReloadPhoneEventCollector()
 	{
-		// Asterisk/AMI may still be reconnecting. SLS faults must not prevent
+		// Asterisk/AMI may still be reconnecting. SLL faults must not prevent
 		// the host PBX from applying configuration or completing a restart.
 		$ready = false;
 		try {
@@ -216,7 +216,7 @@ UNIT;
 		}
 		if (!$ready) {
 			try {
-				@error_log(_('SLS Mass Notify: FreePBX reload continues while the phone receipt collector is unavailable. SLS phone audio requires a fresh authenticated AMI heartbeat. Check systemctl status sls-mass-notify-phone-events.service and journalctl -u sls-mass-notify-phone-events.service, then run SLS Repair Installation.'));
+				@error_log(_('SLL Mass Notify Server: FreePBX reload continues while the phone receipt collector is unavailable. SLL phone audio requires a fresh authenticated AMI heartbeat. Check systemctl status sls-mass-notify-phone-events.service and journalctl -u sls-mass-notify-phone-events.service, then run SLL Repair Installation.'));
 			} catch (\Throwable $error) {
 				// A logging failure must not abort FreePBX reload either.
 			}

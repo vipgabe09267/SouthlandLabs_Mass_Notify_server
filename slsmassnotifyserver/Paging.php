@@ -230,7 +230,7 @@ trait SlsLivePaging
         $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
         $panic=method_exists($this,'getPanicExtensionUsage') ? $this->getPanicExtensionUsage($extensions,$settings) : [];
         if ($paging['enabled'] !== '1' || ($extensions !== true && !in_array($paging['extension'], array_map('strval', (array)$extensions), true))) { return $panic; }
-        return $panic + [$paging['extension'] => ['description' => _('SLS live paging menu'), 'status' => 'INUSE',
+        return $panic + [$paging['extension'] => ['description' => _('SLL live paging menu'), 'status' => 'INUSE',
             'edit_url' => 'config.php?display=slsmassnotifyserver_paging']];
     }
 
@@ -456,7 +456,7 @@ PY;
         if ($paging['enabled'] !== '1' || ($paging['external_access'] ?? '0') !== '1'
             || !array_filter($paging['groups'], static fn($r) => ($r['allow_external'] ?? '0') === '1')) { return []; }
         return [['destination' => 'sls-live-paging-external,s,1',
-            'description' => _('SLS external paging · group PIN required')]];
+            'description' => _('SLL external paging · group PIN required')]];
     }
 
     public function doDialplanHook(&$ext, $engine, $priority)

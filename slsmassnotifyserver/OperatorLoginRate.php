@@ -7,6 +7,9 @@ if (!class_exists('SlsAtomicJson', false)) { require_once __DIR__.'/bin/sls_mass
 final class OperatorLoginRate
 {
     private const MAX_BYTES=524288;
+    private const MAX_SOURCES=512;
+    private const OVERFLOW_LIMIT=6;
+    private const OVERFLOW_WINDOW=300;
 
     private static function safe(string $path, array $meta, bool $lock=false): void
     {
@@ -25,13 +28,15 @@ final class OperatorLoginRate
         // Validate it under the permanent lock below, rather than an unlocked snapshot.
         $lockPath=$path.'.lock';clearstatcache(true,$lockPath);$named=@lstat($lockPath);
         if($named){self::safe($lockPath,$named,true);}
-        return \SlsAtomicJson::transaction($path,['schema'=>1,'last_time'=>0,'ips'=>[]],static function(array $state)use($path,$work):array{
+        return \SlsAtomicJson::transaction($path,['schema'=>1,'last_time'=>0,'ips'=>[],
+            'overflow'=>['failures'=>[],'pending'=>[]]],static function(array $state)use($path,$work):array{
             // Preserve this limiter's stricter runtime-account ownership rule.
             foreach([$path=>false,$path.'.lock'=>true] as $file=>$isLock){
                 clearstatcache(true,$file);$named=@lstat($file);if($named){self::safe($file,$named,$isLock);}
             }
-            if (!is_array($state) || array_diff(array_keys($state),['schema','last_time','ips']) || ($state['schema']??null)!==1
-                || !is_int($state['last_time']??null) || !is_array($state['ips']??null) || count($state['ips'])>512) {
+            if (!is_array($state) || array_diff(array_keys($state),['schema','last_time','ips','overflow']) || ($state['schema']??null)!==1
+                || !is_int($state['last_time']??null) || !is_array($state['ips']??null) || count($state['ips'])>self::MAX_SOURCES
+                || (isset($state['overflow']) && !is_array($state['overflow']))) {
                 throw new \RuntimeException('operator_failure_storage_invalid');
             }
             $result=$work($state);
@@ -43,6 +48,32 @@ final class OperatorLoginRate
     {
         if($now<0 || $now+30<$state['last_time']){throw new \RuntimeException('operator_failure_clock_reversed');}
         $now=max($now,$state['last_time']);$state['last_time']=$now;
+        $state['overflow']??=['failures'=>[],'pending'=>[]];
+        $overflow=&$state['overflow'];
+        if(array_diff(array_keys($overflow),['failures','pending'])
+            ||!is_array($overflow['failures']??null)||!array_is_list($overflow['failures'])
+            ||count($overflow['failures'])>self::OVERFLOW_LIMIT
+            ||!is_array($overflow['pending']??null)||count($overflow['pending'])>self::OVERFLOW_LIMIT){
+            throw new \RuntimeException('operator_failure_storage_invalid');
+        }
+        foreach($overflow['failures'] as $index=>$failure){
+            if(!is_array($failure)||array_diff(array_keys($failure),['at','source'])
+                ||!is_int($failure['at']??null)||$failure['at']<0||$failure['at']>$now
+                ||!is_string($failure['source']??null)||!preg_match('/^[a-f0-9]{64}$/D',$failure['source'])){
+                throw new \RuntimeException('operator_failure_storage_invalid');
+            }
+            if($failure['at']<=$now-self::OVERFLOW_WINDOW){unset($overflow['failures'][$index]);}
+        }
+        $overflow['failures']=array_values($overflow['failures']);
+        foreach($overflow['pending'] as $id=>$pending){
+            if(!preg_match('/^[a-f0-9]{32}$/D',(string)$id)||!is_array($pending)
+                ||array_diff(array_keys($pending),['at','source'])||!is_int($pending['at']??null)
+                ||$pending['at']<0||$pending['at']>$now||!is_string($pending['source']??null)
+                ||!preg_match('/^[a-f0-9]{64}$/D',$pending['source'])){
+                throw new \RuntimeException('operator_failure_storage_invalid');
+            }
+            if($pending['at']<=$now-60){unset($overflow['pending'][$id]);}
+        }
         foreach($state['ips'] as $key=>&$row){
             if(!preg_match('/^[a-f0-9]{64}$/D',(string)$key)||!is_array($row)||array_diff(array_keys($row),['failures','pending','locked_until'])
                 ||!is_array($row['failures']??null)||!array_is_list($row['failures'])||count($row['failures'])>20
@@ -76,7 +107,18 @@ final class OperatorLoginRate
                 }
             }
             if($retry){return ['retry_after'=>$retry,'reservation'=>''];}
-            if(!isset($state['ips'][$key])&&count($state['ips'])>=512){throw new \RuntimeException('operator_failure_storage_full');}
+            if(!isset($state['ips'][$key])&&count($state['ips'])>=self::MAX_SOURCES){
+                $overflow=&$state['overflow'];
+                if(count($overflow['failures'])+count($overflow['pending'])>=self::OVERFLOW_LIMIT){
+                    $until=$overflow['failures']
+                        ? min(array_column($overflow['failures'],'at'))+self::OVERFLOW_WINDOW : $now+1;
+                    if($overflow['pending']){$until=min($until,min(array_column($overflow['pending'],'at'))+60);}
+                    return ['retry_after'=>max(1,$until-$now),'reservation'=>''];
+                }
+                $id=bin2hex(random_bytes(16));
+                $overflow['pending'][$id]=['at'=>$now,'source'=>$key];
+                return ['retry_after'=>0,'reservation'=>$id];
+            }
             $id=bin2hex(random_bytes(16));$row['pending'][$id]=$now;$state['ips'][$key]=$row;
             return ['retry_after'=>0,'reservation'=>$id];
         });
@@ -87,7 +129,15 @@ final class OperatorLoginRate
         $key=self::key($ip);
         self::update($path,static function(array &$state)use($key,$id,$failed,$now):void{
             $now=self::prepare($state,$now);$row=$state['ips'][$key]??null;
-            if(!$row||!isset($row['pending'][$id])){throw new \RuntimeException('operator_failure_reservation_expired');}
+            if(!$row||!isset($row['pending'][$id])){
+                $pending=$state['overflow']['pending'][$id]??null;
+                if(!is_array($pending)||!hash_equals($pending['source'],$key)){
+                    throw new \RuntimeException('operator_failure_reservation_expired');
+                }
+                unset($state['overflow']['pending'][$id]);
+                if($failed){$state['overflow']['failures'][]=['at'=>$now,'source'=>$key];}
+                return;
+            }
             unset($row['pending'][$id]);if($failed){$row['failures'][]=$now;if(count($row['failures'])>=20){$row['locked_until']=$now+86400;}}
             $state['ips'][$key]=$row;
         });
@@ -98,6 +148,7 @@ final class OperatorLoginRate
     {
         $key=self::key($ip);self::update($path,static function(array &$state)use($key,$now):void{
             self::prepare($state,$now);
+            if(!isset($state['ips'][$key])&&count($state['ips'])>=self::MAX_SOURCES){throw new \RuntimeException('operator_failure_storage_full');}
             if(isset($state['ips'][$key])){$state['ips'][$key]['failures']=[];$state['ips'][$key]['locked_until']=0;}
         });
     }

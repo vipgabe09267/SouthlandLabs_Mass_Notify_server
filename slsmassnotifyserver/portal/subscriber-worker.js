@@ -7,13 +7,23 @@ function receiptProof(value) {
 }
 async function softwareReceipt(proof, stage) {
     if (!receiptProof(proof)) return;
-    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 3000);
-    try {
-        await fetch('/mass-notify/subscriber.php', {method: 'POST', credentials: 'omit', cache: 'no-store', redirect: 'error',
-            referrerPolicy: 'no-referrer', signal: controller.signal, headers: {'X-SLS-Browser-Receipt':'1'},
-            body: new URLSearchParams({subscriber_action:'push_receipt', ...proof, stage})});
-    } catch (_) { /* Missing software evidence never causes an alert replay. */ }
-    finally { clearTimeout(timer); }
+    const retryable = status => [408, 425, 429].includes(status) || status >= 500;
+    for (let attempt = 0; attempt < 3 && proof.expires_at > Math.floor(Date.now() / 1000); attempt++) {
+        const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 3000);
+        let response = null;
+        try {
+            response = await fetch('/mass-notify/subscriber.php', {method: 'POST', credentials: 'omit', cache: 'no-store', redirect: 'error',
+                referrerPolicy: 'no-referrer', signal: controller.signal, headers: {'X-SLS-Browser-Receipt':'1'},
+                body: new URLSearchParams({subscriber_action:'push_receipt', ...proof, stage})});
+        } catch (_) { /* A network or timeout failure is transient within this bounded loop. */ }
+        finally { clearTimeout(timer); }
+        if (response && response.ok) return;
+        if (response && !retryable(response.status)) return;
+        if (attempt < 2 && proof.expires_at > Math.floor(Date.now() / 1000)) {
+            await new Promise(resolve => setTimeout(resolve, 100 * (2 ** attempt)));
+        }
+    }
+    // Missing software evidence never causes an alert replay.
 }
 self.addEventListener('push', event => {
     event.waitUntil((async () => {
@@ -36,12 +46,22 @@ self.addEventListener('push', event => {
         if (pendingDisplays.has(alert.event_id)) return pendingDisplays.get(alert.event_id);
         const display = (async () => {
             if (alert.expires_at <= Math.floor(Date.now() / 1000)) return;
-            const received = softwareReceipt(alert.browser_receipt, 'received');
-            await self.registration.showNotification('SLS · ' + (alert.is_test ? 'TEST · ' : '') + alert.title,
-                {body: alert.message, tag: alert.event_id, data: {expires_at: alert.expires_at, event_id: alert.event_id,
-                    browser_receipt: receiptProof(alert.browser_receipt) ? alert.browser_receipt : null}});
-            await Promise.allSettled([received, softwareReceipt(alert.browser_receipt, 'displayed')]);
+            // Keep the existing expiry-only cache format. A worker that stops
+            // after this claim cannot automatically replay an uncertain display.
             await ledger.put(key, new Response(String(alert.expires_at)));
+            if (alert.expires_at <= Math.floor(Date.now() / 1000)) return;
+            const received = softwareReceipt(alert.browser_receipt, 'received');
+            try {
+                await self.registration.showNotification('SLL · ' + (alert.is_test ? 'TEST · ' : '') + alert.title,
+                    {body: alert.message, tag: alert.event_id, data: {expires_at: alert.expires_at, event_id: alert.event_id,
+                        browser_receipt: receiptProof(alert.browser_receipt) ? alert.browser_receipt : null}});
+            } catch (error) {
+                // Explicit API rejection precedes display. Permit a retry only
+                // when removal succeeds; unavailable storage retains the claim.
+                try { await ledger.delete(key); } catch (_) {}
+                throw error;
+            }
+            await Promise.allSettled([received, softwareReceipt(alert.browser_receipt, 'displayed')]);
         })();
         pendingDisplays.set(alert.event_id, display);
         try { await display; } finally { pendingDisplays.delete(alert.event_id); }

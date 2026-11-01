@@ -213,7 +213,8 @@ final class ApiSecurity
         if ($secret === '' || strlen($secret) > 128) { return null; }
         $legacy = $control['api_key'] ?? '';
         if (is_string($legacy) && $legacy !== '' && hash_equals($legacy, $secret)) {
-            return ['id' => 'legacy', 'name' => 'Legacy Control API', 'scopes' => self::LEGACY_SCOPES, 'audience' => self::audience(['unrestricted' => true])];
+            $revision = self::legacyRevision($control);
+            return $revision === null ? null : self::legacyPrincipal($revision);
         }
         try { $rows = self::credentials($control['credentials'] ?? []); } catch (\DomainException $e) { return null; }
         $digest = hash('sha256', $secret); $match = null;
@@ -223,9 +224,35 @@ final class ApiSecurity
         return $match;
     }
 
-    public static function currentCredential(array $settings, string $id): ?array
+    /**
+     * A non-secret identity for one exact legacy key generation. Persisting
+     * this marker lets queued work notice rotation without retaining the key.
+     */
+    public static function legacyRevision(array $control): ?string
     {
-        if ($id === 'legacy') { return null; } // Legacy jobs keep their existing behavior; never promote a missing named key.
+        $legacy = $control['api_key'] ?? null;
+        if (!is_string($legacy) || $legacy === '' || strlen($legacy) > 128) { return null; }
+        return hash('sha256', "SLS Mass Notify legacy Control API authority v1\0" . $legacy);
+    }
+
+    private static function legacyPrincipal(string $revision): array
+    {
+        return ['id' => 'legacy', 'name' => 'Legacy Control API',
+            'scopes' => self::LEGACY_SCOPES,
+            'audience' => self::audience(['unrestricted' => true]),
+            'authority_revision' => $revision];
+    }
+
+    public static function currentCredential(array $settings, string $id, ?string $revision = null): ?array
+    {
+        if ($id === 'legacy') {
+            $control = $settings['control_api'] ?? null;
+            if (!is_array($control) || empty($control['enabled']) || !is_string($revision)
+                || !preg_match('/^[a-f0-9]{64}$/D', $revision)) { return null; }
+            $current = self::legacyRevision($control);
+            return $current !== null && hash_equals($current, $revision)
+                ? self::legacyPrincipal($current) : null;
+        }
         if (array_key_exists('operator_access', $settings)) {
             if (!is_array($settings['operator_access'])) { return null; }
             $local = dirname(__DIR__, 2) . '/OperatorAccess.php';
@@ -235,7 +262,8 @@ final class ApiSecurity
             // after revocation or if a malformed file contains an ID collision.
             foreach ($settings['operator_access']['accounts'] ?? [] as $row) {
                 if (($row['id'] ?? '') === $id) {
-                    return $operator !== null && OperatorAccess::localIdentityCurrent($operator) ? $operator : null;
+                    return $operator !== null && OperatorAccess::localIdentityCurrent($operator)
+                        && OperatorAccess::activeAccount($operator) ? $operator : null;
                 }
             }
         }

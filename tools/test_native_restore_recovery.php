@@ -57,7 +57,7 @@ namespace {
 	foreach (['commitNativeRestorePayload', 'backupNativeRestoreTargets', 'restoreNativeRestoreTargets',
 		'writeNativeSnapshotFile', 'syncNativeDirectory', 'setNativeFileMetadata', 'nativeRestoreTargetLimit',
 		'activateNativeRestoreFile', 'removeNativeRestoreTarget', 'readNativeBackupFile', 'removeNativeBackupDirectory',
-		'unlinkNamedFileIfIdentity'] as $name) {
+		'unlinkNamedFileIfIdentity', 'normalizeDeploymentProfile', 'assertDeploymentProfileUnchanged'] as $name) {
         $method = $reflection->getMethod($name);
         $methods .= implode('', array_slice($lines, $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1));
     }
@@ -83,7 +83,7 @@ namespace {
             function snapshotRead($path,$max=1024){return $this->readNativeBackupFile($path,$max,"fixture read refused");}
             function snapshotWrite($path,$body){return $this->writeNativeSnapshotFile($path,$body,0600);}
 			function cleanup($path){return $this->removeNativeBackupDirectory($path);}
-            function run(){ $this->commitNativeRestorePayload("{\"enabled\":\"0\"}\n", null, false, [], "fixture", []); }
+            function run($configRaw="{\"enabled\":\"0\"}\n"){ $this->commitNativeRestorePayload($configRaw, null, false, [], "fixture", []); }
             function ensurePluginDataDir(){}
             function validateNativeBackupConfig($raw){return json_decode($raw,true,32,JSON_THROW_ON_ERROR);}
             function normalizeNativeBackupTransactionId($id){return $id;}
@@ -106,6 +106,17 @@ namespace {
     $module = new SlsNativeRecoveryFixture\Module();
     $original = "{\"enabled\":\"1\"}\n";
     try {
+		file_put_contents($root . '/live/mass-notifications.config', "{\"enabled\":\"1\",\"deployment_profile\":\"standard\"}\n");
+		chmod($root . '/live/mass-notifications.config', 0640);
+		$profileRefused = false;
+		try {
+			$module->run("{\"enabled\":\"0\",\"deployment_profile\":\"lite\"}\n");
+		} catch (DomainException $error) {
+			$profileRefused = str_contains($error->getMessage(), '--lite');
+		}
+		recoveryCheck($profileRefused, 'Native restore accepted a deployment-profile change.');
+		recoveryCheck(json_decode((string)file_get_contents($root . '/live/mass-notifications.config'), true)['deployment_profile'] === 'standard',
+			'Deployment-profile rejection changed the active configuration.');
         $file = $root . '/io-fixture';
         $GLOBALS['native_short_write'] = true;
         $module->snapshotWrite($file, 'complete bytes despite short writes');

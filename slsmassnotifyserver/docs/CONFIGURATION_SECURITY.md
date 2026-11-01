@@ -1,8 +1,8 @@
-# SLS configuration security and recovery
+# SLL configuration security and recovery
 
 ## Central configuration
 
-SLS stores active settings in `/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config`. Staged changes use `mass-notifications.pending.config` until FreePBX applies them. These files contain the same settings schema and use AES-256-GCM encryption with a fresh 96-bit nonce for each write. Configuration envelopes authenticate the format and key identifier as additional data. Authentication or key failures stop loading; SLS never replaces a damaged encrypted configuration with defaults.
+SLL stores active settings in `/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config`. Staged changes use `mass-notifications.pending.config` until FreePBX applies them. These files contain the same settings schema and use AES-256-GCM encryption with a fresh 96-bit nonce for each write. Configuration envelopes authenticate the format and key identifier as additional data. Authentication or key failures stop loading; SLL never replaces a damaged encrypted configuration with defaults.
 
 The decoded configuration limit is 2 MiB. The encrypted file limit is 3 MiB. Settings files remain private regular files owned by `asterisk`, with mode `0640`. Journal files contain operational state, such as receipts and delivery attempts; they are separate from configuration.
 
@@ -10,17 +10,17 @@ Migration also encrypts retained legacy JSON settings, including `/var/lib/aster
 
 Older shell settings (`mass-notifications.conf`, `/var/lib/asterisk/slsmassnotifyserver.conf` or a historical `config.ini`) are not settings sources in this release. If one remains from an older installation, preserve it privately for administrator review. Restrict access to the administrator and PBX service account, verify its values against the central configuration, and store any retained evidence in an encrypted archive. Do not source or execute it, publish it or include it in an unprotected backup.
 
-Encryption protects stored configuration against disclosure without its key. It cannot protect secrets from a compromised PBX runtime account: that account needs the key to run SLS. Protect the host, administrative accounts and backup storage accordingly.
+Encryption protects stored configuration against disclosure without its key. It cannot protect secrets from a compromised PBX runtime account: that account needs the key to run SLL. Protect the host, administrative accounts and backup storage accordingly.
 
 ## Encryption keys
 
 The root-controlled keyring is `/etc/sls-mass-notify/config-keys.json`. Its directory is owned by `root:asterisk` with mode `0750`; the file is owned by `root:asterisk` with mode `0640`. PHP and worker processes can read keys but cannot replace them. The keyring is outside `/etc/asterisk`, whose permissions vary between FreePBX installations.
 
-SLS validates ownership, file type, permissions, inode identity and path components before reading key material. Key maintenance runs through the existing root maintenance path. It opens no listening port and has no web endpoint that creates or rotates keys.
+SLL validates ownership, file type, permissions, inode identity and path components before reading key material. Key maintenance runs through the existing root maintenance path. It opens no listening port and has no web endpoint that creates or rotates keys.
 
 Keys rotate after 365 days. Routine checks use a protected success marker to avoid scanning configuration backups more than once per day; a due key bypasses that cache. A busy announcement or settings operation defers maintenance until the next run. Rotation keeps retired keys so older encrypted files remain readable. Keyring changes are synchronized before new configuration files are activated. If a later file write fails, both old and new ciphertext remain readable and the next maintenance run completes migration.
 
-Unstarted emergency-call observations retain the SHA-256 fingerprint of the exact configuration file seen when the dial attempt occurred. Any subsequent storage rewrite, including encryption migration or key rotation, invalidates those observations even when decoded settings are unchanged. SLS records the rejection without inferring new recipients or retransmitting the observation automatically.
+Unstarted emergency-call observations retain the SHA-256 fingerprint of the exact configuration file seen when the dial attempt occurred. Any subsequent storage rewrite, including encryption migration or key rotation, invalidates those observations even when decoded settings are unchanged. SLL records the rejection without inferring new recipients or retransmitting the observation automatically.
 
 Do not delete retired keys manually. The keyring permits 128 retained keys and stops rotation with an actionable error if that limit is reached. Any retirement procedure must account for backups retained outside the PBX.
 
@@ -34,7 +34,7 @@ Restore verifies the file inventory, sizes, SHA-256 hashes, protected extraction
 
 Restore keeps historical delivery evidence out of executable queues. Past schedule occurrences are marked uncertain instead of replayed. Weather, lightning, SMS, external calling and automatic triggers require review before rearming. This prevents an old backup from sending duplicate alerts or restoring an outdated spending allowance.
 
-For a portable configuration export, use the password-protected export in SLS administration. Existing portable exports use Argon2id and XChaCha20-Poly1305; their format remains compatible. Keep the passphrase separately. A plain export contains credentials and should only be used with controlled storage. Export reminders do not send email or automatically disclose configuration.
+For a portable configuration export, use the password-protected export in SLL administration. Existing portable exports use Argon2id and XChaCha20-Poly1305; their format remains compatible. Keep the passphrase separately. A plain export contains credentials and should only be used with controlled storage. Export reminders do not send email or automatically disclose configuration.
 
 ## Verification
 

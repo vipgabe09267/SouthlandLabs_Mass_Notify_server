@@ -5,7 +5,7 @@ namespace SLS\MassNotify;
 final class BetaNotice
 {
     public const TITLE = 'DANGER! NON-PRODUCTION READY SOFTWARE.';
-    public const BODY = 'This software is in beta testing and is not intended for production environments. All source code is free and open source, licensed under AGPLv3 or later. Expect bugs and report them, along with suggestions, in the Discord server. Do not rely on SLS Mass Notifications to relay critical or urgent information. Use it only in noncritical, nonurgent testing environments.';
+    public const BODY = 'This software is in beta testing and is not intended for production environments. All source code is free and open source, licensed under AGPLv3 or later. Expect bugs and report them, along with suggestions, in the Discord server. Do not rely on SLL Mass Notify Server to relay critical or urgent information. Use it only in noncritical, nonurgent testing environments.';
     public const DELAY_SECONDS = 5;
     public const MAX_RECEIPTS = 1024;
 

@@ -26,11 +26,12 @@ $tip=static function(string $text) use($escape): string {
 };
 $input=static function(string $name,string $label,string $type='text') use($config,$escape,$fieldHelp,$tip): void {
  [$example,$help]=$fieldHelp[$name];
- echo '<label class="sls-cluster-field"><span>'.$escape($label).' '.$tip($help).'</span><input class="form-control" type="'.$escape($type).'" name="'.$escape($name).'" placeholder="'.$escape($example).'" value="'.$escape($config[$name]??'').'" autocomplete="off"><small class="help-block">'.$escape($help).'</small></label>';
+ $id='sls-cluster-field-'.$name;
+ echo '<label class="sls-cluster-field"><span><span id="'.$escape($id).'-label">'.$escape($label).'</span> '.$tip($help).'</span><input class="form-control" type="'.$escape($type).'" name="'.$escape($name).'" aria-labelledby="'.$escape($id).'-label" aria-describedby="'.$escape($id).'-help" placeholder="'.$escape($example).'" value="'.$escape($config[$name]??'').'" autocomplete="off"><small id="'.$escape($id).'-help" class="help-block">'.$escape($help).'</small></label>';
 };
 ?>
 <section id="sls-cluster-panel">
- <header class="sls-cluster-heading"><h2>Notification continuity and remote sites</h2><p>Connect prepared SLS nodes and manage approved shared settings.</p></header>
+ <header class="sls-cluster-heading"><h2>Notification continuity and remote sites</h2><p>Connect prepared SLL nodes and manage approved shared settings.</p></header>
  <div class="panel-body">
   <p class="sls-ent-notice">Experimental: keep continuity and mirroring disabled on production systems. A standalone PBX needs no peers. Remote phones need a local PBX; a Linux or Pi edge supports approved displays and cached audio.</p>
   <form id="sls-cluster-config">

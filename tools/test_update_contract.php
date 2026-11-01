@@ -28,7 +28,7 @@ if (strpos($updateScript, 'CURRENT_VERSION="${SLS_MASS_NOTIFY_CURRENT_VERSION:-'
 	update_contract_fail('Updater current version does not match module.xml.');
 }
 foreach ([
-	'readonly GITHUB_UPDATES_REPOSITORY="vipgabe09267/SouthlandServers_Mass_Notify_server"',
+	'readonly GITHUB_UPDATES_REPOSITORY="vipgabe09267/SouthlandLabs_Mass_Notify_server"',
 	'https://api.github.com/repos/{repo}/releases',
 	're.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest)',
 	'installer_url": f"https://raw.githubusercontent.com/{repo}/{installer_commit}/tools/install_release.sh"',
@@ -118,7 +118,7 @@ if ($fixture->requestManualUpdate()['success'] || !$fixture->requestUpdateCheck(
     || end($fixture->requests) !== ['/fixture/update.request', 'check-only']) {
     update_contract_fail('Check-only and installation requests were not kept separate.');
 }
-foreach (['value="check_updates" formnovalidate', "Retry update check",
+foreach (['value="check_updates" form="sls-update-action-form" formnovalidate', "Retry update check",
          "button.disabled = false", "checkAgain.textContent"] as $control) {
     if (strpos($settingsView, $control) === false) {
         update_contract_fail('The update controls cannot recover after a failed or blocked form submission.');

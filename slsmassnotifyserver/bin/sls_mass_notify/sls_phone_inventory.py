@@ -68,7 +68,7 @@ def start_refresh_worker(directory=DATA, *, refresher=None):
                 (refresher or refresh)(directory)
             except Exception:
                 if time.monotonic() - last_error >= 60:
-                    print('SLS phone display inventory refresh failed; the display snapshot will expire. Check the collector journal and protected configuration.', file=sys.stderr)
+                    print('SLL phone display inventory refresh failed; the display snapshot will expire. Check the collector journal and protected configuration.', file=sys.stderr)
                     last_error = time.monotonic()
             stop.wait(30)
     thread = threading.Thread(target=work, name='sls-phone-display', daemon=True)

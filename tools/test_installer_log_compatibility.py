@@ -295,7 +295,7 @@ class InstallerLogCompatibility(unittest.TestCase):
         self.assertEqual(result.returncode, 79, result.stderr)
         contents = path.read_text()
         self.assertTrue(contents.startswith('existing diagnostic\n'))
-        self.assertIn('SLS Mass Notify installation started:', contents)
+        self.assertIn('SLL Mass Notify Server installation started:', contents)
         self.assertTrue(contents.endswith('preflight fixture\nafter chown\n'))
 
     def test_failed_coordination_does_not_open_or_alter_existing_log(self):

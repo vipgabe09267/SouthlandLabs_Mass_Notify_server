@@ -4,6 +4,7 @@ namespace SLS\MassNotify;
 require_once __DIR__.'/EnterpriseIntegrationsStore.php';
 require_once __DIR__.'/EnterpriseIntegrationsProvider.php';
 require_once __DIR__.'/EnterprisePublicWarning.php';
+require_once __DIR__.'/AutomationInputs.php';
 
 final class EnterpriseIntegrationsService
 {
@@ -123,7 +124,7 @@ final class EnterpriseIntegrationsService
         });
     }
     public static function smsPrompt(array $binding): string
-    { return $binding?' Reply SLS '.$binding['token'].' SAFE, HELP, or RECEIVED.':''; }
+    { return $binding?' Reply SLL '.$binding['token'].' SAFE, HELP, or RECEIVED.':''; }
     public function smsResponse(array $config,array $event,callable $current,callable $respond): array
     {
         if (($config['enabled']??'0')!=='1') { return ['state'=>'ignored']; }
@@ -132,7 +133,8 @@ final class EnterpriseIntegrationsService
         }
         if (!$event['inbound'] || $event['opt_out']) { return ['state'=>'ignored']; }
         $body=$event['body']??'';
-        if (!is_string($body) || !preg_match('/^SLS ([A-F0-9]{12}) (SAFE|HELP|RECEIVED)$/Di',trim($body),$match)) { return ['state'=>'ignored']; }
+        // Outstanding messages retain their original token and consent binding.
+        if (!is_string($body) || !preg_match('/^(?:SLL|SLS) ([A-F0-9]{12}) (SAFE|HELP|RECEIVED)$/Di',trim($body),$match)) { return ['state'=>'ignored']; }
         $provider=$event['provider']??null;$from=$event['from']??null;$eventId=$event['event_id']??null;
         if (!is_string($provider)||!in_array($provider,['twilio','telnyx'],true)||!is_string($from)||!preg_match('/^\+[1-9][0-9]{1,14}$/D',$from)
             ||!is_string($eventId)||$eventId===''||strlen($eventId)>200||preg_match('/[\x00-\x1f\x7f]/',$eventId)) {
@@ -178,9 +180,10 @@ final class EnterpriseIntegrationsService
         return ['state'=>'recorded','incident_id'=>$binding['incident_id'],'person_id'=>$binding['person_id'],'response'=>$response];
     }
     /** Caller must have checked the existing exact-body HMAC and verified HTTPS. */
-    public function heartbeat(array $config,array $rule,array $input): array
+    public function heartbeat(array $config,array $rule,array $input,?array $authentication=null): array
     {
         $input=IncidentConfig::object($input,['operation','request_id','sent_at','expires_at','is_test'],'Sensor heartbeat'); $now=$this->now();
+        if ($authentication!==null && !AutomationInputs::authenticateProof($rule,$authentication,$now)) { throw new \DomainException('Trigger authentication expired or its enrollment changed.'); }
         if (($config['enabled']??'0')!=='1' || ($rule['kind']??'')!=='sensor' || empty($rule['enabled']) || ($input['operation']??'')!=='heartbeat'
             || !is_int($input['sent_at']??null) || abs($input['sent_at']-$now)>60 || !is_int($input['expires_at']??null)
             || $input['expires_at']<=$now || $input['expires_at']>$input['sent_at']+300 || !is_bool($input['is_test']??null)) { throw new \DomainException('Heartbeat source is disabled, expired or invalid.'); }

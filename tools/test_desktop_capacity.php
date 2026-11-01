@@ -4,9 +4,12 @@ require_once dirname(__DIR__) . '/slsmassnotifyserver/DesktopCapacity.php';
 class CapacityFixture {
     use \FreePBX\modules\SlsDesktopCapacity;
     public $calls = 0;
-    public $result = ['eligible_limit' => 100, 'eligible_phone_limit' => 50, 'errors' => []];
+    public $profile = 'standard';
+    public $result = ['schema' => 1, 'deployment_profile' => 'standard', 'eligible_limit' => 100, 'eligible_phone_limit' => 50, 'errors' => []];
     public $lastLimits = [];
-    protected function checkDesktopCapacityResources($limit, $phoneLimit = 25) { $this->calls++; $this->lastLimits = [$limit, $phoneLimit]; return $this->result; }
+    public $lastProfile = '';
+    public function getActiveSettings() { return ['deployment_profile' => $this->profile]; }
+    protected function checkDesktopCapacityResources($limit, $phoneLimit = 25, $profile = 'standard') { $this->calls++; $this->lastLimits = [$limit, $phoneLimit]; $this->lastProfile = $profile; return $this->result; }
     public function validate(array $settings) { return $this->validateDesktopCapacityConfig($settings); }
     public function save($limit, $count, $old = 50, $phones = 25, $oldPhones = 25) {
         $this->assertDesktopCapacityChange(['desktop_client_limit' => $limit, 'desktop_clients' => array_fill(0, $count, []), 'phone_device_limit' => $phones], ['desktop_client_limit' => $old, 'phone_device_limit' => $oldPhones]);
@@ -17,6 +20,11 @@ if ($fixture->validate(['desktop_clients' => array_fill(0, 25, [])])
     || !$fixture->validate(['desktop_clients' => array_fill(0, 26, [])])
     || $fixture->validate(['desktop_client_limit' => 50, 'desktop_clients' => array_fill(0, 50, [])])) {
     throw new RuntimeException('Default25 admission or explicit existing capacity was not preserved.');
+}
+if (!$fixture->validate(['deployment_profile'=>'lite','desktop_client_limit'=>26,'phone_device_limit'=>25])
+    || !$fixture->validate(['deployment_profile'=>'lite','desktop_client_limit'=>25,'phone_device_limit'=>26])
+    || $fixture->validate(['deployment_profile'=>'lite','desktop_client_limit'=>25,'phone_device_limit'=>25])) {
+    throw new RuntimeException('Lite capacity bounds were not enforced.');
 }
 $fixture->save(50, 50); $fixture->save(25, 25);
 if ($fixture->calls !== 0) { throw new RuntimeException('Unchanged or reduced capacity probed resources.'); }
@@ -50,6 +58,17 @@ if (!interface_exists('BMO')) { interface BMO {} }
 require_once dirname(__DIR__) . '/slsmassnotifyserver/Slsmassnotifyserver.class.php';
 $reflection = new ReflectionClass(\FreePBX\modules\Slsmassnotifyserver::class);
 $module = $reflection->newInstanceWithoutConstructor();
+$profileGuard = $reflection->getMethod('assertDeploymentProfileUnchanged');
+$profileGuard->invoke($module, ['deployment_profile'=>'lite'], ['deployment_profile'=>'lite']);
+foreach ([
+    [['deployment_profile'=>'lite'], ['deployment_profile'=>'standard']],
+    [['deployment_profile'=>'standard'], ['deployment_profile'=>'lite']],
+    [[], ['deployment_profile'=>'lite']],
+] as [$candidateProfile, $activeProfile]) {
+    try { $profileGuard->invoke($module, $candidateProfile, $activeProfile); throw new RuntimeException('Configuration restore changed deployment profile.'); }
+    catch (ReflectionException $error) { throw $error; }
+    catch (DomainException $expected) {}
+}
 $patch = $reflection->getMethod('validateAndNormalizeControlConfigPatch');
 foreach ([0, -1, 1001, 100000, '100', true, []] as $invalid) {
     if (!$patch->invoke($module, ['phone_device_limit' => $invalid])['errors'] || !$patch->invoke($module, ['desktop_client_limit' => $invalid])['errors']) {
@@ -89,10 +108,10 @@ class CapacityReportFixture {
 }
 $probe = new CapacityReportFixture(); $helper = $capacityDirectory . '/sls_resource_capacity.py';
 try {
-    $report = ['schema' => 1, 'eligible_limit' => 0, 'errors' => [['code' => 'storage_directory_unreadable', 'message' => 'The PBX account cannot read the runtime cache. Run Repair Installation.']]];
+    $report = ['schema' => 1, 'deployment_profile' => 'standard', 'eligible_limit' => 0, 'errors' => [['code' => 'storage_directory_unreadable', 'message' => 'The PBX account cannot read the runtime cache. Run Repair Installation.']]];
     file_put_contents($helper, 'import sys' . "\nprint(" . var_export(json_encode($report), true) . ")\nsys.exit(3)\n");
     if ($probe->probe() !== $report) { throw new RuntimeException('Structured exit-3 resource diagnostic was hidden.'); }
-    $report = ['schema' => 1, 'eligible_limit' => 1000, 'eligible_phone_limit' => 1000, 'errors' => 'malformed'];
+    $report = ['schema' => 1, 'deployment_profile' => 'standard', 'eligible_limit' => 1000, 'eligible_phone_limit' => 1000, 'errors' => 'malformed'];
     file_put_contents($helper, "print(" . var_export(json_encode($report), true) . ")\n");
     if (strpos($probe->probe()['errors'][0]['message'], 'valid report') === false) { throw new RuntimeException('Malformed schema-1 capacity output was accepted.'); }
     file_put_contents($helper, "print('not-json')\n");
@@ -111,7 +130,7 @@ try {
 } finally { unlink($helper); rmdir($capacityDirectory); }
 echo "Actual capacity subprocess bridge preserves actionable probe errors and reports malformed output/timeouts.\n";
 
-$fixture->result=['schema'=>1,'eligible_limit'=>100,'eligible_phone_limit'=>50,
+$fixture->result=['schema'=>1,'deployment_profile'=>'standard','eligible_limit'=>100,'eligible_phone_limit'=>50,
     'requirements'=>['cpu_count'=>5,'memory_bytes'=>9*1073741824,'sls_persistent_free_bytes'=>123456,'temporary_free_bytes'=>234567],
     'hardware'=>['effective_cpu_count'=>4,'effective_memory_bytes'=>8*1073741824],
     'resource_checks'=>['cpu'=>['ok'=>false,'actual'=>4,'required'=>5], 'memory'=>['ok'=>true,'actual'=>8*1073741824,'required'=>8*1073741824]],
@@ -122,21 +141,29 @@ if (!$preview['success'] || $fixture->lastLimits!==[25,26] || $preview['requirem
     || $preview['resource_checks']!==$fixture->result['resource_checks']) {
     throw new RuntimeException('UI preview did not use the same combined admission checker and actionable resource report.');
 }
+$fixture->profile='lite';$fixture->result['deployment_profile']='lite';
+$preview=$fixture->previewDeviceCapacity(['desktop_client_limit'=>'25','phone_device_limit'=>'25']);
+if(!$preview['success']||$preview['deployment_profile']!=='lite'||$fixture->lastProfile!=='lite'){throw new RuntimeException('UI capacity preview did not use the active Lite profile.');}
+$before=$fixture->calls;
+if($fixture->previewDeviceCapacity(['desktop_client_limit'=>'26','phone_device_limit'=>'25'])['success']||$fixture->calls!==$before){
+    throw new RuntimeException('Lite preview accepted or probed a capacity above its hard limit.');
+}
+$fixture->profile='standard';$fixture->result['deployment_profile']='standard';
 $before=$fixture->calls;
 foreach ([[],['desktop_client_limit'=>true,'phone_device_limit'=>'25'],['desktop_client_limit'=>'25','phone_device_limit'=>[]],
     ['desktop_client_limit'=>'25','phone_device_limit'=>'1001']] as $invalid) {
     if ($fixture->previewDeviceCapacity($invalid)['success']) { throw new RuntimeException('Invalid capacity preview input was accepted.'); }
 }
 if ($fixture->calls!==$before) { throw new RuntimeException('Invalid preview input invoked a resource scan.'); }
-$fixture->result=['schema'=>1,'requirements'=>[],'errors'=>[['message'=>'The storage probe could not finish.']]];
+$fixture->result=['schema'=>1,'deployment_profile'=>'standard','requirements'=>[],'errors'=>[['message'=>'The storage probe could not finish.']]];
 $preview=$fixture->previewDeviceCapacity(['desktop_client_limit'=>'25','phone_device_limit'=>'25']);
 if ($preview['success']||$preview['message']!=='The storage probe could not finish.') { throw new RuntimeException('Failed resource probe produced a positive UI report.'); }
-$fixture->result=['schema'=>1,'eligible_limit'=>25,'eligible_phone_limit'=>25,
+$fixture->result=['schema'=>1,'deployment_profile'=>'standard','eligible_limit'=>25,'eligible_phone_limit'=>25,
     'requirements'=>['cpu_count'=>2,'memory_bytes'=>1],'hardware'=>['effective_cpu_count'=>2.0,'effective_memory_bytes'=>1],
     'resource_checks'=>[],'errors'=>['malformed']];
 $preview=$fixture->previewDeviceCapacity(['desktop_client_limit'=>'25','phone_device_limit'=>'25']);
 if ($preview['success']||!str_contains($preview['message'],'invalid report')) { throw new RuntimeException('Malformed resource diagnostics reached the capacity UI.'); }
-$fixture->result=['schema'=>1,'requirements'=>[],'errors'=>[['message'=>['private'=>'value']]]];
+$fixture->result=['schema'=>1,'deployment_profile'=>'standard','requirements'=>[],'errors'=>[['message'=>['private'=>'value']]]];
 $preview=$fixture->previewDeviceCapacity(['desktop_client_limit'=>'25','phone_device_limit'=>'25']);
 if($preview['success']||!is_string($preview['message'])||str_contains($preview['message'],'Array')){throw new RuntimeException('Nested capacity diagnostic reached the UI or triggered unsafe coercion.');}
 $fixture->result=['eligible_limit'=>0,'eligible_phone_limit'=>0,'errors'=>[['message'=>['private'=>'value']]]];

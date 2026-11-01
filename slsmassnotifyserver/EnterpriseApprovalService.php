@@ -111,7 +111,7 @@ final class EnterpriseApprovalService
             if(!in_array($r['state'],['submitting','submitted'],true)||$now>=$r['expires_at']||!hash_equals($r['policy_revision'],self::revision($policies))
                 ||!hash_equals($r['fingerprint'],$ticket['fingerprint'])||!hash_equals($r['fingerprint'],self::fingerprint($request))){return false;}
             foreach($policies as $p){if(self::approvedPeople($r,$p,$personCurrent,$request)<2){return false;}}
-            return true;
+            return $this->now($state)<$r['expires_at'];
         });
     }
     public function finish(string $id,array $result): array

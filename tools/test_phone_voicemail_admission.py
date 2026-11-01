@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Private ledgers and synthetic AMI evidence; no PBX or mailbox is contacted."""
 import copy
+import fcntl
 import json
 from pathlib import Path
 import stat
@@ -158,6 +159,21 @@ class VoicemailAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(phone.PhoneAdmissionError, 'already_attempted'):
             self.claim(token, sound)
 
+    def test_explicit_originate_rejection_closes_exact_claim_without_reopening_parent(self):
+        token, sound = self.source([])
+        self.now += 1
+        child = self.claim(token, sound)
+        self.store.reject_voicemail_submission(child, '1000')
+        state = self.state()
+        self.assertEqual(state['batches'][child]['status'], 'closed')
+        self.assertEqual(state['batches'][child]['voicemail']['result']['status'], 'FAILED')
+        self.assertEqual(state['batches'][token]['vm_fallback']['targets']['1000']['claimed_token'], child)
+        self.store.reject_voicemail_submission(child, '1000')
+        with self.assertRaisesRegex(phone.PhoneAdmissionError, 'already_attempted'):
+            self.claim(token, sound)
+        with self.assertRaisesRegex(phone.PhoneAdmissionError, 'target_invalid|result_unconfirmed'):
+            self.store.reject_voicemail_submission(child, '1001')
+
     def test_any_answer_suppresses_mailbox_even_if_other_handset_did_not_answer(self):
         token, sound = self.source()
         self.end_unanswered(token, {2: 'ANSWER', 3: 'NOANSWER'})
@@ -295,6 +311,23 @@ class VoicemailAdmissionTests(unittest.TestCase):
             with self.store.locked():
                 pass
         self.assertIn(token, self.state()['batches'])
+
+    def test_installer_lease_and_later_expiry_preserve_active_voicemail_parent(self):
+        token, sound = self.source([])
+        self.now += 1
+        child = self.claim(token, sound)
+        original = copy.deepcopy(self.state()['batches'][token])
+        with (self.directory / 'phone-history-retention.lock').open('rb') as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.now += phone.HISTORY_SECONDS + 1
+            with mock.patch.object(phone, 'MAX_CLOSED_BYTES', 1), mock.patch.object(phone, 'MAX_CLOSED', 0):
+                with self.store.locked():pass
+                self.assertEqual(self.state()['batches'][token], original)
+                self.assertIn(child, self.state()['batches'])
+                fcntl.flock(guard, fcntl.LOCK_UN)
+                with self.store.locked():pass
+                self.assertEqual(self.state()['batches'][token], original)
+                self.assertIn(child, self.state()['batches'])
 
     def test_live_capture_excludes_caller_and_binds_recording_to_exact_origin(self):
         dials = self.dials[:1]

@@ -105,6 +105,80 @@ class InstallerCryptoHelperTest(unittest.TestCase):
                 self.assertEqual(payload["settings"]["marker"], "fixture-preserved")
         self.assertEqual(self.stage.stat().st_mode & 0o777, 0o700)
 
+    def test_fresh_verifier_accepts_real_module_defaults_in_both_profiles(self):
+        producer = r'''interface BMO{};require $argv[1];
+        $reflection=new ReflectionClass(\FreePBX\modules\Slsmassnotifyserver::class);
+        $module=$reflection->newInstanceWithoutConstructor();
+        echo json_encode($reflection->getMethod('getDefaultSettings')->invoke($module),JSON_THROW_ON_ERROR);'''
+        result = subprocess.run(['php', '-r', producer,
+            str(ROOT / 'slsmassnotifyserver/Slsmassnotifyserver.class.php')],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        defaults = json.loads(result.stdout)
+        match = re.search(r"^verify_fresh_install_defaults\(\).*?php -r '\n(.*?)\n' \|\|", SOURCE, re.M | re.S)
+        self.assertIsNotNone(match)
+        program = match.group(1).replace(RUNTIME_PATH, str(self.installed_helper))
+        program = program.replace('::decode((string)file_get_contents(getenv("CONFIG_PATH")))',
+            '::decode((string)file_get_contents(getenv("CONFIG_PATH")), $argv[1])')
+        ring = json.loads(self.keyring.read_text())
+        for profile in ('standard', 'lite'):
+            settings = dict(defaults, deployment_profile=profile)
+            if profile == 'lite':
+                settings['speech_queue_limit'] = 2
+            for unsafe in (False, True):
+                with self.subTest(profile=profile, unsafe_enabled=unsafe):
+                    settings['enabled'] = '1' if unsafe else '0'
+                    self.configuration.write_bytes(crypto.encode_with_keyring(settings, ring))
+                    result = subprocess.run(['php', '-r', program, str(self.keyring)],
+                        env={**os.environ, 'CONFIG_PATH':str(self.configuration),
+                            'SLS_INIT_PHONE_CAPACITY':'25', 'SLS_INIT_DEPLOYMENT_PROFILE':profile},
+                        capture_output=True, text=True, timeout=5)
+                    if unsafe:
+                        self.assertNotEqual(result.returncode, 0, 'Fresh notifications were accepted as enabled.')
+                    else:
+                        self.assertEqual(result.returncode, 0,
+                            'The actual module defaults failed the installer verifier: '+result.stderr)
+
+    def test_resource_retry_reads_retained_configuration_from_exact_cached_crypto(self):
+        cache=self.root/'signed-cache'
+        helper=cache/('slsmassnotifyserver-'+'a'*64)/'module/bin/sls_mass_notify/sls_config_crypto.py'
+        helper.parent.mkdir(parents=True,mode=0o700)
+        cache.chmod(0o700)
+        helper.write_bytes((ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_config_crypto.py').read_bytes())
+        helper.chmod(0o600)
+        settings={'desktop_client_limit':25,'phone_device_limit':25,'deployment_profile':'lite'}
+        self.configuration.write_bytes(crypto.encode_config(settings))
+        before=self.configuration.read_bytes()
+        installer=self.root/'retry-installer.sh'
+        body=SOURCE.replace('Path("/var/lib/sls-mass-notify-trust")','Path('+repr(str(cache))+')')
+        body=body.replace('/usr/local/bin/sls_mass_notify/sls_config_crypto.py',str(self.root/'missing-runtime.py'))
+        installer.write_text(body)
+        for scenario in ('exact','tampered','writable','linked'):
+            with self.subTest(scenario=scenario):
+                original=(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_config_crypto.py').read_bytes()
+                helper.write_bytes(original);helper.chmod(0o600)
+                if scenario=='tampered':helper.write_bytes(original+b'\nraise RuntimeError("Untrusted cached code executed")\n')
+                elif scenario=='writable':helper.chmod(0o660)
+                elif scenario=='linked':
+                    helper.rename(helper.with_name('original.py'));helper.symlink_to(helper.with_name('original.py'))
+                result=subprocess.run(['bash','-c','source "$1"; CONFIG_FILE="$2"; bootstrap_resource_capacity --config "$2" --mode prepare',
+                    'fixture',str(installer),str(self.configuration)],capture_output=True,text=True,timeout=15)
+                if scenario=='exact':
+                    self.assertIn(result.returncode,(0,2),result.stdout+result.stderr)
+                    report=json.loads(result.stdout)
+                    self.assertEqual(report['deployment_profile'],'lite')
+                    self.assertNotIn('resource_probe_failed',[v['code'] for v in report['errors']])
+                else:
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertNotIn('Untrusted cached code executed',result.stdout+result.stderr)
+                self.assertEqual(self.configuration.read_bytes(),before)
+                if scenario=='linked':helper.unlink();helper.with_name('original.py').rename(helper)
+
+    def test_cached_crypto_pin_matches_the_complete_published_helper(self):
+        match=re.search(r'^CONFIG_CRYPTO_BOOTSTRAP_SHA256="([0-9a-f]{64})"$',SOURCE,re.M)
+        self.assertIsNotNone(match)
+        self.assertEqual(match[1],hashlib.sha256((ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_config_crypto.py').read_bytes()).hexdigest())
+
     def test_root_preflight_uses_verified_private_stage_before_activation(self):
         # An old runtime is not eligible to supply executable code to root.
         self.installed_helper.write_text('<?php throw new RuntimeException("Old runtime must not run as root.");', encoding="ascii")

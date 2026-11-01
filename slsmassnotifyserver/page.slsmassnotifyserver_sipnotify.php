@@ -1,4 +1,4 @@
 <?php
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 header('Location: config.php?display=slsmassnotifyserver_other');
 exit;

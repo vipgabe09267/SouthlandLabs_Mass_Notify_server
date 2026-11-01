@@ -1,5 +1,5 @@
 <?php
-// Southland Servers Mass Notification Module
+// SLL Mass Notify Server
 $saveResult = $save_result ?? null;
 $applyResult = $apply_result ?? null;
 $hasPendingChanges = !empty($has_pending_changes);
@@ -65,7 +65,7 @@ $placeholderHelp = "{{event}}, {{severity}}, {{message_type}}, {{audio}}, {{page
 .sls-operation-status.is-error { border-color:#fca5a5; background:#fef2f2; color:#991b1b; }
 .sls-operation-status.is-error .sls-operation-icon { background:#fee2e2; }
 </style>
-<div class="container-fluid sls-nws-page">
+<div class="container-fluid sls-nws-page" id="sls-weather-settings">
 	<div class="display full-border">
 		<div class="fpbx-container">
 			<?php echo load_view(__DIR__ . '/hero.php', ['hero_image' => $hero_image]); ?>
@@ -258,7 +258,7 @@ $placeholderHelp = "{{event}}, {{severity}}, {{message_type}}, {{audio}}, {{page
 				</script>
 			<?php } ?>
 
-				<form method="post" action="config.php?display=<?php echo htmlspecialchars($settingsDisplay); ?>" enctype="multipart/form-data">
+				<form method="post" action="config.php?display=<?php echo htmlspecialchars($settingsDisplay); ?>" enctype="multipart/form-data" id="sls-weather-settings-form">
 					<input type="hidden" name="slsmassnotifyserver_action" value="save_settings">
 					<input type="hidden" name="slsmassnotifyserver_csrf" value="<?php echo htmlspecialchars($csrfToken); ?>">
 					<input type="hidden" name="nws_zones_present" value="1">
@@ -442,8 +442,12 @@ $placeholderHelp = "{{event}}, {{severity}}, {{message_type}}, {{audio}}, {{page
 		var remove = event.target.closest ? event.target.closest('[data-zone-remove]') : null;
 		if (!remove) return;
 		var row = remove.closest('[data-zone-editor]');
-		if (row) row.parentNode.removeChild(row);
+		var title = row ? row.querySelector('[data-zone-title]') : null;
+		var name = title ? title.textContent.trim() : <?php echo json_encode(_('this group')); ?>;
+		if (!row || !window.confirm(<?php echo json_encode(_('Remove Weather zone group')); ?> + ' “' + name + '”? ' + <?php echo json_encode(_('The change is not permanent until you save and apply.')); ?>)) return;
+		row.parentNode.removeChild(row);
 		reindex();
+		if (window.SlsSaveState) window.SlsSaveState.mark(document.getElementById('sls-weather-settings'));
 	});
 	list.addEventListener('input', function(event) { if (event.target.matches('[data-zone-field="name"]')) reindex(); });
 	add.addEventListener('click', function() {
@@ -461,6 +465,7 @@ $placeholderHelp = "{{event}}, {{severity}}, {{message_type}}, {{audio}}, {{page
 		reindex();
 		var first = row && row.querySelector('[data-zone-field="name"]');
 		if (first) first.focus();
+		if (window.SlsSaveState) window.SlsSaveState.mark(document.getElementById('sls-weather-settings'));
 	});
 	reindex();
 }());
@@ -469,3 +474,5 @@ $placeholderHelp = "{{event}}, {{severity}}, {{message_type}}, {{audio}}, {{page
 <?php $source_picker_mode = 'weather'; include __DIR__ . '/audience_source_picker.php'; ?>
 
 <?php include __DIR__.'/test_delivery.php'; ?>
+<script><?php readfile(__DIR__.'/save_state.js'); ?>
+window.SlsSaveState.attach(document.getElementById('sls-weather-settings'),{mode:'apply',initial:'active',submit:'#sls-weather-settings-form'});</script>

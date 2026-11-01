@@ -19,7 +19,7 @@ on:
         required: true
         type: string
       baseline:
-        description: Installed SLS version in the sanitized image
+        description: Installed SLL version in the sanitized image
         required: true
         type: choice
         options:
@@ -28,6 +28,7 @@ on:
           - 0.1.5-beta
           - 0.1.6-beta
           - 0.1.7-beta
+          - 0.1.8-beta
 permissions:
   contents: read
 jobs:

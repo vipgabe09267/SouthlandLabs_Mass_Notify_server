@@ -1,7 +1,7 @@
 <?php
 require_once __DIR__.'/AdminResponse.php';
 require_once __DIR__.'/api/sls-mass-notify/security.php';
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 $slsmassnotifyserver = \FreePBX::create()->Slsmassnotifyserver;
 $slsmassnotifyserver->enforceOperatorPageAccess('slsmassnotifyserver_help');

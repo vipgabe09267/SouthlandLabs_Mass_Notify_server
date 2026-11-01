@@ -47,4 +47,7 @@ $subscriber['enabled']=true;$subscriber['public_base_url']='https://pbx.example.
 bpcheck(SubscriberConfig::normalize($subscriber)['push']['subject']==='https://push.example.test/contact','Valid HTTPS VAPID contact changed.');
 $subscriber['push']['subject']='mailto:admin@example.test';bpcheck(SubscriberConfig::normalize($subscriber)['push']['subject']==='mailto:admin@example.test','Valid mail VAPID contact changed.');
 foreach(["https://push.example.test/contact\0suffix",'https://bad..example.test/contact','https://user@push.example.test/contact','https://push.example.test/contact?token=secret','http://push.example.test/contact','mailto:not-an-address'] as $bad){$subscriber['push']['subject']=$bad;bpreject(fn()=>SubscriberConfig::normalize($subscriber));}
+$subscriberPortal=file_get_contents(dirname(__DIR__).'/slsmassnotifyserver/portal/subscriber.php');
+bpcheck(is_string($subscriberPortal)&&str_contains($subscriberPortal,'Remove browser notification enrollment from this device?'),'Current-browser removal lacks confirmation.');
+bpcheck(str_contains($subscriberPortal,'data-browser-remove')&&str_contains($subscriberPortal,'Unsubscribe every browser enrolled for this subscriber?'),'Saved browser enrollment removal lacks confirmation.');
 echo "Browser push: RFC 8291 vector, ES256 VAPID, strict contact URIs, encrypted transport, endpoint isolation, expiry, disabled state and private-key redaction passed.\n";

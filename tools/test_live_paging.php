@@ -454,19 +454,22 @@ paging_check($session->run()['group_id'] === 'paging_10', 'Menu entry ten did no
 
 $isolated = $independent;
 $isolated['live_paging']['groups'][] = array_replace($independentGroup, ['group_id' => 'paging_private', 'menu_number' => 2, 'allowed_callers' => ['1002']]);
-$agi = new PagingFixtureAgi($variables, ['2', '0123']);
+$agi = new PagingFixtureAgi($variables, ['2', '2', '2']);
 [$session] = $newSession($agi, $isolated, 'group-caller-denied');
-paging_check($session->run()['status'] === 'unauthorized_group' && $agi->entered === ['0123'], 'A caller to one group reached another group PIN');
+paging_check($session->run()['status'] === 'invalid_menu_selection' && $agi->entered === [], 'A caller to one group reached another group PIN');
 paging_check(!array_filter($agi->calls, static function ($call) { return in_array($call[0], ['notify', 'admission', 'page'], true); }), 'Unauthorized group caused recipients to be contacted');
+$menus = array_values(array_filter($agi->calls, static fn($row) => $row[0] === 'menu'));
+$isolatedFiles = LivePagingConfig::promptFiles($isolated);
+paging_check($menus[0][1] === [$isolatedFiles['internal_menu'], $isolatedFiles['internal_group_1']], 'Internal caller heard a group outside its allowlist');
 $globalOnly = $variables; $globalOnly['${CHANNEL(endpoint)}'] = '1002';
 $globalOnly['${DB(DEVICE/1002/dial)}'] = 'PJSIP/1002'; $globalOnly['${DB(DEVICE/1002/user)}'] = '1002';
 $staleGlobals = $independent; $staleGlobals['live_paging']['allowed_callers'] = ['1002'];
 [$session] = $newSession(new PagingFixtureAgi($globalOnly, []), $staleGlobals, 'legacy-global-no-grant');
 paging_check($session->run()['status'] === 'unauthorized_caller', 'Legacy global caller list authorized an independent group');
 $mixed = $settings; $mixed['live_paging']['groups'][] = array_replace($independentGroup, ['group_id' => 'paging_private', 'menu_number' => 2, 'allowed_callers' => ['1002']]);
-$agi = new PagingFixtureAgi($globalOnly, ['1', '0123']);
+$agi = new PagingFixtureAgi($globalOnly, ['1', '1', '1']);
 [$session] = $newSession($agi, $mixed, 'independent-no-legacy-grant');
-paging_check($session->run()['status'] === 'unauthorized_group' && $agi->entered === ['0123'], 'Independent group caller bypassed legacy caller selection');
+paging_check($session->run()['status'] === 'invalid_menu_selection' && $agi->entered === [], 'Independent group caller bypassed legacy caller selection');
 
 $withText = $independent;
 $withText['live_paging']['groups'][0]['notify_extensions'] = ['1002'];

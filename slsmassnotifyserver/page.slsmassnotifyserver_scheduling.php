@@ -1,7 +1,7 @@
 <?php
 require_once __DIR__.'/AdminResponse.php';
 
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 $slsmassnotifyserver = \FreePBX::create()->Slsmassnotifyserver;
 $slsmassnotifyserver->enforceOperatorPageAccess('slsmassnotifyserver_scheduling');
@@ -66,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 	} catch (\DomainException $exception) {
 		$result = ['success' => false, 'message' => $exception->getMessage(), 'errors' => []];
 	} catch (\Throwable $exception) {
-		error_log('SLS Mass Notify scheduling request failed: ' . $exception->getMessage());
+		error_log('SLL Mass Notify Server scheduling request failed: ' . $exception->getMessage());
 		$result = [
 			'success' => false,
 			'message' => _('The scheduling request could not be completed.'),

@@ -25,7 +25,7 @@ try {
     if (!\SLS\MassNotify\OperatorAccess::normalize($settings['operator_access']??[])['portal_enabled']) {
         if (($_SERVER['REQUEST_METHOD']??'')==='POST') { $reply(403,['success'=>false,'message'=>'The operator portal has not been enabled.']); }
         header('Content-Type: text/html; charset=utf-8');
-        echo OperatorPortal::document('<section class="portal-login"><div class="portal-login-heading"><i class="fa fa-lock" aria-hidden="true"></i><h1>Operator portal disabled</h1><p>This feature has not been enabled.</p></div><p class="portal-login-note">A PBX administrator can enable it in SLS Operator Access.</p></section>',$nonce,[],'','disabled');
+        echo OperatorPortal::document('<section class="portal-login"><div class="portal-login-heading"><i class="fa fa-lock" aria-hidden="true"></i><h1>Operator portal disabled</h1><p>This feature has not been enabled.</p></div><p class="portal-login-note">A PBX administrator can enable it in SLL Operator Access.</p></section>',$nonce,[],'','disabled');
         exit;
     }
     if (session_status()!==PHP_SESSION_NONE) { throw new RuntimeException('portal_session_already_started'); }
@@ -69,7 +69,7 @@ try {
         if (!\SLS\MassNotify\OperatorAuth::ready($account)) { throw new DomainException('Finish your password and authenticator setup before signing in.'); }
         $federation=$_SESSION['portal_pending']['enterprise_identity']??null;
         if ($federation!==null && (!is_array($federation) || empty($_SESSION['portal_pending']['mfa_passed'])
-            || !\SLS\MassNotify\EnterpriseIdentity::current($module->getActiveSettings(),$federation,$account['id'],$now))) {
+            || !$module->operatorEnterpriseIdentityCurrent($federation,$account['id'],$now))) {
             throw new DomainException('Enterprise sign-in expired or changed. Start again and verify your authenticator.');
         }
         if (!session_regenerate_id(true)) { throw new RuntimeException('portal_session_rotation_failed'); }
@@ -131,7 +131,10 @@ try {
         $username=is_string($_POST['username']??null)?trim($_POST['username']):null; $password=$_POST['password']??null;
         if (!is_string($username) || !preg_match('/^[A-Za-z0-9_.@-]{1,80}$/D',$username)
             || !is_string($password) || strlen($password)<1 || strlen($password)>128) { throw new DomainException('Enter your operator username and password.'); }
-        $retry=OperatorPortal::loginAttempt($generalRatePath,$network['ip'],$username,$now);
+        // The durable failed-password limiter below provides the strict IP
+        // windows. Do not let an unauthenticated client lock a known username
+        // globally before a password has even been checked.
+        $retry=OperatorPortal::loginAttempt($generalRatePath,$network['ip'],'',$now);
         if ($retry) { header('Retry-After: '.$retry); http_response_code(429); throw new DomainException('Too many sign-in attempts. Try again in '.$retry.' seconds.'); }
         $grant=OperatorLoginRate::begin($failurePath,$network['ip'],time());
         if($grant['retry_after']){header('Retry-After: '.$grant['retry_after']);http_response_code(429);throw new DomainException('This address reached the sign-in limit. Try again in '.$grant['retry_after'].' seconds, use Forgot password, or ask an administrator for a reset link.');}
@@ -259,25 +262,25 @@ try {
             $content.='<label>Authenticator or recovery code<input name="code" autocomplete="one-time-code" maxlength="35" required autofocus spellcheck="false"></label>';
         } elseif ($stage==='enroll') {
             $_SESSION['portal_pending']['enrollment_secret']??=\SLS\MassNotify\OperatorAuth::secret();
-            $content.='<dl class="portal-setup"><dt>Account</dt><dd>SLS Mass Notify · '.$escape($pending['username']).'</dd><dt>Type</dt><dd>Time based · 6 digits · 30 seconds</dd><dt>Setup key</dt><dd><code class="portal-secret">'.$escape($_SESSION['portal_pending']['enrollment_secret']).'</code></dd></dl><label>Authenticator code<input name="code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autofocus></label>';
+            $content.='<dl class="portal-setup"><dt>Account</dt><dd>SLL Mass Notify Server · '.$escape($pending['username']).'</dd><dt>Type</dt><dd>Time based · 6 digits · 30 seconds</dd><dt>Setup key</dt><dd><code class="portal-secret">'.$escape($_SESSION['portal_pending']['enrollment_secret']).'</code></dd></dl><label>Authenticator code<input name="code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autofocus></label>';
         } else {
             $content.='<ul class="portal-recovery">'; foreach ($pending['recovery_codes'] as $code) { $content.='<li><code>'.$escape($code).'</code></li>'; } $content.='</ul>';
         }
         $button=['recovery'=>'I saved my codes','login'=>'Sign in','forgot'=>'Send recovery email','reset'=>'Save new password'][$stage]??'Continue';
         $content.='<button class="btn btn-primary" type="submit">'.$escape($button).' <i class="fa fa-arrow-right" aria-hidden="true"></i></button></form>';
-        if ($stage==='login') { $content.='<p class="portal-login-note"><a href="'.OperatorPortal::BASE.'?view=forgot">Forgot password?</a></p><p class="portal-login-note">Create and manage logins in the PBX admin panel → SLS Operator Access. Portal logins do not grant access to FreePBX or UCP.</p>'; }
+        if ($stage==='login') { $content.='<p class="portal-login-note"><a href="'.OperatorPortal::BASE.'?view=forgot">Forgot password?</a></p><p class="portal-login-note">Create and manage logins in the PBX admin panel → SLL Operator Access. Portal logins do not grant access to FreePBX or UCP.</p>'; }
         elseif($stage==='forgot'){$content.='<p class="portal-login-note"><a href="'.OperatorPortal::BASE.'">Back to sign in</a></p>';}
         else { $content.='<form method="post" action="'.OperatorPortal::BASE.'"><input type="hidden" name="portal_action" value="logout"><input type="hidden" name="portal_csrf" value="'.$escape($csrf).'"><button class="btn btn-default" type="submit">Start again</button></form>'; }
         if($stage==='login'){
             $federation=\SLS\MassNotify\EnterpriseIdentityConfig::normalize($settings['enterprise_identity']??[]);
-            if($federation['enabled']){foreach($federation['providers'] as $provider){if(!$provider['enabled']){continue;}$content.='<form method="post" action="'.OperatorPortal::BASE.'sso.php"><input type="hidden" name="portal_csrf" value="'.$escape($csrf).'"><input type="hidden" name="provider_id" value="'.$escape($provider['id']).'"><button type="submit" class="btn btn-default">Sign in with '.$escape($provider['name']).'</button></form>';}}
+            if(\SLS\MassNotify\RuntimeState::enterpriseAvailable($settings)&&$federation['enabled']){foreach($federation['providers'] as $provider){if(!$provider['enabled']){continue;}$content.='<form method="post" action="'.OperatorPortal::BASE.'sso.php"><input type="hidden" name="portal_csrf" value="'.$escape($csrf).'"><input type="hidden" name="provider_id" value="'.$escape($provider['id']).'"><button type="submit" class="btn btn-default">Sign in with '.$escape($provider['name']).'</button></form>';}}
         }
         if($stage==='totp'&&($settings['operator_access']['passkeys_enabled']??false)===true&&!empty($account['auth']['passkeys'])){
             $content.='<section id="sls-passkeys" data-mode="authenticate" data-csrf="'.$escape($csrf).'"><button type="button" class="btn btn-default" id="passkey-authenticate">Use a passkey instead</button><p id="passkey-status" role="status" aria-live="polite"></p></section><script nonce="'.$escape($nonce).'" src="/mass-notify/passkeys.js" defer></script>';
         }
         $content.='</section>';
     } else {
-        if ($view==='access' && $principal['operator_role']!=='administrator') { http_response_code(403); throw new DomainException('Only an SLS administrator can manage operator access.'); }
+        if ($view==='access' && $principal['operator_role']!=='administrator') { http_response_code(403); throw new DomainException('Only an SLL administrator can manage operator access.'); }
         if(str_starts_with($action,'passkey_')){
             if($view!=='security'||!in_array($action,['passkey_register_begin','passkey_register_finish','passkey_revoke'],true)
                 ||array_diff(array_keys($_POST),['portal_action','portal_csrf','code','credential_id','credential','name'])){throw new DomainException('Unsupported operator security request.');}

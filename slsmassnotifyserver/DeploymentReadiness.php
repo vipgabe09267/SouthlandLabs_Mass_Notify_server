@@ -101,7 +101,7 @@ final class SlsDeploymentReadiness
         if (isset($snapshot['error'])) {
             $detail = $snapshot['error'] === 'busy'
                 ? _('The health snapshot is being updated. Retry this check shortly.')
-                : _('The health snapshot is missing or unreadable. Check the SLS maintenance job and protected data permissions.');
+                : _('The health snapshot is missing or unreadable. Check the SLL maintenance job and protected data permissions.');
             return self::check($id, $label, 'warning', $detail);
         }
         if ($timestamp === null || $timestamp > $now + 60) {
@@ -110,7 +110,7 @@ final class SlsDeploymentReadiness
         $age = max(0, $now - $timestamp);
         return self::check($id, $label, $age <= $maximumAge ? 'ok' : 'warning',
             $age <= $maximumAge ? sprintf(_('Updated %d seconds ago.'), $age)
-                : sprintf(_('No fresh health snapshot for %d seconds; expected within %d seconds. Check cron and the SLS maintenance log.'), $age, $maximumAge))
+                : sprintf(_('No fresh health snapshot for %d seconds; expected within %d seconds. Check cron and the SLL maintenance log.'), $age, $maximumAge))
             + ['age_seconds'=>$age, 'maximum_age_seconds'=>$maximumAge];
     }
 
@@ -140,7 +140,7 @@ final class SlsDeploymentReadiness
         $localUnknown = !isset($snapshot['error']) && !$complete && $localActive === false && empty($storage['audit_at_capacity']);
         $local = self::check('audit_storage', _('Control API audit storage'), $localOk ? 'ok' : ($localUnknown ? 'unknown' : 'warning'),
             $localOk ? sprintf(_('No current write fault. Historical missing records: %d; recovery does not reconstruct those records.'), (int)($storage['audit_failed_records'] ?? 0))
-                : ($localUnknown ? _('Audit health measurements are incomplete. Check the next SLS maintenance snapshot; no healthy state was inferred.')
+                : ($localUnknown ? _('Audit health measurements are incomplete. Check the next SLL maintenance snapshot; no healthy state was inferred.')
                     : _('Audit storage has a current fault or unreadable health data. Check storage capacity, control-api-audit-fault.json and the maintenance log. Do not replay accepted API actions.')));
         $state = 'ok'; $detail = _('Optional forwarding to the system logger is disabled.');
         if ($forwarding) {
@@ -200,7 +200,7 @@ final class SlsDeploymentReadiness
         $errorsValid = is_array($probe['errors'] ?? null);
         $errors = $errorsValid ? $probe['errors'] : [];
         if (!$errorsValid || (($probe['schema'] ?? null) !== 1 && !$errors)) {
-            return self::check('capacity', _('PBX resources and SLS workspace'), 'unknown', _('The resource check did not return a valid measurement. Run Repair Installation and review the capacity checker.'));
+            return self::check('capacity', _('PBX resources and SLL workspace'), 'unknown', _('The resource check did not return a valid measurement. Run Repair Installation and review the capacity checker.'));
         }
         $resourceChecks = is_array($probe['resource_checks'] ?? null) ? $probe['resource_checks'] : [];
         if (!$errors) {
@@ -208,10 +208,10 @@ final class SlsDeploymentReadiness
                 $measurement = is_array($resourceChecks[$metric] ?? null) ? $resourceChecks[$metric] : [];
                 $ok=$measurement['ok'] ?? null;
                 if (!is_bool($ok)) {
-                    return self::check('capacity', _('PBX resources and SLS workspace'), 'unknown', _('Resource measurements are incomplete. Rerun the capacity check and inspect its diagnostics before increasing device limits.'));
+                    return self::check('capacity', _('PBX resources and SLL workspace'), 'unknown', _('Resource measurements are incomplete. Rerun the capacity check and inspect its diagnostics before increasing device limits.'));
                 }
                 if (!$ok) {
-                    return self::check('capacity', _('PBX resources and SLS workspace'), 'warning', _('A resource check failed without a shortage detail. Inspect the capacity diagnostics before increasing device limits.'));
+                    return self::check('capacity', _('PBX resources and SLL workspace'), 'warning', _('A resource check failed without a shortage detail. Inspect the capacity diagnostics before increasing device limits.'));
                 }
             }
         }
@@ -222,8 +222,8 @@ final class SlsDeploymentReadiness
                 $details[] = function_exists('mb_substr') ? mb_substr($message, 0, 1024, 'UTF-8') : substr($message, 0, 1024);
             }
         }
-        return self::check('capacity', _('PBX resources and SLS workspace'), $errors ? 'warning' : 'ok',
-            $errors ? (implode(' ', $details) ?: _('The PBX does not meet its configured device capacity. Review CPU, RAM and free SLS workspace in capacity diagnostics.'))
+        return self::check('capacity', _('PBX resources and SLL workspace'), $errors ? 'warning' : 'ok',
+            $errors ? (implode(' ', $details) ?: _('The PBX does not meet its configured device capacity. Review CPU, RAM and free SLL workspace in capacity diagnostics.'))
                 : _('CPU, RAM and free workspace meet the policy for the configured phone and desktop capacities. Retained history and actual PBX load still need separate provisioning.'));
     }
 }

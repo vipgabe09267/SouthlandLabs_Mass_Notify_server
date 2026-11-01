@@ -37,8 +37,8 @@
             card.append(node('p', (typeLabels[record.target_type] || 'Device') + (record.model ? ' · ' + record.model : '') + (record.firmware ? ' · ' + record.firmware : '')));
             card.append(node('p', 'Checked: ' + checks));
             card.append(node('p', record.notes));
-            card.append(node('p', 'Tested ' + (Number.isNaN(time.getTime()) ? record.tested_at : time.toLocaleString()) + ' · Recorded by ' + record.recorded_by + ' · SLS ' + record.module_version));
-            if (record.configuration_changed) card.append(node('small', 'SLS settings or software changed after this observation. Review and test the current setup.'));
+      card.append(node('p', 'Tested ' + (Number.isNaN(time.getTime()) ? record.tested_at : time.toLocaleString()) + ' · Recorded by ' + record.recorded_by + ' · SLL ' + record.module_version));
+            if (record.configuration_changed) card.append(node('small', 'SLL settings or software changed after this observation. Review and test the current setup.'));
             if (record.time_ahead) card.append(node('small', 'This observation is ahead of the PBX clock. Verify its test time before relying on it.'));
             history.append(card);
         });
@@ -153,7 +153,7 @@
             try { render(event.detail.device_acceptance); } catch (error) { status.textContent = error.message; }
         } else {
             state = null; history.textContent = ''; summary.textContent = '';
-            status.textContent = 'Sign in as an SLS administrator to review device-test observations. Local health checks remain available.';
+            status.textContent = 'Sign in as an SLL administrator to review device-test observations. Local health checks remain available.';
         }
     });
 })();

@@ -24,7 +24,7 @@ Speech above the configured duration limit is rejected rather than cut off.
 Mexican Spanish (`es_MX-ald-medium`). Select packs in General Settings, save and
 Apply Config, then run Repair Installation to download and verify them. They are
 not downloaded by default. Select the installed voice and listen to a preview;
-SLS does not translate the supplied text.
+SLL does not translate the supplied text.
 
 The Dashboard previews phone images and internal/external speech without
 contacting recipients. Speech previews omit tones and show the complete spoken
@@ -45,7 +45,7 @@ Announcements, Weather, Lightning and paging share a phone admission ledger.
 It freezes PJSIP contacts, rejects oversized audiences and allows a bounded wait
 for occupied capacity. Calls retain slots until a complete channel inventory
 confirms they ended. Missing collector evidence or an incomplete inventory
-blocks new SLS audio.
+blocks new SLL audio.
 
 The `sls-mass-notify-phone-events` service collects outcomes. Use **Refresh phone
 outcomes** in delivery details. Answer, conference entry and hangup show channel
@@ -86,9 +86,9 @@ end hooks and ambiguous hangups cannot authorize fallback. Interrupted outcome
 collection also blocks fallback; answered handsets prevent deposit.
 
 Asterisk's native voicemail application uses existing mailbox storage,
-message-waiting indication and notification policies. SLS creates no mailboxes
+message-waiting indication and notification policies. SLL creates no mailboxes
 and cannot bypass length/capacity rules. Ineligible or failed deposits retain a
-specific result. Mailbox storage is separate from SLS media cleanup.
+specific result. Mailbox storage is separate from SLL media cleanup.
 
 Manual Weather/Lightning tests and saved channel checks do not leave voicemail.
 Ordinary Dashboard TTS and external-number calls are unchanged; carrier greeting
@@ -108,7 +108,7 @@ before submission and dialing. Exact reviewed CRM, missed-call, allowlist and
 route-email callbacks are allowed; changed callbacks, route PINs, recording hooks,
 unknown call-producing hooks and incompatible trunk Dial overrides are rejected.
 Vendor changes may require a new profile. SIP forwarding is suppressed only for
-the SLS call; ordinary PBX/trunk settings are unchanged.
+the SLL call; ordinary PBX/trunk settings are unchanged.
 
 Each external recipient requires its own matching trunk-answer evidence before
 tones or speech start. Local-channel or another recipient's answer is insufficient.
@@ -121,12 +121,12 @@ prompt needs no live synthesis. Playback and key results bind to the exact call;
 wrong keys, timeout and interruption remain distinct. The option starts disabled
 and does not change internal audio.
 
-The optional `outbound_voice.daily_call_limit` accepts 0–10,000; zero leaves SLS
+The optional `outbound_voice.daily_call_limit` accepts 0–10,000; zero leaves SLL
 daily admission unlimited under simultaneous-capacity controls. Each admitted
 external recipient reserves one call before submission. Failed/uncertain attempts
 are not refunded. The durable counter resets at 00:00 UTC, survives compaction
 and rejects clock rollback or corrupt state without resetting itself.
-It counts SLS admissions, not ordinary PBX calls or prior history.
+It counts SLL admissions, not ordinary PBX calls or prior history.
 Budget rejection preserves eligible internal audio. Native restore disables
 external voice pending review because prior call usage may be absent.
 
@@ -194,7 +194,7 @@ can use **Audio: None**. Existing upgrade routes are preserved.
 
 Each recipient receives separate text and branded HTML through local Postfix.
 **Accepted by PBX mail service** confirms local submission, not inbox delivery.
-A bounded `postqueue -j` check stops SLS mail at 200 queued messages or when
+A bounded `postqueue -j` check stops SLL mail at 200 queued messages or when
 queue state is unverifiable. Shared admission limits are 120 requests and 1,000
 recipients per minute, 1,000 requests and 5,000 recipients per hour, and 5,000
 requests and 25,000 recipients per day. System mail is limited to 2/10/20
@@ -220,7 +220,7 @@ See [SMS/MMS setup, costs and receipts](SMS.md).
 Webhook formats include native JSON, Discord, Slack and Teams Workflows.
 Teams supports secret-URL workflows with the **Anyone** trigger; authenticated
 tenant/OAuth triggers are not implemented. Oversized payloads are rejected.
-Typed incidents include a protected HTTPS SLS incident link.
+Typed incidents include a protected HTTPS SLL incident link.
 See [collaboration contracts](COLLABORATION.md).
 
 Accepted and unconfirmed one-way webhooks do not raise a delivery fault solely
@@ -302,7 +302,7 @@ Preserve interrupted audit-cleanup evidence for review; see
 
 ## Hostnames, forwarded ports and media
 
-SLS does not automatically follow DNS or the operating-system hostname.
+SLL does not automatically follow DNS or the operating-system hostname.
 Use **General Settings > Phone Delivery > Change advertised address** to set the
 hostname and external desktop/API/image ports, then check local HTTPS, Submit and
 Apply Config. A local probe verifies the local origin, not public DNS/NAT/proxy

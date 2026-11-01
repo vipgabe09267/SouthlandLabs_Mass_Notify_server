@@ -1,6 +1,6 @@
 <details class="sls-postfix-help">
     <summary><i class="fa fa-question-circle text-primary" aria-hidden="true"></i> <?php echo _('How email is delivered'); ?></summary>
-    <p><?php echo _('Postfix manages email on the PBX. SLS submits each message to its local sendmail service. A webhook sends an HTTPS request to another service; it is separate from email.'); ?></p>
+    <p><?php echo _('Postfix manages email on the PBX. SLL submits each message to its local sendmail service. A webhook sends an HTTPS request to another service; it is separate from email.'); ?></p>
     <p><?php echo _('For an SMTP relay, first inspect the existing configuration. Use your mail provider’s relay hostname and credentials; preserve settings already used by the PBX.'); ?></p>
     <pre>sudo postconf -n
 sudo nano /etc/postfix/main.cf</pre>

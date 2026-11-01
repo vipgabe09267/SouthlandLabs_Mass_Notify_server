@@ -29,4 +29,12 @@ if (!str_contains($nonScalar, 'src=""')) {
     throw new RuntimeException('Hero view did not reject a non-text image value safely.');
 }
 
+$brand = $render('/assets/logo.png');
+if (!str_contains($brand, 'SLL Mass Notify Server') || !str_contains($brand, 'Southland Labs')
+    || !str_contains($brand, 'href="https://southlandlabs.dev"')
+    || !str_contains($brand, 'href="https://southlandlabs.dev/discord"')
+    || str_contains($brand, 'southlandservers.xyz') || str_contains($brand, 'Southland Servers')) {
+    throw new RuntimeException('Rendered hero must identify Southland Labs and link to its current website/support origin.');
+}
+
 echo "Hero view: malformed values are contained and attributes remain encoded.\n";

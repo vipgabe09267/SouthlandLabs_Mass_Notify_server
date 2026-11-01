@@ -277,6 +277,7 @@ class PhoneAdmissionStore:
     def locked(self):
         directory_fd = _open_directory(self.directory)
         temporary = None
+        retention = None
         try:
             _validate_parent_directory(directory_fd)
             fd = os.open('phone-admission.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o640, dir_fd=directory_fd)
@@ -298,6 +299,10 @@ class PhoneAdmissionStore:
                     raise PhoneAdmissionError('phone_state_lock_changed')
                 _secure_file_metadata(lock.fileno())
                 self.verify_directory_identity(directory_fd)
+                # Keep a granted shared retention lease through the durable
+                # commit, so an installer cannot capture a pre-prune baseline
+                # while a normal writer is about to publish pruned state.
+                retention = self.retention_lease(directory_fd)
                 history_marker = self.read_history_marker(directory_fd)
                 try:
                     source = os.open('phone-admission.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
@@ -333,7 +338,8 @@ class PhoneAdmissionStore:
                 if ((current is None) != ('metadata' not in locals())
                         or (current is not None and file_identity(current) != file_identity(metadata))):
                     raise PhoneAdmissionError('phone_state_changed')
-                self.compact(state)
+                if retention is not None:
+                    self._compact(state)
                 encoded = json.dumps(state, separators=(',', ':'), allow_nan=False).encode()
                 if len(encoded) > MAX_BYTES:
                     raise PhoneAdmissionError('phone_state_capacity_exceeded')
@@ -362,6 +368,8 @@ class PhoneAdmissionStore:
                     os.unlink(temporary, dir_fd=directory_fd)
                 except FileNotFoundError:
                     pass
+            if retention is not None:
+                os.close(retention)
             os.close(directory_fd)
 
     def verify_directory_identity(self, descriptor):
@@ -518,7 +526,53 @@ class PhoneAdmissionStore:
                 if row.get('ended_at') is not None:
                     checked_time(row['ended_at'])
 
+    def retention_lease(self, directory_fd=None):
+        """A busy installer defers pruning without blocking collector writes."""
+        owned_parent = directory_fd is None
+        parent = _open_directory(self.directory) if owned_parent else directory_fd
+        fd = -1
+        name = 'phone-history-retention.lock'
+        try:
+            _validate_parent_directory(parent)
+            try:
+                fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o640, dir_fd=parent)
+            except FileExistsError:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+            else:
+                _secure_file_metadata(fd)
+                os.fsync(fd); os.fsync(parent)
+            checked_lock_metadata(os.fstat(fd))
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            checked_lock_metadata(named)
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise PhoneAdmissionError('phone_retention_lock_unsafe')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return None
+            named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            checked_lock_metadata(named)
+            if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                raise PhoneAdmissionError('phone_retention_lock_unsafe')
+            result, fd = fd, -1
+            return result
+        except OSError as error:
+            raise PhoneAdmissionError('phone_retention_lock_unsafe') from error
+        finally:
+            if fd >= 0: os.close(fd)
+            if owned_parent: os.close(parent)
+
     def compact(self, state):
+        retention = self.retention_lease()
+        if retention is None:
+            return
+        try:
+            self._compact(state)
+        finally:
+            os.close(retention)
+
+    def _compact(self, state):
         closed = sorted((batch.get('closed_at', batch['updated_at']), token) for token, batch in state['batches'].items() if batch['status'] == 'closed')
         sizes = {token: len(json.dumps(state['batches'][token], separators=(',', ':')).encode()) for _, token in closed}
         retained_bytes = sum(sizes.values())
@@ -822,6 +876,32 @@ class PhoneAdmissionStore:
                 or fallback['sound'] != proof['sound'] or fallback['targets'][recipient]['mailbox'] != proof['mailbox']):
             raise PhoneAdmissionError('phone_voicemail_source_unavailable')
         return {**proof, 'service': batch['service'], 'scope': fallback['scope'], 'scope_hash': fallback['scope_hash']}
+
+    def reject_voicemail_submission(self, token, recipient):
+        """Close a reserved mailbox attempt after an explicit AMI rejection.
+
+        This must only be used when Asterisk returned a negative response.  A
+        timeout or lost socket response is ambiguous and deliberately retains
+        the reservation for collector reconciliation instead.
+        """
+        accountcode(token)
+        if not isinstance(recipient, str) or not EXTENSION.fullmatch(recipient):
+            raise PhoneAdmissionError('phone_voicemail_target_invalid')
+        with self.locked() as state:
+            batch = state['batches'].get(token)
+            if (not batch or batch.get('purpose') != 'voicemail' or recipient not in batch['targets']
+                    or batch['channels'] or batch['status'] not in {'reserved', 'closed'}):
+                raise PhoneAdmissionError('phone_voicemail_result_unconfirmed')
+            previous = batch['voicemail']['result']
+            if batch['status'] == 'closed':
+                if not isinstance(previous, dict) or previous.get('status') != 'FAILED':
+                    raise PhoneAdmissionError('phone_voicemail_result_unconfirmed')
+                return True
+            now, tick = self.clock(), self.monotonic()
+            batch['voicemail']['result'] = {'status': 'FAILED', 'recorded_at': now}
+            batch.update(status='closed', closed_at=now, updated_at=now, updated_tick=tick)
+            self.validate(state)
+        return True
 
     def bind_voicemail(self, token, recipient, uniqueid, channel):
         target = self.voicemail_target(token, recipient)
@@ -1267,25 +1347,26 @@ ERROR_MESSAGES = {
     'phone_event_collector_stale': 'The authenticated collector heartbeat is older than fifteen seconds. Review service status, local AMI connectivity and CPU/storage pressure.',
     'phone_event_collector_rebooted': 'The recorded heartbeat belongs to an earlier boot. Wait for a current authenticated heartbeat or inspect the collector service journal.',
     'phone_event_collector_clock_invalid': 'The monotonic heartbeat is invalid or in the future. Review boot/time evidence and the collector service; do not fabricate a fresh heartbeat in the ledger.',
-    'outbound_call_budget_exceeded': 'The configured daily SLS external-call limit was reached. No additional external call was authorized; internal announcements remain eligible. Admitted attempts count even if delivery later fails or is uncertain. The counter resets at 00:00 UTC; review the limit in General Settings before deliberately increasing it.',
+    'outbound_call_budget_exceeded': 'The configured daily SLL external-call limit was reached. No additional external call was authorized; internal announcements remain eligible. Admitted attempts count even if delivery later fails or is uncertain. The counter resets at 00:00 UTC; review the limit in General Settings before deliberately increasing it.',
     'outbound_budget_invalid': 'The external-call budget configuration or retained counter is invalid. External calls were withheld. Review General Settings and protected phone-admission state; do not reset delivery history to bypass the limit.',
     'outbound_budget_clock_rollback': 'The PBX clock moved backwards relative to the external-call budget. External calls were withheld to prevent resetting the daily allowance. Check time synchronization; existing calls are not interrupted.',
     'phone_ack_prompt_unavailable': 'The external keypad acknowledgement prompt is missing or does not match the installed release. Run Repair Installation before enabling keypad acknowledgement.',
     'phone_acknowledgement_invalid': 'The external keypad result could not be associated with this answered call. No acknowledgement was recorded; do not automatically redial.',
-    'phone_outbound_answer_unconfirmed': 'External playback was withheld because this recipient\'s trunk answer could not be confirmed within five seconds of the Local channel answering. Check the trunk and SLS phone-events service; no automatic redial was attempted.',
-    'phone_playback_identity_invalid': 'External playback did not match its admitted call. Audio was withheld; inspect the SLS phone evidence before sending again.',
-    'phone_outbound_origin_invalid': 'External routing requires its admitted SLS Local channel. The call was withheld; repair the signed SLS dialplan and review phone evidence before trying again.',
+    'phone_outbound_answer_unconfirmed': 'External playback was withheld because this recipient\'s trunk answer could not be confirmed within five seconds of the Local channel answering. Check the trunk and SLL phone-events service; no automatic redial was attempted.',
+    'phone_playback_identity_invalid': 'External playback did not match its admitted call. Audio was withheld; inspect the SLL phone evidence before sending again.',
+    'phone_outbound_origin_invalid': 'External routing requires its admitted SLL Local channel. The call was withheld; repair the signed SLL dialplan and review phone evidence before trying again.',
     'schedule_deadline_expired': 'The scheduled start deadline elapsed before this phone submission. Unstarted calls were rejected; calls already in progress were not interrupted.',
     'phone_outbound_evidence_gap': 'External call capacity is uncertain after a phone-event connection gap. New phone audio waits until a complete Asterisk inventory has no active calls; existing calls are not interrupted and playback remains unverified.',
     'outbound_route_changed': 'FreePBX outbound routing changed after this alert was admitted. The unstarted external call was rejected; review the routing before sending a new alert.',
-    'outbound_forwarding_unbounded': 'This trunk allows SIP forwarding. SLS cannot bound the resulting call legs with the current routing; no external calls were submitted. An SLS-specific forwarding policy is required before this route can be enabled.',
-    'phone_outbound_channel_unexpected': 'A tracked outbound call created an unexpected channel. New phone audio is blocked until those calls end; inspect the trunk route and SLS phone evidence.',
-    'phone_orphaned_channels_active': 'Asterisk still has SLS calls whose admission history is missing or was restored. Wait for those calls to end; new audio is blocked to preserve the device limit.',
-    'phone_legacy_channels_active': 'An older SLS phone call is still active without admission tracking. Wait for it to end before starting another notification; no call was interrupted.',
+    'outbound_forwarding_unbounded': 'This trunk allows SIP forwarding. SLL cannot bound the resulting call legs with the current routing; no external calls were submitted. An SLL forwarding policy is required before this route can be enabled.',
+    'phone_outbound_channel_unexpected': 'A tracked outbound call created an unexpected channel. New phone audio is blocked until those calls end; inspect the trunk route and SLL phone evidence.',
+    'phone_orphaned_channels_active': 'Asterisk still has SLL calls whose admission history is missing or was restored. Wait for those calls to end; new audio is blocked to preserve the device limit.',
+    'phone_legacy_channels_active': 'An older SLL phone call is still active without admission tracking. Wait for it to end before starting another notification; no call was interrupted.',
     'phone_audience_exceeds_limit': 'This complete phone audience exceeds the configured simultaneous-device limit. Reduce the selected audience or increase the limit after its resource check passes. No audio was submitted.',
+    'phone_deployment_profile_invalid': 'The saved deployment profile and phone capacity conflict. Lite mode permits at most 25 phone contacts. Run Repair Installation or use the signed installer to return to Standard mode; no phone call was submitted.',
     'phone_capacity_busy': 'Other notification calls occupy the available phone capacity. No new audio was submitted within the wait limit.',
     'phone_recipient_busy': 'A selected registered phone is still handling another notification. No new audio was submitted within the wait limit.',
-    'phone_event_collector_unavailable': 'The phone event collector is unavailable. Check the SLS phone-events service and its local Asterisk connection before trying again.',
+    'phone_event_collector_unavailable': 'The phone event collector is unavailable. Check the SLL phone-events service and its local Asterisk connection before trying again.',
     'phone_no_registered_contacts': 'None of the selected internal phones currently has a usable registered contact. Check phone registration before trying again.',
     'phone_channel_inventory_unavailable': 'Asterisk did not provide a complete channel inventory. Existing capacity remains reserved; check the local AMI connection.',
     'phone_state_commit_uncertain': 'The phone reservation changed, but durable storage confirmation failed. No new call files were authorized; inspect storage health before retrying.',
@@ -1298,6 +1379,8 @@ ERROR_MESSAGES = {
     'phone_voicemail_origin_invalid': 'The voicemail channel does not match its separately admitted Local channel. No mailbox deposit was authorized.',
     'phone_voicemail_result_invalid': 'The voicemail application result is invalid or conflicts with the recorded attempt. It was not treated as a successful deposit.',
     'phone_voicemail_result_unconfirmed': 'The voicemail result could not be confirmed for its active admitted channel. Delivery remains unconfirmed and is not retried.',
+    'phone_voicemail_submission_rejected': 'Asterisk explicitly rejected the admitted voicemail call. The mailbox attempt failed and is not retried; review the Asterisk log and voicemail dialplan.',
+    'phone_voicemail_submission_unconfirmed': 'Asterisk did not confirm whether the admitted voicemail call started. The attempt remains unconfirmed and is not retried; review the Asterisk log and phone-event collector.',
     'phone_voicemail_audio_unavailable': 'The alert audio could not be retained safely for voicemail. Review storage and audio-file permissions; ordinary phone delivery may still proceed.',
     'phone_voicemail_audio_invalid': 'The voicemail recording is missing, empty or outside the supported audio format or duration. No mailbox deposit was authorized.',
     'phone_voicemail_audio_capacity': 'There is insufficient reserved space for the voicemail recording. Ordinary phone delivery may still proceed; review free space and retention.',
@@ -1332,14 +1415,14 @@ def operator_message(code):
     if code.startswith('phone_contact_') or code.startswith('phone_endpoint_'):
         return 'A selected phone contact could not be matched to its admitted registration. The affected call was rejected; check its PJSIP registration.'
     if code == 'outbound_trunk_forwarding_override_unsupported':
-        return 'This trunk overrides Dial options without ignore-forwarding. SLS cannot safely alter that override for this call; ordinary trunk settings were not changed. Use a supported route or trunk, or review its SLS integration.'
+        return 'This trunk overrides Dial options without ignore-forwarding. SLL cannot safely alter that override for this call; ordinary trunk settings were not changed. Use a supported route or trunk, or review its SLL integration.'
     if code == 'outbound_agi_callback_unsupported':
-        return 'This outbound path runs an AGI or add-on callback whose call behavior has not been verified for SLS capacity limits. The external alert call was rejected. Existing PBX callbacks and ordinary calls were not changed.'
+        return 'This outbound path runs an AGI or add-on callback whose call behavior has not been verified for SLL capacity limits. The external alert call was rejected. Existing PBX callbacks and ordinary calls were not changed.'
     if code.startswith('outbound_callback_'):
-        return 'A FreePBX metadata callback differs from the reviewed SLS compatibility profile, or its file cannot be read safely (' + code + '). Review the installed core, missedcall, CRM and allowlist versions and their signatures before enabling this external path.'
+        return 'A FreePBX metadata callback differs from the reviewed SLL compatibility profile, or its file cannot be read safely (' + code + '). Review the installed core, missedcall, CRM and allowlist versions and their signatures before enabling this external path.'
     if code.startswith('outbound_'):
         return 'FreePBX outbound routing could not be verified for this alert (' + code + '). No additional external call was authorized. Check the selected PJSIP trunk, route dial patterns, custom hooks, PIN requirements, and trunk Dial options; unsupported route behavior must be reviewed before use.'
-    return 'Phone delivery could not be safely admitted. Check the selected recipients, runtime integration, and SLS phone-events service before trying again.'
+    return 'Phone delivery could not be safely admitted. Check the selected recipients, runtime integration, and SLL phone-events service before trying again.'
 
 
 def read_private_json(name, directory=DATA):
@@ -1825,7 +1908,12 @@ def admit_audience(extensions, *, outbound=None, service, correlation='', wait_s
             raise PhoneAdmissionError('schedule_deadline_expired')
     check_deadline()
     settings = settings if settings is not None else read_settings(directory)
+    profile = settings.get('deployment_profile', 'standard')
+    if profile not in {'standard', 'lite'}:
+        raise PhoneAdmissionError('phone_deployment_profile_invalid')
     limit = checked_limit(settings.get('phone_device_limit', 25))
+    if profile == 'lite' and limit > 25:
+        raise PhoneAdmissionError('phone_deployment_profile_invalid')
     store = PhoneAdmissionStore(directory)
     if (type(voicemail) is not bool or not isinstance(voicemail_scope, str)
             or not re.fullmatch(r'[A-Za-z0-9_-]{0,64}', voicemail_scope)

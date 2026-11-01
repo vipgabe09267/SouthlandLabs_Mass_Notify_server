@@ -162,7 +162,7 @@ class JournalPersistenceTests(unittest.TestCase):
             cwd='/', env=environment, text=True, capture_output=True, timeout=15, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('SLS Mass Notify SIP NOTIFY', result.stdout)
+        self.assertIn('SLL Mass Notify Server SIP NOTIFY', result.stdout)
 
     def test_enrollment_bindings_are_strict_and_fail_before_journal_creation(self):
         invalid = [

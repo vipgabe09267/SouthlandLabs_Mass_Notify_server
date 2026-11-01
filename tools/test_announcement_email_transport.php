@@ -27,7 +27,7 @@ if($mode==='invalid'){echo json_encode(['ok'=>false,'state'=>'rejected','error_c
 if($mode==='badjson'){echo 'bad';exit(0);}
 if($mode==='oversized'){echo str_repeat('x',10000);sleep(20);exit(0);}
 if($mode==='nonzero'){exit(1);}
-if(str_starts_with($mode,'mail_')){
+if(str_starts_with($mode,'mail_')||str_starts_with($mode,'email_authorization_')){
  echo json_encode(['ok'=>false,'state'=>'rejected','retryable'=>false,'submission_started'=>false,
  'recipient_id'=>$e['recipient_id'],'message_id'=>$e['message_id'],'error_code'=>$mode]);exit(0);
 }
@@ -51,6 +51,10 @@ try {
         $fixture->mode=$mode;$result=$fixture->send($envelope);
         if($result['state']!=='failed'||$result['retryable']!==false||$result['submission_started']!==false||!str_contains($result['detail'],'mail'))throw new RuntimeException('Mail admission refusal was not surfaced safely: '.$mode);
     }
+    $fixture->mode='email_authorization_changed';$result=$fixture->send($envelope);
+    if($result['state']!=='cancelled'||$result['retryable']!==false||$result['submission_started']!==false)throw new RuntimeException('Known policy suppression became transport uncertainty.');
+    $fixture->mode='email_authorization_impostor';$result=$fixture->send($envelope);
+    if($result['state']!=='uncertain'||$result['retryable']!==false)throw new RuntimeException('An unrecognized sender error claimed known policy suppression.');
     if (file_exists(EmailHelperPreflightFixture::RUNTIME_DIR) || is_link(EmailHelperPreflightFixture::RUNTIME_DIR)) {
         throw new RuntimeException('Missing-helper fixture path unexpectedly exists.');
     }

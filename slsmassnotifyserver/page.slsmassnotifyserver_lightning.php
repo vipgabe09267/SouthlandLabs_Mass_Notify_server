@@ -61,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 				: [];
 			$result = $slsmassnotifyserver->triggerLightningTest($triggerName, $selectedGroupIds);
 		} catch (\Throwable $e) {
-			error_log('SLS Mass Notify Lightning test response failed: ' . $e->getMessage());
+			error_log('SLL Mass Notify Server Lightning test response failed: ' . $e->getMessage());
 			$result = [
 				'success' => false,
 				'message' => _('Lightning test could not return a confirmed delivery result.'),

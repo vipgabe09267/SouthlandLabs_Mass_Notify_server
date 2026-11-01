@@ -110,6 +110,26 @@ class MediaHTTP(unittest.TestCase):
     def test_legacy_prefix_alias(self):
         self.exercise(True)
 
+    def test_module_recovery_code_is_denied_even_if_legacy_permissions_were_public(self):
+        modules=self.web/'admin/modules';modules.mkdir(parents=True,exist_ok=True)
+        ordinary=modules/'ordinary-fixture';ordinary.mkdir(mode=0o755,exist_ok=True)
+        ordinary.chmod(0o755)
+        (ordinary/'public.txt').write_bytes(b'ordinary public asset');(ordinary/'public.txt').chmod(0o644)
+        paths=[]
+        for relative in ('.sls-mass-notify-recovery.ABC123', '.sls-mass-notify-recovery/transaction.fixture'):
+            directory=modules/relative;directory.mkdir(mode=0o755,parents=True,exist_ok=True)
+            for parent in (directory,directory.parent,modules,modules.parent):parent.chmod(0o755)
+            (directory/'prior.php').write_text('<?php echo "INERT_OLD_MODULE_EXECUTED";')
+            (directory/'prior.php').chmod(0o644)
+            (directory/'.htaccess').write_text('Require all granted\n');(directory/'.htaccess').chmod(0o644)
+            paths.append('/admin/modules/'+relative+'/prior.php')
+        self.start()
+        self.assertEqual(self.request('/admin/modules/ordinary-fixture/public.txt')[::2],(200,b'ordinary public asset'))
+        for path in paths:
+            status,headers,body=self.request(path)
+            self.assertEqual(status,403,body)
+            self.assertNotIn(b'INERT_OLD_MODULE_EXECUTED',body)
+
     def exercise(self, alias):
         with self.subTest(alias=alias):
                 self.start(alias)

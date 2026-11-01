@@ -162,7 +162,7 @@ final class SystemRecordings
         clearstatcache(true, $tones); $tonesMeta = @lstat($tones); $euid = function_exists('posix_geteuid') ? posix_geteuid() : -1;
         if (!is_array($tonesMeta) || ($tonesMeta['mode'] & 0170000) !== 0040000 || ($tonesMeta['mode'] & 0022)
             || !in_array($tonesMeta['uid'], [0, $euid], true) || realpath($tones) !== $tones || !is_writable($tones)) {
-            throw new \InvalidArgumentException('The SLS tone directory is not writable or privately owned. Run Repair Installation.');
+            throw new \InvalidArgumentException('The SLL tone directory is not writable or privately owned. Run Repair Installation.');
         }
         // The optional callback is a trusted local dependency for disposable
         // media tests. No request/API input supplies this argument.

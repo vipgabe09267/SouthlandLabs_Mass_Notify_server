@@ -2,11 +2,11 @@
 
 In General Settings → notification destinations, add the provider's secret webhook URL and select **Slack incoming webhook** or **Microsoft Teams Workflows**. Save and apply settings, then explicitly select that destination in an announcement group, incident template, or weather rule. The provider chooses its channel or chat. HTTPS, certificate validation, destination identity checks, bounded timeouts, and delivery uncertainty rules apply to every format.
 
-Teams uses a Workflow configured to receive webhook requests from **Anyone** and post an Adaptive Card. Treat its generated URL as a credential, and assign a workflow co-owner. Tenant/OAuth-authenticated triggers and the retired Office 365 connectors are not supported. Slack uses an incoming webhook associated with the desired channel. Native SLS bearer/signature headers are not sent to either provider.
+Teams uses a Workflow configured to receive webhook requests from **Anyone** and post an Adaptive Card. Treat its generated URL as a credential, and assign a workflow co-owner. Tenant/OAuth-authenticated triggers and the retired Office 365 connectors are not supported. Slack uses an incoming webhook associated with the desired channel. Native SLL bearer/signature headers are not sent to either provider.
 
 ## Incident links
 
-Explicit incident launches, updates, all-clear messages, and escalations retain their server-generated incident ID through the durable delivery job. Slack displays **Open incident in SLS** as a link; Teams adds an **Open incident in SLS** button. Both open the existing FreePBX incident page. The operator must sign in and have module access. Opening a link never changes incident state or records a human response. These are navigation links, not interactive acknowledgement callbacks.
+Explicit incident launches, updates, all-clear messages, and escalations retain their server-generated incident ID through the durable delivery job. Slack displays **Open incident in SLL** as a link; Teams adds an **Open incident in SLL** button. Both open the existing FreePBX incident page. The operator must sign in and have module access. Opening a link never changes incident state or records a human response. These are navigation links, not interactive acknowledgement callbacks.
 
 The same typed context supplies incident severity, action, sequence and drill/test status. A critical incident is labeled Critical; it does not inherit the ordinary announcement's Information label. Wording cannot set these fields, and malformed context is rejected before submission.
 
@@ -20,6 +20,6 @@ Isolated tests exercise both payloads, the real PHP-to-Python incident identity 
 
 Provider references: [Slack incoming webhooks](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/), [Slack message and link formatting](https://docs.slack.dev/messaging/formatting-message-text/), [Microsoft Teams Workflows setup](https://support.microsoft.com/en-us/workflows/send-messages-in-teams-using-incoming-webhooks), and [Adaptive Cards OpenUrl action](https://learn.microsoft.com/en-us/adaptive-cards/schema-explorer/action-open-url).
 
-## Native Discord and SLS JSON
+## Native Discord and SLL JSON
 
-Native messages retain complete paragraphs and instruction fields. Discord content is checked against its individual and combined [embed limits](https://docs.discord.com/developers/resources/message#embed-limits) before submission, using conservative Unicode counts. Native SLS JSON retains the complete body within its 64 KiB serialized envelope. Oversized content fails for that destination; valid destinations retain their own results. Explicit nonretryable payload failures are not resubmitted automatically, and failed delivery records remain in history.
+Native messages retain complete paragraphs and instruction fields. Discord content is checked against its individual and combined [embed limits](https://docs.discord.com/developers/resources/message#embed-limits) before submission, using conservative Unicode counts. Native SLL JSON retains the complete body within its 64 KiB serialized envelope. Oversized content fails for that destination; valid destinations retain their own results. Explicit nonretryable payload failures are not resubmitted automatically, and failed delivery records remain in history.

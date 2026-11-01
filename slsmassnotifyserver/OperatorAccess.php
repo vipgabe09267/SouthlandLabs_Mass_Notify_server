@@ -6,7 +6,7 @@ require_once __DIR__ . '/AudienceLimits.php';
 require_once __DIR__ . '/OperatorAuth.php';
 require_once __DIR__ . '/api/sls-mass-notify/security.php';
 
-/** Local roles use authenticated FreePBX identities and the existing SLS directory. */
+/** Local roles use authenticated FreePBX identities and the existing SLL directory. */
 final class OperatorAccess
 {
     public const ROLES = ['viewer', 'sender', 'scheduler', 'warden', 'administrator'];
@@ -59,7 +59,7 @@ final class OperatorAccess
             if (!in_array('view',$actions,true)) { throw new \DomainException('An operator must be allowed to view their assigned work.'); }
             $channels=self::ids($row['channels']??['extensions','desktop_client_ids','voice_recipient_ids','email_recipient_ids','sms_recipient_ids','webhook_ids'],'/^(?:extensions|desktop_client_ids|voice_recipient_ids|email_recipient_ids|sms_recipient_ids|webhook_ids|browser_recipient_ids|connector_ids)$/D',8);
             if (!$channels) { throw new \DomainException('Select at least one permitted delivery channel.'); }
-            if ($row['role'] === 'administrator' && ($sites || $groups || $locations || array_filter($members))) { throw new \DomainException('SLS administrators have module-wide access. Use another role to restrict recipients.'); }
+            if ($row['role'] === 'administrator' && ($sites || $groups || $locations || array_filter($members))) { throw new \DomainException('SLL administrators have module-wide access. Use another role to restrict recipients.'); }
             if ($row['enabled'] && $row['role'] !== 'administrator' && !$sites && !$groups && !$locations && !array_filter($members)) { throw new \DomainException('An enabled operator needs a site, location, saved audience or personal device assignment.'); }
             $auth=isset($row['auth'])?OperatorAuth::normalize($row['auth']):null;
             if ($row['source']==='portal' && $auth===null) { throw new \DomainException('A portal login needs a protected password record.'); }

@@ -41,5 +41,5 @@ try {
     }
     echo json_encode($output,JSON_THROW_ON_ERROR),"\n";
 } catch (Throwable $error) {
-    fwrite(STDERR,"SLS cluster: effect fenced or receipt uncertain.\n"); echo "{\"ok\":false,\"error\":\"cluster_effect_fenced_or_uncertain\"}\n"; exit(1);
+    fwrite(STDERR,"SLL cluster: effect fenced or receipt uncertain.\n"); echo "{\"ok\":false,\"error\":\"cluster_effect_fenced_or_uncertain\"}\n"; exit(1);
 }

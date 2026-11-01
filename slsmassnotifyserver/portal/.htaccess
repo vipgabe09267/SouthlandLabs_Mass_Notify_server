@@ -1,5 +1,5 @@
 Options -Indexes -MultiViews
 DirectoryIndex index.php
-<FilesMatch "^(?!(?:index|sso|subscriber)\.php$).+\.php$">
+<FilesMatch "^(?!(?:index|sso|subscriber|display)\.php$).+\.php$">
     Require all denied
 </FilesMatch>

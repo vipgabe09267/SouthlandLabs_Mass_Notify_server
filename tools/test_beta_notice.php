@@ -38,9 +38,11 @@ checkNotice(!Notice::acknowledged(['beta_notice' => $receipt], 'other'), 'Legacy
 rejectNotice(fn() => Notice::accept($session, $input, 'owner', 'private-session', $now + 5, $clock + 5000000000), 'Consumed challenge replayed');
 $old = $receipt; $old['receipt']['revision'] = str_repeat('a', 64);
 checkNotice(!Notice::acknowledged(['beta_notice' => $old], 'owner'), 'Earlier warning revision bypassed current notice');
-foreach (['0.1.6-beta','0.1.7-beta'] as $version) {
+// Historical receipt revisions must use the original warning bytes, not today's branding.
+foreach (['ff40a241032168da33d496200653eced9f5d91b1481ccc0b0127d1854bf0c4da',
+    'eaa61c4dc612b50633cc9c64972a47edb8db2a5f00a1f2653b670e7f6336ba9d'] as $revision) {
     $legacyReceipt = $receipt;
-    $legacyReceipt['receipt']['revision'] = hash('sha256', $version . '\n' . Notice::TITLE . "\n" . Notice::BODY);
+    $legacyReceipt['receipt']['revision'] = $revision;
     checkNotice(Notice::acknowledged(['beta_notice'=>$legacyReceipt], 'owner'), 'An upgrade forgot the original administrator acceptance');
     checkNotice(!Notice::acknowledged(['beta_notice'=>$legacyReceipt], 'other'), 'An upgrade transferred acceptance to another administrator');
     $mappedLegacy = Notice::normalize($legacyReceipt);

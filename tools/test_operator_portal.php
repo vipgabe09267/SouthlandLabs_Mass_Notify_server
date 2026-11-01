@@ -123,6 +123,9 @@ try {
     $GLOBALS['portal_brand']=['BRAND_CSS_CUSTOM'=>'//attacker.example/portal.css','BRAND_IMAGE_TANGO_LEFT'=>'//attacker.example/logo.svg'];
     $externalBrand=Portal::document('content','fixture-nonce',[],$token,'sign-in');
     portalCheck(!str_contains($externalBrand,'attacker.example'),'Protocol-relative branding asset was accepted');
+    portalCheck(str_contains($externalBrand,'<title>SLL Mass Notify Server · Sign in</title>')
+        && str_contains($externalBrand,'Southland Labs') && !str_contains($externalBrand,'Southland Servers'),
+        'Operator portal must render the current product and publisher identity');
     $GLOBALS['portal_brand']=['BRAND_CSS_CUSTOM'=>'/admin/assets/custom/theme.css','BRAND_IMAGE_TANGO_LEFT'=>'/admin/assets/images/logo.svg'];
     $localBrand=Portal::document('content','fixture-nonce',[],$token,'sign-in');
     portalCheck(str_contains($localBrand,'/admin/assets/custom/theme.css')&&str_contains($localBrand,'/admin/assets/images/logo.svg'),'Same-origin branding asset was rejected');

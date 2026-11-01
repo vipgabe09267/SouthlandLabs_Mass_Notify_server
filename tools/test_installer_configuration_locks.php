@@ -15,7 +15,7 @@ function lock_check(bool $ok,string $message):void {if(!$ok)throw new RuntimeExc
 $reflection=new ReflectionClass(FreePBX\modules\Slsmassnotifyserver::class);$source=file($reflection->getFileName());$methods='';
 foreach(['installUnprivilegedPhase','configurationPathMetadata','initializeFreshInstallerConfiguration','requireRuntimeAccount','persistAppliedSettings',
     'acquireSettingsLock','releaseSettingsLock','acquireAnnouncementActivityLock','acquireNativeBackupFileLock','releaseNativeBackupFileLock',
-    'genConfig','applySettings','applyPendingSettingsTransaction'] as $name) {
+    'genConfig','applySettings','applyPendingSettingsTransaction','normalizeDeploymentProfile'] as $name) {
     lock_check($reflection->hasMethod($name),'Missing fresh-install configuration entrypoint: '.$name);
     $method=$reflection->getMethod($name);$methods.=implode('',array_slice($source,$method->getStartLine()-1,$method->getEndLine()-$method->getStartLine()+1));
 }
@@ -113,6 +113,16 @@ try{$fresh->initializeFreshInstallerConfiguration(150);throw new LogicException(
 catch(DomainException $e){lock_check(strpos($e->getMessage(),'Insufficient CPU')!==false,'Initial resource rejection lost its specific reason.');}
 lock_check(!is_file($root.'/config'),'Rejected initial capacity wrote configuration.');
 foreach([24,1001] as $invalid){try{$fresh->initializeFreshInstallerConfiguration($invalid);throw new LogicException('Invalid detected limit was accepted.');}catch(DomainException $expected){}}
+
+$fresh->resourcesSufficient=true;
+lock_check($fresh->initializeFreshInstallerConfiguration(25,'lite')===true,'Lite fresh initialization failed.');
+$lite=json_decode(file_get_contents($root.'/config'),true);
+lock_check(($lite['deployment_profile']??null)==='lite'&&($lite['phone_device_limit']??null)===25,'Lite fresh initialization did not persist its bounded profile.');
+unlink($root.'/config');
+try{$fresh->initializeFreshInstallerConfiguration(26,'lite');throw new LogicException('Lite initialization accepted more than 25 phone contacts.');}
+catch(DomainException $e){lock_check(strpos($e->getMessage(),'at most 25')!==false,'Lite capacity rejection lost its specific reason.');}
+try{$fresh->initializeFreshInstallerConfiguration(25,'unknown');throw new LogicException('Unknown deployment profile was accepted.');}
+catch(DomainException $e){lock_check(strpos($e->getMessage(),'Standard or Lite')!==false,'Deployment-profile rejection lost its specific reason.');}
 
 echo "Real fresh-install hook, narrow initializer, parent activity/settings locks, preserved pending reload and ordinary Apply Config passed.\n";
 }

@@ -427,7 +427,7 @@ final class SlsAnnouncementJobStore
         $job['submission_uncertain'] = $uncertain; $job['finished_at'] = gmdate('c');
         unset($job['result']);
         $this->write($job);
-        if ($category !== 'weather_source_cancelled') { error_log('SLS announcement ' . $job['id'] . ': ' . $category); }
+        if ($category !== 'weather_source_cancelled') { error_log('SLL announcement ' . $job['id'] . ': ' . $category); }
         return $job;
     }
 
@@ -451,7 +451,7 @@ final class SlsAnnouncementJobStore
             catch (\Throwable $error) {
                 $this->removePending($id);
                 $this->atomic('worker-state.json', ['state' => 'failed', 'updated_at' => gmdate('c'), 'failure_category' => 'worker_runtime_failed']);
-                error_log('SLS announcement ' . $id . ': job_state_unreadable');
+                error_log('SLL announcement ' . $id . ': job_state_unreadable');
                 return;
             }
             if (!$job || !in_array($job['state'] ?? '', self::PENDING, true)) { $this->removePending($id); return; }

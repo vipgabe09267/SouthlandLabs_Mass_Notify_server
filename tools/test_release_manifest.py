@@ -26,7 +26,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         for name in ('docs/schemas', 'slsmassnotifyserver/docs/schemas', 'tools'):
             (self.root / name).mkdir(parents=True)
-        self.version = '0.1.8-beta'
+        self.version = '0.1.9-beta'
         (self.root / 'slsmassnotifyserver/module.xml').write_text('<module><version>' + self.version + '</version></module>')
         bootstrap = b'fixture bootstrap bytes'
         (self.root / 'tools/install_bootstrap.sh').write_bytes(bootstrap)
@@ -61,7 +61,7 @@ class ReleaseDocumentationTests(unittest.TestCase):
 
     def test_rejects_mismatched_or_ambiguous_release_states(self):
         invalid = [dict(self.record, schema=True), dict(self.record, extra=True),
-                   dict(self.record, purpose=''), dict(self.record, candidate_version='0.1.9-beta'),
+                   dict(self.record, purpose=''), dict(self.record, candidate_version='0.1.8-beta'),
                    dict(self.record, candidate_status='unknown'), dict(self.record, candidate_status=False),
                    dict(self.record, candidate_status='unpublished'),
                    dict(self.record, candidate_status='unpublished', published_version='0.1.9-beta'),

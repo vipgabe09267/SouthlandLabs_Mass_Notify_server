@@ -12,7 +12,7 @@ $snapshot=['schema'=>1,'generated_at'=>$now,'messages'=>[$key=>$record]];
 $projected=MailEvidence::project($receipt,$snapshot,$now);mailCheck($projected['state']==='accepted'&&$projected['postfix_stage']==='relay_accepted','Relay acceptance was lost.');
 mailCheck(str_contains($projected['detail'],'does not confirm mailbox placement'),'Relay acceptance implied a mailbox or human read.');
 $snapshot['messages'][$key]['stage']='deferred';$snapshot['messages'][$key]['dsn']='4.4.1';
-$projected=MailEvidence::project($receipt,$snapshot,$now);mailCheck($projected['state']==='accepted'&&str_contains($projected['detail'],'SLS has not resubmitted'),'Deferral changed submission evidence or implied an SLS retry.');
+$projected=MailEvidence::project($receipt,$snapshot,$now);mailCheck($projected['state']==='accepted'&&str_contains($projected['detail'],'SLL has not resubmitted'),'Deferral changed submission evidence or implied an SLL retry.');
 $uncertain=$receipt;$uncertain['state']='uncertain';mailCheck(MailEvidence::project($uncertain,$snapshot,$now)['state']==='accepted','Exact trusted queue evidence did not resolve uncertain submission.');
 $snapshot['messages'][$key]['stage']='bounced';$snapshot['messages'][$key]['dsn']='5.1.1';
 $projected=MailEvidence::project($receipt,$snapshot,$now);mailCheck($projected['state']==='failed'&&!$projected['retryable']&&$projected['submission_started'],'Bounce allowed an automatic replay.');

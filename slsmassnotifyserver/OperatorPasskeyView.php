@@ -13,7 +13,7 @@ final class OperatorPasskeyView
         foreach(PasskeyConfig::publicRows($account['auth']['passkeys']??[]) as $key){
             $out.='<li><strong>'.$e($key['name']).'</strong> · added '.$e(gmdate('Y-m-d',$key['created_at'])).' · last used '.($key['last_used_at']?$e(gmdate('Y-m-d H:i \U\T\C',$key['last_used_at'])):'never').'<button type="button" class="btn btn-default" data-passkey-revoke="'.$e($key['credential_id']).'">Revoke</button></li>';
         }
-        $out.='</ul><p>Management consumes a current six-digit authenticator code. If you cancel enrollment, wait for the next code before trying again. Credential data stays in encrypted SLS configuration; no private key leaves your authenticator.</p></section><script nonce="'.$e($nonce).'" src="/mass-notify/passkeys.js" defer></script>';
+        $out.='</ul><p>Management consumes a current six-digit authenticator code. If you cancel enrollment, wait for the next code before trying again. Credential data stays in encrypted SLL configuration; no private key leaves your authenticator.</p></section><script nonce="'.$e($nonce).'" src="/mass-notify/passkeys.js" defer></script>';
         return $out;
     }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """No network, calls, mail, or production state: weather outbox failure fixtures."""
 import importlib.util
+import hashlib
 import json
 import os
 import pwd
@@ -85,6 +86,18 @@ class QueueTests(unittest.TestCase):
                 pass
             process.wait(timeout=2)
 
+    def test_deployment_profile_binds_weather_and_observation_concurrency(self):
+        self.assertEqual(queue.deployment_worker_limits({'deployment_profile': 'standard'}), (2, 5))
+        self.assertEqual(queue.deployment_worker_limits({'deployment_profile': 'lite'}), (1, 2))
+        self.assertEqual(queue.deployment_worker_limits({}), (2, 5))
+        with self.assertRaisesRegex(ValueError, 'deployment profile'):
+            queue.deployment_worker_limits({'deployment_profile': 'small'})
+        state = {'jobs': {}}
+        queue.update_dispatch_metrics(state, 10, 1)
+        self.assertEqual(state['dispatch_metrics']['max_workers'], 1)
+        queue.update_dispatch_metrics(state, 11)
+        self.assertEqual(state['dispatch_metrics']['max_workers'], 1)
+
     def test_stubborn_fixture_process_reaches_bounded_hard_kill_cleanup(self):
         class StubbornProcess:
             pid = 48151
@@ -163,6 +176,30 @@ class QueueTests(unittest.TestCase):
             self.add('retained')
         self.assertFalse(path.exists())
         self.assertEqual(lock.stat().st_ino, inode)
+
+    def test_structurally_damaged_history_fails_closed(self):
+        valid_job = {
+            'service': 'nws', 'group_id': 'north', 'key': 'event|fixture',
+            'payload': {}, 'created_at': 1, 'updated_at': 1,
+            'priority': [1, 0], 'state': 'queued',
+        }
+        valid_snapshot = {'zone': 'TXC491', 'observed_at': 1, 'active': {}}
+        valid_metrics = {'updated_at': 1, 'max_workers': 2, 'running': 0,
+                         'oldest_queued_age_seconds': 0,
+                         'oldest_running_age_seconds': 0, 'deadline_misses': 0}
+        mutations = [
+            {'schema': 1, 'jobs': {'not-a-job-id': valid_job}, 'snapshots': {}},
+            {'schema': 1, 'jobs': {'a' * 64: {**valid_job, 'service': 'other'}}, 'snapshots': {}},
+            {'schema': 1, 'jobs': {'a' * 64: {key: value for key, value in valid_job.items() if key != 'priority'}}, 'snapshots': {}},
+            {'schema': 1, 'jobs': {}, 'snapshots': {'north': {'garbage': True}}},
+            {'schema': 1, 'jobs': {}, 'snapshots': {'north': {**valid_snapshot, 'zone': '\ud800'}}},
+            {'schema': 1, 'jobs': {}, 'snapshots': {'north': valid_snapshot},
+             'dispatch_metrics': {**valid_metrics, 'running': True}},
+        ]
+        for state in mutations:
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(RuntimeError, 'state is corrupt'):
+                    queue.validate_state(state)
 
     def test_replaced_state_and_lock_stop_outbox_commit(self):
         self.add('retained')
@@ -385,16 +422,20 @@ class QueueTests(unittest.TestCase):
 
     def test_terminal_history_does_not_fill_active_queue(self):
         now = time.time()
+        terminal_ids = []
         with queue.state_lock() as data:
             for index in range(queue.MAX_JOBS):
-                data['jobs'][f'complete-{index}'] = {'service': 'nws', 'group_id': 'north',
+                terminal_id = hashlib.sha256(f'complete-{index}'.encode()).hexdigest()
+                terminal_ids.append(terminal_id)
+                data['jobs'][terminal_id] = {'service': 'nws', 'group_id': 'north',
                     'key': f'old-{index}', 'state': 'complete', 'created_at': now,
-                    'updated_at': now, 'payload': {'unused_message': 'x' * 1000}}
+                    'updated_at': now, 'priority': [now, 0],
+                    'payload': {'unused_message': 'x' * 1000}}
         job_id, _ = self.add('new-active')
         with queue.state_lock() as data:
             self.assertEqual(data['jobs'][job_id]['state'], 'queued')
             self.assertEqual(len(data['jobs']), queue.MAX_JOBS + 1)
-            self.assertNotIn('payload', data['jobs']['complete-0'])
+            self.assertNotIn('payload', data['jobs'][terminal_ids[0]])
             self.assertIn('payload', data['jobs'][job_id])
         self.assertLess((self.directory / 'weather-delivery.json').stat().st_size, 512 * 1024)
 
@@ -510,7 +551,10 @@ class QueueTests(unittest.TestCase):
         with mock.patch.object(queue, 'MAX_BYTES', len(before) + 100):
             with self.assertRaisesRegex(queue.WeatherQueueCapacityError, 'state update was not saved'):
                 with queue.state_lock() as data:
-                    data['snapshots']['large'] = {'value': 'x' * len(before)}
+                    data['snapshots']['large'] = {
+                        'zone': 'TXC491', 'observed_at': time.time(),
+                        'active': {'large': {'value': 'x' * len(before)}},
+                    }
         self.assertEqual((self.directory / 'weather-delivery.json').read_bytes(), before)
 
     def test_polling_does_not_take_delivery_worker_lock(self):

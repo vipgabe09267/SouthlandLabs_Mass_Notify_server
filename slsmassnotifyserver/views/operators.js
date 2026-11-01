@@ -156,7 +156,7 @@
     const role = node('select');
     Object.keys(presets).forEach(value => role.append(node('option',value[0].toUpperCase()+value.slice(1),{value})));
     role.value = row.role;
-    field(body,'Permission preset',role,'Choose a starting role, then select the allowed actions and delivery channels. Administrators have full SLS access.');
+    field(body,'Permission preset',role,'Choose a starting role, then select the allowed actions and delivery channels. Administrators have full SLL access.');
     const enabled = check(body,'Enable this login',row.enabled);
     const expiry = field(body,'Access expires (optional)',node('input','',{type:'datetime-local',step:'60'}),'PBX timezone: '+(state.timezone || 'UTC')+'. Leave empty for no expiry. Expiry blocks sign-in, active sessions and queued delivery.');
     expiry.value = row.expires_local || '';
@@ -213,7 +213,7 @@
       const box = node('div','',{class:'ops-account'}), heading = node('div','',{class:'ops-heading'});
       const title = node('div'); title.append(node('strong',row.name || row.username),node('p',row.username,{class:'ops-muted'}));
       heading.append(title,node('span',row.role+(row.enabled ? ' · enabled' : ' · disabled'),{class:'ops-badge'})); box.append(heading);
-      const grants = row.role === 'administrator' ? 'All SLS actions and recipients' : [row.site_ids.length+' sites',(row.location_ids || []).length+' locations',row.group_ids.length+' audiences',Object.values(row.personal_members || {}).reduce((count,ids) => count+ids.length,0)+' personal devices'].join(' · ');
+      const grants = row.role === 'administrator' ? 'All SLL actions and recipients' : [row.site_ids.length+' sites',(row.location_ids || []).length+' locations',row.group_ids.length+' audiences',Object.values(row.personal_members || {}).reduce((count,ids) => count+ids.length,0)+' personal devices'].join(' · ');
       box.append(node('p',grants,{class:'ops-muted'}));
       const expiryText = row.expires_local ? (row.access_expired ? 'Expired ' : 'Expires ')+row.expires_local.replace('T',' ')+' · '+(state.timezone || 'UTC') : 'No account expiry';
       box.append(node('p',expiryText,{class:row.access_expired ? 'ops-notice ops-error' : 'ops-muted'}));

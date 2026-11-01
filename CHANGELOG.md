@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.1.9-beta — corrected candidate (unpublished)
+
+The original October 31 installer was withdrawn after a history-retention conflict caused installation and rollback verification to fail. This corrected candidate keeps version `0.1.9-beta` and includes the fixes below; it remains unpublished pending owner acceptance.
+
+- Check runtime audio space in /tmp separately from installer scratch fallback. Refuse an undersized, inaccessible, read-only or inode-exhausted runtime workspace before mutation, preserving the configured speech reserve and concurrency.
+
+- Prevent optional voice selection from creating a root-only Python cache that makes the normal PBX capacity check fail. Authenticated repair quarantines the old generated cache with protected review evidence.
+- Run the installation doctor's resource check as the PBX account, including when doctor is started by root, so runtime traversal failures cannot be hidden by root access.
+
+- Reject an HTTP 200 FreePBX ionCube loader error during read-only web readiness checks before mutation and after activation. Report bounded, credential-free web response evidence in the installation doctor.
+
+- Discover native Apache ServerAlias and wildcard bindings on custom HTTPS ports, including Apache's compact single-site inventory. Keep credential probes pinned to the matching local virtual host and report hostname-binding failures explicitly.
+
+- Defer closed phone-history pruning while an installer transaction holds its retention lease. Collector updates continue, and retained rows remain subject to exact comparison.
+- Record protected closure times in new installation baselines. Recovery accepts expired missing records only with matching retention evidence and no active voicemail dependency; modified or nonexpired history still stops recovery. Operational ledgers are never restored from an old snapshot.
+- Let a newly authenticated installer recover an older failed transaction with its own signed helpers. Preserve the older installer, approvals and package as separate evidence.
+- Resume module restoration after either directory move, including recovery after the old module was already restored. Verify restored code against the pre-install approval before restoring root maintenance jobs.
+- Keep module rollback directories private across FreePBX startup ownership changes. Store new backups below a protected directory on the module filesystem, retain its native ownership exclusion with installer evidence, and deny web access to current and legacy backup paths.
+- Recover recognized legacy backup permissions only after their original module bytes match the protected pre-install inventory. Reject changed code, unsafe entries and unexpected layouts; check the bytes again after sealing the directory.
+- Recognize a valid protected legacy `transaction-sequence` counter as data rather than a recovery directory. Reject malformed counters, unsafe links and unexpected ownership.
+- Read phone history under its permanent collector mutex so a legitimate atomic commit cannot cause a false corruption report.
+- Coordinate data permission repair with the collector's existing writer mutexes. Accept only its exact disappearing temporary filenames, avoid unnecessary metadata changes, and validate legacy heartbeat/display caches before repairing their permissions.
+- Drain Asterisk CLI parser input before returning the first matching value. This prevents valid responses from intermittently failing with SIGPIPE/exit 141 under shell `pipefail`.
+- Recheck active calls immediately before provider package repair, reject failed CLI responses, and preserve the existing Asterisk service manager. Unknown management layouts require explicit provider repair before any package change.
+- Restore scoped native AMI database registrations as well as Manager configuration during rollback. Preserve unrelated accounts and refuse independent edits; refresh Dashboard hooks even when no backup jobs are enrolled.
+- Preserve administrator changes made after an interrupted installation. Record durable hashes before installer profile/branding writes, and retain fresh configuration snapshots before module hooks.
+- Flush retained configuration, history and native registration snapshots before advancing the installation journal. Preserve original temporary snapshots until retained file contents and directory entries are durable, including copies across filesystems.
+- Require a fresh collector heartbeat and existing ledger before completing rollback, with a bounded startup wait. Recover recognized interrupted retention-lock metadata without replacing its inode.
+- Do not report a failed speech installation when only unselected optional voice packs are absent. Required or selected missing voices still show a repair warning.
+- Retry one complete settings read after a validated atomic file replacement. Concurrent OTP submissions still allow one success and reject reuse; unsafe files, in-place changes, repeated replacement and encryption-key changes continue to fail safely.
+
+Native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. See docs/QUALIFICATION_MATRIX.md for evidence and limits. This candidate is not published.
+
+### Southland Labs rebrand
+
+- Rename the public product to SLL Mass Notify Server and the publisher to Southland Labs. Update website, project, support, schema, GitHub repository and updater links throughout the module, notifications, API descriptions, installer and documentation.
+- Preserve installed module/data/protocol identities and signing authority. Migrate only exact factory email defaults and bundled recording labels, with transactional rollback and unchanged recording IDs; keep custom settings and outstanding SMS reply tokens compatible.
+- Bundle the owner-provided Southland Labs server logo for the README, UI, email and webhooks. Keep compatible asset paths and an email copy within the existing size limit.
+
+### Deployment profiles
+
+- Offer Lite only below the Standard RAM baseline after independent Lite resource admission. Explain all hard limits and require explicit terminal consent, with No/EOF/timeout cancelling and unattended callers using `--lite`; reject Lite on Standard-capable hosts. Preserve the kernel-reservation allowance for nominal 4 GiB machines.
+- Disable Enterprise Labs and enterprise SSO throughout Lite UI, activation/configuration, provider and PHP/Python runtime paths while retaining saved configuration. Refuse conversion from active Enterprise policy; returning to Standard keeps Enterprise features inactive until explicitly enabled.
+
+- Add a signed-installer `--lite` profile for two-core, nominal 2 GiB FreePBX lab hosts. Lite is capped at 25 desktops and 25 phone contacts and binds speech, SSE, Weather observation and delivery concurrency without weakening security or silently dropping recipients. `--standard` performs the inverse resource check.
+- Make profile changes transactional: pending settings block conversion, encrypted configuration is atomically rewritten only after authenticated staging, failed installs restore the original profile, and configuration import/FreePBX restore cannot bypass installer admission.
+
+### Delivery and runtime safety
+
+- Omit the absent automation context from ordinary manual email envelopes so the strict child validator accepts them. Preserve real automation context and current-policy revalidation; add a PHP-to-Python regression with an inert mailer and malformed-context rejection checks.
+- Retry one complete, verified incident record or summary snapshot when an atomic commit replaces its record or cache during a read, including overlapping incident workers. Keep ownership, link, size, schema and durable delivery-claim checks intact; repeated replacement still fails closed.
+- Revalidate Weather, Lightning, NWS, voicemail, SMS, email and webhook authority beside each new handoff, including waits for synthesis, admission, cluster coordination and storage. Keep prior accepted or uncertain effects consumed when later work is suppressed, and preserve partial cancellation in delivery evidence.
+- Recheck local SMS consent before provider submission and pause new submissions when permanent opt-out replay history is full. Carry the original sender, source and batch deadlines across the final consent read without renewing reservations.
+- Persist browser notification deduplication claims before display; keep unknown outcomes consumed and allow retry after an explicit display rejection when its claim can be safely removed.
+- Move Weather and Lightning retry transports outside the durable journal lock. Use one short record lease per worker, commit each channel intent before I/O and convert interrupted or unconfirmed PBX, email and webhook submissions to terminal uncertainty instead of replaying them.
+- Validate Weather queue jobs, snapshots, dispatch metrics, numeric values, nesting and size before use. Apply the same schema before an authenticated upgrade tightens legacy journal permissions; preserve valid bytes and inodes and reject malformed evidence.
+- Generate Lightning speech and sequence audio through validated no-follow descriptors, then commit complete WAV files atomically. Reject changed, linked, oversized or incorrectly owned media.
+- Reject XML document types at the parser boundary as well as in the raw bytes. UTF-16 can no longer bypass declaration guards in Lightning provider responses or installed-module identity checks; valid multibyte XML remains supported.
+- Distinguish an explicit Asterisk voicemail-originate rejection from a timeout or lost AMI response. Close only an explicitly rejected reservation; retain ambiguous attempts as unconfirmed and never redial them automatically.
+- Build caller-specific dial-in paging menus so internal and external callers hear only groups they are authorized to select. Legacy trigger scripts without an execution boundary now migrate to restricted mode; CPU, output, descriptor and wall-time limits remain enforced.
+
+### Credentials, recovery and interface
+
+- Recheck operator and approval expiry after PBX identity lookups, bind trigger admission to the current enrollment HMAC, and retain the limited readiness projection for restricted credentials combining read and monitor scopes.
+- Allow native connection fallback across fully vetted IdP and CAP addresses while retaining TLS, unsafe-address rejection and one HTTP submission. Document that native DNS lookup runs before cURL transfer timers.
+- Mark removed coordination entries as unsaved editor work and protect navigation; expose concise cluster field names with their help text as accessible descriptions.
+- Stop returning encrypted desktop passwords or saved Lightning secrets to browser forms. Blank values preserve an existing credential, explicit controls clear Lightning credentials and every new desktop enrollment requires a password.
+- Disable the Control API after configuration import or restore, rotate its legacy key and revoke named credentials. Restored automation, schedules, external voice, SMS, Weather, Lightning and Enterprise Labs remain disabled for review.
+- Allow expired SAML certificates to remain visible for repair while rejecting provider enablement and runtime use. General SSO failures no longer expose provider assertion details to the browser.
+- Apply operator pre-authentication limits without letting an unauthenticated client target a known username globally; the durable IP/password limiter and post-authentication controls remain authoritative.
+- Encode OIDC token forms and Basic client credentials with OAuth 2.0 application/x-www-form-urlencoded rules. Send exactly one registered client-authentication method and cover Basic, POST and public clients with reserved-character fixtures.
+- Complete federated operator login through a public session-boundary check instead of calling a private settings method from the portal. Recheck current federation authority after local MFA and reject grants revoked before session creation.
+- Expose the separately authenticated browser display route when its Labs feature is enabled. Remove web-triggered root purge; complete uninstall remains bundled and requires `sudo slsconsole uninstall --purge` from a local shell.
+- Clear stale dependency health only after a later successful dependency check. Cache a validated desktop journal snapshot for the rest of the request instead of reparsing it.
+- Replace the ambiguous phone-display `child_finished` delivery code with explicit accepted, timed-out, or nonzero-sender outcomes while preserving fail-closed uncertainty after a sender starts.
+
+### Installation and release integrity
+
+- Validate configuration mutex ownership, content and named inode under the held lock; preserve busy-lock metadata. Use the encrypted configuration size limit for automatic snapshots and bound GPG output before signature verification.
+- Validate restored incident replay identities against a real stored SQLite table and a bounded identity projection before reading rows. Reject views, generated identity columns and malformed identities while retaining native archived-report compatibility.
+- Restore the retained-stock uninstaller reconciliation workspace role. Qualify descriptor-relative removal and pre-teardown path validation against writable PBX ancestors, without following substituted directories or custom sound links.
+- Ship fixes as a clean `0.1.9-beta` candidate with ordinary immutable release assets. Remove the historical same-version correction bootstrap and retain the rule that fresh bootstrap cannot bypass established publisher policy.
+- Keep package, served-PHP, updater, API, provider and voice-download identities aligned with `0.1.9-beta`. Publish matching release documentation with the signed artifacts.
+- Synchronize active runtime and legacy permission validation for private `0640` Weather state. Preserve signed previous-release approval, transactional rollback and protected configuration throughout upgrade recovery.
+- Reject malformed non-UTF-8 Unicode in Weather journals with a bounded, actionable validation failure before runtime use or legacy permission repair; never alter the rejected evidence.
+- Refresh installation, verification, qualification, API, SBOM, README and security documentation for the new candidate without claiming deployment certification.
+- Qualify both current and legacy desktop contract-suite layouts, reject incomplete checkouts before executing tests, and allow an explicitly selected client Python runtime independent of the PBX interpreter. Add regression coverage for these validation paths.
+- Allow the current `0.1.8-beta` upgrade baseline in the disposable-VM controller and manual CI workflow while retaining the explicit disposable-VM guard.
+
 ## 0.1.8-beta — 2026-10-25
 
 ### Installation and security
@@ -28,7 +117,7 @@
 - Serialize popup ownership with permanent locks so page cleanup cannot displace a newer alert. Bound protected configuration reads, registration probes and optional cluster coordination; retain explicit uncertainty when evidence or cleanup is unavailable.
 - Recover the known zero-byte legacy paging PIN journal only while its initialization marker is empty. Preserve permanent locks and PIN limits; reject damaged initialized state. Record bounded paging failures in syslog and play the unavailable prompt for storage failures.
 - Accept dial-in group numbers with pound or a two-second pause, retaining group 10, mandatory external PINs and the caller’s original channel timers.
-- Permit extension-only predial callbacks only when their exact leading guards prove an SLS Local call returns before the callback body. Bind outbound AGI admission to its expected Local channel; retain rejection of arbitrary hooks and changed routes.
+- Permit extension-only predial callbacks only when their exact leading guards prove an SLL Local call returns before the callback body. Bind outbound AGI admission to its expected Local channel; retain rejection of arbitrary hooks and changed routes.
 - Restore minutely storage reporting when cron uses isolated Python; a failed retention step no longer prevents the other checks or the health summary. Show current faults separately from retained historical failures.
 - Add a cached Postfix service/queue check with specific recovery guidance, numbered per-contact phone diagnostics and scrollable desktop readiness. New installations default to desktop app 1.0.13-beta; missing or stale version reports require an update.
 
@@ -179,15 +268,15 @@
 - Separate publisher approval, legacy permission recovery, previous collector recovery and worker/configuration coordination in installer diagnostics. Failed preparation names the actual stage; successful final verification clears the installation warning.
 - Include authenticated offline removal through `slsconsole uninstall`, including when the operational installer helper is missing. Drain notification workers before teardown and refuse active phone delivery. Preserve configuration, media, schedules, delivery history and logs by default; recover interrupted teardown using approved stock states. Refuse unexpected cron read/write failures and preserve unrelated jobs.
 - Coordinate collector voicemail submissions and expired-recording cleanup with installation and removal. Refuse still-pending fallbacks from older collectors before activation, leaving their evidence intact for a safe retry.
-- Bound all SLS email submissions with shared durable limits and local Postfix queue backpressure. Fence system-fault and Weather email handoffs before submission so interruptions or uncertain receipts cannot replay accepted mail.
+- Bound all SLL email submissions with shared durable limits and local Postfix queue backpressure. Fence system-fault and Weather email handoffs before submission so interruptions or uncertain receipts cannot replay accepted mail.
 - Keep fresh-install email disabled until Postfix and recipients are configured; clarify the Delivery setup and preserve existing upgrade routes.
-- Route all five SLS cron jobs through fixed commands with bounded private diagnostics and outer output redirection, preventing worker output from generating unattended cron email.
+- Route all five SLL cron jobs through fixed commands with bounded private diagnostics and outer output redirection, preventing worker output from generating unattended cron email.
 - Add a mandatory administrator beta warning after setup and upgrades. Require five visible seconds and a matching server-side challenge before confirmation; omit dismissal controls and save a separate acknowledgment for each FreePBX administrator account in the encrypted central configuration. A prior installation-wide acknowledgment counts only for its recorded administrator. Sequence the Enterprise Labs warning afterward. Keep the countdown running through page resizing while excluding hidden or unfocused window time.
 
 This corrected prerelease replaces the withdrawn October 10 package, addressing the reported legacy-permission upgrade failure and the two CI fixture failures. PBXs already running the earlier `0.1.6-beta` need the authenticated manual installer because automatic updates skip equal versions.
 
-- Recover recognized legacy SLS worker/admission files through root-only, no-follow descriptors after authenticating the previous release. Preserve journal bytes and existing lock inodes; reject links, unexpected ownership, oversized input and unrecognized layouts.
-- Exclude only the SLS data directory from FreePBX recursive permission normalization. Preserve unrelated native chown settings and retain recovery evidence for managed changes.
+- Recover recognized legacy SLL worker/admission files through root-only, no-follow descriptors after authenticating the previous release. Preserve journal bytes and existing lock inodes; reject links, unexpected ownership, oversized input and unrecognized layouts.
+- Exclude only the SLL data directory from FreePBX recursive permission normalization. Preserve unrelated native chown settings and retain recovery evidence for managed changes.
 - Verify the approved collector unit and a fresh authenticated heartbeat after permission recovery, before pausing workers. Keep unavailable collectors nonfatal during ordinary FreePBX reloads.
 - Correct the resource preflight fixture to use private Framework metadata and pin the native voicemail package in CI. Report missing native voicemail modules explicitly.
 - Add default-on, independent voicemail fallback controls for Weather, Lightning and live dial-in paging. Save prepared weather/lightning audio or the caller's recorded live page through the selected extension's native FreePBX mailbox only when no selected handset answered. Exclude the caller, prevent duplicate deposits, preserve normal mailbox length/capacity policies and report failed fallback outcomes. Manual alert tests, ordinary Dashboard TTS and external calls retain their previous handling.
@@ -230,24 +319,24 @@ This corrected prerelease replaces the withdrawn October 10 package, addressing 
 
 ## 0.1.5-beta — 2026-10-05
 
-- Allow FreePBX reloads to finish when the SLS phone collector is unavailable or reconnecting. Keep an actionable warning and current SLS health diagnostics; retain strict installation/restore checks and authenticated-heartbeat requirements for new phone audio.
+- Allow FreePBX reloads to finish when the SLL phone collector is unavailable or reconnecting. Keep an actionable warning and current SLL health diagnostics; retain strict installation/restore checks and authenticated-heartbeat requirements for new phone audio.
 - Restore missing previous runtime helpers from the authenticated release before taking a rollback snapshot. Quarantine recognized Python caches as recovery evidence without approving their bytecode for execution; report unknown runtime files and changed sources by name.
 - Retain installer stage messages and protected-helper errors in the protected log. Distinguish read-only filesystems, exhausted inodes and actual free-space shortages; show required and available MiB without rounding away small differences.
 - Put package-review and rollback workspaces on the selected scratch filesystem. Budget authenticated trust generations on their own mount and include measured prior runtime, API and recordings in rollback storage.
 
 New enterprise features start disabled. Existing production settings and notification/API contracts are preserved.
 
-- Check storage on the actual SLS target mounts, remove redundant parent-directory free-space floors, and move installation workspaces to `/var/tmp` when a small `/tmp` is insufficient. Keep genuine disk shortages blocked and preserve protected temporary-directory checks.
+- Check storage on the actual SLL target mounts, remove redundant parent-directory free-space floors, and move installation workspaces to `/var/tmp` when a small `/tmp` is insufficient. Keep genuine disk shortages blocked and preserve protected temporary-directory checks.
 - Add a check-only update action and restore retry controls after failures. Keep installation behind an explicit request and publisher verification; distinguish GitHub rate limits, DNS/network failures, TLS failures, invalid policy and release metadata.
 - Accept Apache DocumentRoot warnings when configuration validation succeeds; preserve fatal syntax and actual PBX/API route checks.
 - Show every registered phone separately in Help, retaining known vendors when another registration is unknown. Preserve each contact's XML format and transport; refuse to associate unresolved mixed contacts by list position.
 - Correct the default desktop minimum to the published `1.0.10-beta` numbering. Keep custom minimum policies and protocol checks intact.
-- Bootstrap missing Framework and Dashboard trust inventories from GPG-verified upstream packages at the installed versions and publisher-verified previous/candidate SLS overlays. Preserve reviewed local changes; report unknown differences before changing maintenance or protected runtime.
+- Bootstrap missing Framework and Dashboard trust inventories from GPG-verified upstream packages at the installed versions and publisher-verified previous/candidate SLL overlays. Preserve reviewed local changes; report unknown differences before changing maintenance or protected runtime.
 - Migrate the exact legacy Piper compatibility alias into a root-owned tree, retain original ownership/mode evidence, and repair the authenticated wrapper's execute permission. Reject additional files and unexpected links.
 - Approve the previous release before installation and restore its verified maintenance schedule after complete rollback. Preserve active/pending settings and delivery history; retain recovery evidence for failures and retries.
 - Filter User Management accounts by effective PBX login permission before constructing administrator records. Preserve downstream authorization checks and the 500-account preview limit.
 - Redirect Enterprise Labs Cancel and Escape to the FreePBX dashboard and keep page controls inactive until the required acknowledgment is saved.
-- Add `slsconsole start`, `stop`, `reboot`, `status` and help. Persist admission state in encrypted configuration; preserve staged edits, feature switches, existing calls and receipt tracking. Restart only the SLS collector; failed restarts leave notifications paused.
+- Add `slsconsole start`, `stop`, `reboot`, `status` and help. Persist admission state in encrypted configuration; preserve staged edits, feature switches, existing calls and receipt tracking. Restart only the SLL collector; failed restarts leave notifications paused.
 - Prevent isolated phone-health commands from creating root-only Python caches that incorrectly fail storage readiness checks.
 - Treat one-way webhook response uncertainty as a neutral receipt, preserve HTTP status and failure codes, and clear historical dashboard warnings through read-only projections. Keep explicit transport/HTTP failures visible and suppress automatic replay.
 - Open the exact danger notice automatically on the first Enterprise Labs visit. Remove manual review buttons, enforce the five-second wait, and save one revision-bound acknowledgment for the page without enabling features. Group continuity fields and improve responsive control spacing.
@@ -279,7 +368,7 @@ Provider accounts, real speakers/doors, genuine multi-host outages, public-warni
 - Add individually revocable, hashed Control API credentials with explicit action and recipient scopes. Recheck queued authority before transmission; preserve immediate revocation and staged edits. Restrict trusted proxies to reviewed CIDRs and redact credentials from API projections.
 - Harden protected files, command admission, archive extraction, journals and status storage against links, special files, unsafe ownership, oversized input, corruption, contention and incomplete writes. Preserve evidence and expose specific retryable errors.
 - Require administrator authority for automation configuration and script inspection. Correct descendant-location permissions for building/floor/room operators. Preserve permanent accepted SMS STOP replay identities within bounded storage.
-- Separate authenticated root installation phases from unprivileged FreePBX hooks. Authenticate SLS, Framework and Dashboard integration inventories; preserve protected configuration and operational history. Retain the existing signing key and add reviewed publisher-key overlap/revocation.
+- Separate authenticated root installation phases from unprivileged FreePBX hooks. Authenticate SLL, Framework and Dashboard integration inventories; preserve protected configuration and operational history. Retain the existing signing key and add reviewed publisher-key overlap/revocation.
 - Pin speech dependencies and verified binary wheels, generate a CycloneDX inventory and qualify isolated environment repair. Preserve the PBX interpreter and saved voice choices. Automatic updates remain opt-in, with release channels, pins and installation windows.
 
 ### Announcements and delivery
@@ -314,7 +403,7 @@ Provider accounts, real speakers/doors, genuine multi-host outages, public-warni
 - Reduce idle dashboard health polling from ten to sixty seconds, pause hidden-tab polling and prevent overlapping requests. Keep active job/receipt refresh and focus recovery responsive.
 - Avoid repeated whole-model checksum reads on page loads; retain complete verification before synthesis. Bound log/queue inspection and media cleanup while protecting active references and custom content.
 - Default capacities to 25 desktops and 25 phone contacts. Check combined CPU, RAM, dedicated additional free space and temporary workspace; show green/red resource indicators and reject unsupported increases. Fresh phone inventories above 25 round up to the next 50; upgrades retain saved limits.
-- Reorganize General Settings, paging, locations, operators and Help into responsive sections with consistent SLS branding and Labs badges. Preserve all hidden-panel values and reject truncated/stale form submissions.
+- Reorganize General Settings, paging, locations, operators and Help into responsive sections with consistent SLL branding and Labs badges. Preserve all hidden-panel values and reject truncated/stale form submissions.
 - Extend the setup wizard with timezone review, capacity checks and an optional advertised-address/forwarded-port editor. Keep HTTPS defaults and preserve existing installation-specific addresses.
 - Add deployment readiness reports, device-acceptance observations, redacted diagnostics and a separate-host HTTPS monitor. Software receipts, local health and administrator observations remain distinct evidence.
 - Add Control API capability discovery, authorized saved-audience discovery and dispatch-free announcement previews. Document administration, delivery, incident, fleet and trigger contracts in [CONTROL_API.md](docs/CONTROL_API.md); schedule administration remains in the FreePBX UI. Keep existing endpoint paths and authentication compatible.
@@ -337,7 +426,7 @@ Isolated fixtures and synthetic load checks do not establish handset display, hu
 
 - Added observable general-announcement worker startup and claims: jobs move through queued, worker_starting, running, and a terminal complete, failed, or expired state. Bootstrap failures, early exits, timeouts, and abandoned jobs no longer remain queued indefinitely.
 - Added a bootstrap-independent job recorder and bounded worker supervision. Failures retain a safe category and channel receipts; uncertain submissions are never automatically replayed. Stale, corrupt, and orphan queue markers cannot block recovery of other jobs.
-- Added a separate general-announcement health check covering PHP CLI, the worker, FreePBX/SLS bootstrap, protected job storage, and latest state. Maintenance refreshes it without sending alerts; the installer verifies it before completion.
+- Added a separate general-announcement health check covering PHP CLI, the worker, FreePBX/SLL bootstrap, protected job storage, and latest state. Maintenance refreshes it without sending alerts; the installer verifies it before completion.
 - Added the announcement job recorder to native restore presence and byte-parity checks, so an incomplete runtime cannot pass restore verification.
 - Fixed protected-config and Control API schema drift for Lightning strike_type and all_clear_minutes. Compatibility migration precedes strict validation; valid existing configurations and native backup bytes are preserved. Invalid group flags and unknown announcement-group fields are rejected.
 - Fixed updater, repair, and installer failure propagation. Nonzero command statuses and sanitized failure categories reach progress reports; failed update checks are no longer labeled current. Release and installation checks reject shell syntax errors.
@@ -400,7 +489,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Clarified desktop presence and delivery status. Connected, recently disconnected, and sleeping clients are distinguished without treating a sleeping computer as a live session; queued records remain subject to client targeting and expiry when the app reconnects.
 - Improved cross-PBX SIP NOTIFY routing. Mixed phone families on one extension receive contact-specific vendor payloads when URI routing is available and a safe generic endpoint payload otherwise. An unknown phone format alone no longer blocks installation, and SIP/SIPS contact URIs retain UDP, TCP, TLS, ports, parameters, and IPv6 syntax.
 - Reduced Discord branding to a compact thumbnail and stable public HTTPS image assets, with payload-size and field-limit validation.
-- Standardized every Discord and Discord-compatible announcement card on the SLS Mass Notification System display name and Southland Servers logo profile image. The same stable HTTPS logo is also used for compact author/footer branding, while the card artwork remains a thumbnail rather than a large inline image.
+- Standardized every Discord and Discord-compatible announcement card on the SLL Mass Notify Server display name and Southland Labs logo profile image. The same stable HTTPS logo is also used for compact author/footer branding, while the card artwork remains a thumbnail rather than a large inline image.
 - Replaced the Notification Logs severity column with a backward-compatible notification-type taxonomy. Existing JSONL records are classified at display time as Dashboard, Control API, Scheduling, Weather, Lightning, manual test, desktop, system/error, or other events; historic filter URLs remain compatible and full Weather severity remains available in event details.
 - Expanded Dashboard health for Weather, Lightning, scheduling, desktop streaming, external destinations, protected configuration, runtime parity, audio queue state, and installer/repair failures.
 - Hardened installation and repair around FreePBX/Asterisk variations, runtime ownership, module hooks, local signing, AMI discovery, provider checks, and post-install parity. Validation remains conservative and does not rewrite phone firmware, SIP peers, or unrelated FreePBX configuration.
@@ -419,7 +508,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Added a deduplicated system/error email notifier to the one-minute maintenance worker. Active Weather, Lightning, scheduling, installation, update, and maintenance faults are submitted once through the branded local Postfix path, clear when health recovers, and can notify again if the condition later returns. Multi-area Lightning uses per-area poll and delivery state without duplicating its mirrored aggregate fault; successful Weather fault mail is acknowledged in zone and Dashboard status. Mailer failures use a bounded retry interval.
 - Kept legacy email migration fail-closed across raw runtime reads, config imports, FreePBX restore, and Control API updates. Old `mail_to` values move only into Weather/Lightning live routes; an empty service route cannot fall back to system/error recipients, and the obsolete Control API field returns explicit migration guidance instead of silently changing meaning.
 - Added one shared live-alert dispatcher for Weather and Lightning. Email is submitted through the local sendmail path, Discord receives the branded compact card, and generic webhooks receive bounded structured JSON with an event ID and idempotency header. Webhook validation requires HTTPS, resolves only public addresses, pins the validated address for TLS, blocks redirects, limits payloads/retries, and keeps credentials out of results and logs.
-- Fixed Discord branding that could appear as an invalid webhook avatar or embed image. Discord payloads now use stable public Southland Servers HTTPS PNG assets for the profile image and card image instead of a PBX-hosted URL that may be private, unreachable through Discord's proxy, or stale behind a query-string cache key.
+- Fixed Discord branding that could appear as an invalid webhook avatar or embed image. Discord payloads now use stable public Southland Labs HTTPS PNG assets for the profile image and card image instead of a PBX-hosted URL that may be private, unreachable through Discord's proxy, or stale behind a query-string cache key.
 - Kept manual Weather and Lightning tests local. Tests can exercise the phone, audio, desktop, status, and popup paths without sending email, Discord, or generic webhook traffic.
 - Changed direct audio fan-out to Asterisk `Page()`/ConfBridge. Every resolved PJSIP contact can join the page, preventing a softphone registration from displacing a desk phone on the same extension. The generated call-file origin remains alive for the measured WAV plus a two-second teardown margin, while a five-second participant window avoids holding promptly answered phones in silence after playback.
 - Made Dashboard announcement feedback visible beside **Send Announcement**. The widget shows preparation, final success/warning, and partial-channel failures; if the browser loses the response, Send remains disabled until the cooldown probe confirms whether a retry is safe.
@@ -457,7 +546,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Expanded adaptive installer prerequisites to cover the exact PHP CLI path, OpenSSL, mbstring, POSIX, Python/venv/pip, SoX, ImageMagick, fonts, download/archive tools, cron/locking utilities, `PJSIP_AOR`, `CUT`, and every Asterisk function/application used by the paging contexts. Missing Debian packages are installed selectively; a complete system skips the package-index refresh. Effective dial-string components must resolve to real PJSIP endpoint objects, so a fabricated `PJSIP/<extension>` fallback no longer passes validation.
 - Added pre-activation validation for preserved AMI credentials and FreePBX's actual local AMI host/port. Existing central configuration is never paired with a transient generated AMI secret; malformed credentials, an invalid port, or a non-loopback Manager host stop safely before activation without printing or changing protected values.
 - Verifies that every required Asterisk provider will still load after restart. Systems using `autoload=no` must explicitly load each provider, while a matching `noload` entry is rejected with the affected module name instead of passing a temporary runtime-only check.
-- Added ownership-safe bundled System Recordings with unique `SLS_Mass_Notify_*` names. Existing unrelated recordings and a non-SLS `/usr/local/bin/piper` wrapper are never overwritten; uninstall removes a bundled recording only while its row, metadata, and audio hash still prove module ownership.
+- Added ownership-safe bundled System Recordings with unique `SLS_Mass_Notify_*` names. Existing unrelated recordings and an unrelated `/usr/local/bin/piper` wrapper are never overwritten; uninstall removes a bundled recording only while its row, metadata, and audio hash still prove module ownership.
 - Canonicalized the scheduling cron to exactly one protected entry, added Asterisk-account worker self-tests, preserved the PBX-local schedule execution ledger during a normal uninstall, and extended install/repair/uninstall parity and release regressions for all new runtime files.
 - Strengthened release packaging so credentials, private keys, logs, caches, backups, model files, nested archives, signatures, and generated artifacts fail the build instead of entering the TGZ.
 - Renamed user-facing **Plugin** wording to **Module** throughout FreePBX and Dashboard presentation. Established `SLS_Mass_Notifications_Plugin` data, sound, and asset paths remain unchanged for update compatibility.
@@ -531,7 +620,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Reduced each scheduled Xweather query to the single nearest cloud-to-ground strike and only the fields required for clustering and distance. The production response cost fell from 50 to 10 tokens per query; continuous five-minute polling would still cost about 86,400 tokens per 30 days, so adaptive coverage can miss lightning outside an NWS event.
 - Bundled the regular paging opening/closing tones, `Lightning_alert.mp3`, and `NWS_alert.wav`; the installer registers all four in FreePBX System Recordings and creates managed 8 kHz Asterisk versions. Fresh regular announcements use the paging opening and closing tones, Lightning uses `Lightning_alert.mp3` with no closing tone, and Weather Alerts use `NWS_alert.wav` with no closing tone; all three profiles default to 25% volume.
 - Added authenticated live desktop delivery through `/api/sipnotify/desktop/stream` using server-sent events, per-client Basic credentials, the existing strict target authorization, `Last-Event-ID` resume support, keepalives, and bounded reconnects. The JSON desktop endpoint remains available as a fallback.
-- Added always-on multipart branded HTML weather email cards with an inline embedded Southland Servers logo, Southland Servers Group and SLS Mass Notification System headers, structured alert details, and alert-aware urgency colors/icons for tornado, severe storm, flood, winter, fire, lightning, test, and general alerts. A plain-text alternative remains included. Standards-compliant encoded headers prevent Unicode alert subjects from requiring SMTPUTF8, and undisclosed-recipient headers no longer add the sender as a delivery recipient. Email and Discord delivery remain inactive until configured.
+- Added always-on multipart branded HTML weather email cards with an inline embedded Southland Labs logo, Southland Labs and SLL Mass Notify Server headers, structured alert details, and alert-aware urgency colors/icons for tornado, severe storm, flood, winter, fire, lightning, test, and general alerts. A plain-text alternative remains included. Standards-compliant encoded headers prevent Unicode alert subjects from requiring SMTPUTF8, and undisclosed-recipient headers no longer add the sender as a delivery recipient. Email and Discord delivery remain inactive until configured.
 - Moved the shared Weather and Lightning email recipients and Discord webhook into a compact **Notification Destinations** manager in General Settings, with add/remove rows, validation, masked webhook display, and no optional branding toggle.
 - Replaced the free-form Phone Format Overrides textarea with a General Settings manager that accepts a numeric extension and a supported phone-family dropdown.
 - Clarified the override names as **Yealink - Color** and **Yealink - Text Only**, removed the unnecessary Unknown/Safe Fallback manual option, added Panasonic KX detection/payload support, and extended ALE User-Agent detection. Unknown registered endpoints continue to be flagged in diagnostics.
@@ -543,7 +632,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Added an independent 1–200% Lightning TTS volume control that defaults to the configured Weather Alert volume. Lightning speech now says “this area” instead of reading latitude/longitude aloud, while named locations use the configured city; live alerts report the nearest strike distance from Xweather to one decimal mile instead of merely repeating the configured radius. The combined page continues to include one second of leading silence before its pre-tone and speech.
 - Reworked Notification Logs into a compact operational view with health cards, event-type and severity badges, Lightning filtering, clearer delivery summaries, improved empty states, and a structured event-detail layout.
 - Added consistent, restrained pictogram icons to the major Lightning, Weather, General Settings, setup, and log sections to improve scanning without restoring visual clutter.
-- Replaced long Discord field dumps with compact branded embeds using the Southland Servers/SLS identity, a public SLS logo image and avatar, alert-specific urgency colors and emoji, concise fields, timestamp, and explicit test footer. Weather, manual tests, and Lightning now use the same formatter.
+- Replaced long Discord field dumps with compact branded embeds using the Southland Labs/SLL identity, a public SLL logo image and avatar, alert-specific urgency colors and emoji, concise fields, timestamp, and explicit test footer. Weather, manual tests, and Lightning now use the same formatter.
 - Replaced the oversized shared product banner with a compact branded identity bar so module pages retain visible ownership without losing vertical workspace.
 - Changed the fresh-install weather voice default to Amy while retaining Lessac as the independent regular-announcement default. Lightning uses the Weather voice.
 - Added automatic cleanup of generated Piper speech and combined announcement WAV files 15 minutes after use through send paths and the root maintenance worker.
@@ -597,7 +686,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Moved the Piper executable environment into the root-owned runtime tree while keeping models and generated audio in the Asterisk data tree. The installer pins packaging tools, installs `piper-tts==1.4.2`, and verifies every voice model against a pinned revision and SHA-256 hash.
 - Fixed the Repair Installation button so it queues a real root-owned maintenance worker instead of reporting success when the FreePBX web user lacked permission to repair system files.
 - Reworked automatic beta updates as a root-owned, disabled-by-default job restricted to the official repository, exact beta tags, GitHub-provided SHA-256 asset digests, and the installer from the same immutable tag.
-- Hardened release installation with config hash preservation, safe TGZ path/type/size validation, runtime permission repair after `fwconsole chown`, API/dialplan/Piper smoke tests, and trusted local verification of the SLS, Dashboard, and Framework files modified by the integration.
+- Hardened release installation with config hash preservation, safe TGZ path/type/size validation, runtime permission repair after `fwconsole chown`, API/dialplan/Piper smoke tests, and trusted local verification of the SLL, Dashboard, and Framework files modified by the integration.
 - Reworked uninstall cleanup to remove runtime, cron, API, Apache, signing-key trust, dashboard/framework integration, and obsolete menu artifacts while preserving the central config, config backups, and uploaded tones unless an explicit purge is requested.
 - Added a release build gate that checks PHP/shell/Python/XML syntax, duplicate documentation parity, required files, embedded credentials, generated artifacts, unsafe archive members, expanded size, module identity, and reproducible TGZ metadata before packaging.
 
@@ -607,7 +696,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Added optional Control API IP allowlist, per-IP rate limiting, and 30-day API audit logging.
 - Added config import schema validation before staging uploaded `.config` files.
 - Added a General Settings repair action that refreshes runtime files, permissions, API routes, cron, dialplan, dashboard widget files, and local signatures.
-- Added explicit Asterisk NOTICE logging for SLS audio page start, dial, playback, and completion.
+- Added explicit Asterisk NOTICE logging for SLL audio page start, dial, playback, and completion.
 - Added unknown endpoint vendor flagging and read-only endpoint detection diagnostics.
 - Added NWS preview output for representative TTS, phone XML, desktop JSON, and email subject.
 - Fixed Mass Notify menu placement and submenu order: Help, Logging, General Settings, NWS Alerts.
@@ -631,7 +720,7 @@ Delivery results report the PBX submission boundary, not confirmed handset displ
 - Added a configurable Piper TTS maximum duration with a 30-second default and 600-second maximum.
 - Added the installed package version to General Settings > Updates.
 - Fixed uninstall cleanup so the custom menu-placement patch is removed and stock module signatures are refreshed after dashboard/widget cleanup.
-- Updated the release installer to explicitly re-sign and verify the SLS module plus Dashboard after runtime repair, FreePBX chown, and reload steps.
+- Updated the release installer to explicitly re-sign and verify the SLL module plus Dashboard after runtime repair, FreePBX chown, and reload steps.
 - Hardened local signing trust import across FreePBX GPG homes used by CLI and web verification.
 - Added a final post-sign reload/sign pass so FreePBX sees valid signatures after installer repair.
 - Fixed installer/signing aborts caused by FreePBX returning nonzero status for already-enabled modules or pre-existing unsigned/tampered state.

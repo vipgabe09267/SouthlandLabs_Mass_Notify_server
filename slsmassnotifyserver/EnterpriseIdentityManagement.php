@@ -44,7 +44,9 @@ trait SlsEnterpriseLabs
     {
         $lock=null;$activity=null;
         try{
-            $this->enterpriseLabsAdmin();$allowed=['identity_save','directory_save','directory_preview','directory_apply','subscriber_save','subscriber_invite','subscriber_enroll','subscriber_revoke','subscriber_push_key','subscriber_push_test'];
+            $this->enterpriseLabsAdmin();
+            \SLS\MassNotify\RuntimeState::requireEnterpriseAvailable($this->getActiveSettings());
+            $allowed=['identity_save','directory_save','directory_preview','directory_apply','subscriber_save','subscriber_invite','subscriber_enroll','subscriber_revoke','subscriber_push_key','subscriber_push_test'];
             if(!in_array($action,$allowed,true)){throw new \DomainException('Unsupported enterprise Labs action.');}
             if (in_array($action,['directory_preview','directory_apply','subscriber_invite','subscriber_enroll','subscriber_push_test'],true)) {
                 \SLS\MassNotify\EnterpriseLabsConfig::requireEnabled($this->getActiveSettings());
@@ -95,13 +97,14 @@ trait SlsEnterpriseLabs
                 $settings=$this->getActiveSettings();$service=$this->subscriberService();$issued=$service->issue($settings,$input['subscriber_id'],$enrollment?'':$input['incident_id'],time());
                 // Persisted reservation precedes the single explicit transport
                 // submission. Failed/uncertain delivery never retries itself.
-                try{$delivery=$this->sendOperatorRecoveryEmail($settings,$issued['person']['email'],$enrollment?'SLS browser enrollment':'SLS incident email verification',
+                try{$delivery=$this->sendOperatorRecoveryEmail($settings,$issued['person']['email'],$enrollment?'SLL browser enrollment':'SLL incident email verification',
                     ($enrollment?"Open this link to verify your saved email address and manage browser notifications:":"Open this link to verify your email and respond to the incident:")."\n\n".$issued['url']."\n\nThis link expires at ".gmdate('c',$issued['expires_at'])." and works once. Your response is separate from message delivery. If you need emergency assistance, follow your organization's emergency procedures.");}catch(\Throwable $e){$delivery='unconfirmed';}
                 $service->delivery($issued['token_hash'],$delivery);return ['success'=>$delivery==='accepted','message'=>$delivery==='accepted'?'One invitation was accepted by local Postfix; this is not proof of delivery or a human response.':'Invitation delivery failed or is unconfirmed. Its link was revoked; no automatic resend will occur.','delivery'=>$delivery,'expires_at'=>gmdate('c',$issued['expires_at'])];
             }
             $activity=$this->acquireAnnouncementActivityLock(true,5);
             if($activity===null){throw new \DomainException('An announcement is using these settings. Wait for delivery to finish, then try again.');}
             $lock=$this->acquireSettingsLock(false);$active=$this->normalizeSettings($this->loadSettingsFile(self::SETTINGS_JSON));
+            \SLS\MassNotify\RuntimeState::requireEnterpriseAvailable($active);
             if(in_array($action,['identity_save','directory_save','subscriber_save'],true)){
                 if(count($input)!==2||array_diff(array_keys($input),['config','revision'])||!is_array($input['config']??null)
                     ||!is_string($input['revision']??null)||!preg_match('/^[a-f0-9]{64}$/D',$input['revision'])){throw new \DomainException('Submit the complete configuration and its current revision. Reload this editor before saving.');}
@@ -111,7 +114,7 @@ trait SlsEnterpriseLabs
             if($action==='identity_save'){
                 $config=$input['config'];$old=EnterpriseIdentityConfig::normalize($active['enterprise_identity']??[]);$byId=array_column($old['providers'],null,'id');
                 if(!is_array($config)){throw new \DomainException('Configuration must be an object.');}$config['providers']??=[];if(!is_array($config['providers'])||!array_is_list($config['providers'])){throw new \DomainException('Enterprise providers must be a list.');}foreach($config['providers'] as &$p){if(!is_array($p)||array_is_list($p)){throw new \DomainException('Each enterprise provider must be an object.');}if(!array_key_exists('id',$p)||$p['id']===''){$p['id']='idp_'.bin2hex(random_bytes(12));}elseif(!is_string($p['id'])){throw new \DomainException('Provider identity is invalid.');}unset($p['idp_certificate_expires_at'],$p['sp_certificate_expires_at'],$p['certificate_warning']);foreach(['client_secret','sp_private_key'] as $key){unset($p[$key.'_configured']);if(isset($byId[$p['id']][$key])&&($p[$key]??'')===''){$p[$key]=$byId[$p['id']][$key];}}}unset($p);
-                $config=EnterpriseIdentityConfig::bindCallbacks(EnterpriseIdentityConfig::normalize($config),$active);$accounts=array_column($active['operator_access']['accounts']??[],null,'id');
+                $config=EnterpriseIdentityConfig::bindCallbacks(EnterpriseIdentityConfig::normalize($config),$active);EnterpriseIdentityConfig::assertEnabledCertificates($config);$accounts=array_column($active['operator_access']['accounts']??[],null,'id');
                 foreach($config['grants'] as $g){$a=$accounts[$g['operator_account_id']]??null;if(!$a||$a['source']!=='portal'){throw new \DomainException('Bind enterprise subjects only to existing local portal accounts.');}}
                 if($config['enabled']){$localAdmins=array_filter($accounts,static fn($a)=>$a['source']==='portal'&&$a['enabled']&&$a['role']==='administrator'&&\SLS\MassNotify\OperatorAccess::activeAccount($a)&&\SLS\MassNotify\OperatorAuth::ready($a));if(!$localAdmins){throw new \DomainException('Keep an enabled, enrolled and unexpired local portal administrator for recovery before enabling operator SSO.');}}
                 $active['enterprise_identity']=$config;$this->enterpriseLabsWrite($active,['enterprise_identity']);return ['success'=>true,'message'=>'Enterprise identity saved. Local grants and recovery accounts remain authoritative.','config'=>EnterpriseIdentityConfig::publicConfig($config),'revision'=>$this->enterpriseLabsConfigRevision('enterprise_identity',$active)];
@@ -176,6 +179,9 @@ trait SlsEnterpriseLabs
     public function renderOperatorIdentitySettings(string $endpoint,string $csrf): string
     {
         $this->enterpriseLabsAdmin();$settings=$this->getActiveSettings();
+        if (!\SLS\MassNotify\RuntimeState::enterpriseAvailable($settings)) {
+            return '<div class="alert alert-warning" role="status">Enterprise SSO is unavailable in Lite mode. Saved provider configuration is retained. Use the verified installer with <code>--standard</code> on a PBX meeting Standard requirements before enabling enterprise SSO.</div>';
+        }
         $callback=EnterpriseIdentityConfig::expectedCallback($settings);$identity=EnterpriseIdentityConfig::publicConfig(EnterpriseIdentityConfig::normalize($settings['enterprise_identity']??[]));
         foreach($identity['providers'] as &$provider){$provider['callback_url']=$callback;}unset($provider);
         $revisions=['identity'=>$this->enterpriseLabsConfigRevision('enterprise_identity',$settings)];
@@ -188,6 +194,7 @@ trait SlsEnterpriseLabs
     public function renderEnterpriseLabsPage(string $endpoint,string $csrf): string
     {
         $this->enterpriseLabsAdmin();$settings=$this->getActiveSettings();
+        if (!\SLS\MassNotify\RuntimeState::enterpriseAvailable($settings)) { return load_view(__DIR__.'/views/enterprise_lite.php'); }
         $directory=DirectoryConfig::publicConfig(DirectoryConfig::normalize($settings['directory_sync']??[]));$subscriber=SubscriberConfig::publicConfig($settings['subscriber_browser']??[]);
         $revisions=['directory'=>$this->enterpriseLabsConfigRevision('directory_sync',$settings),'subscriber'=>$this->enterpriseLabsConfigRevision('subscriber_browser',$settings)];
         $templates=array_map(static fn($t)=>['id'=>$t['id'],'name'=>$t['name']],$settings['incident_workflows']['templates']??[]);

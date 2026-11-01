@@ -35,9 +35,11 @@ const form = {addEventListener(event, callback){this.submit=callback;}};
 const field = {value:'',form};
 const elements = {'add-desktop-client':add,'sls-desktop-limit':capacity,'sls-desktop-capacity-error':error,'sls-desktop-clients-json':field};
 const document = {querySelector(){return table;},getElementById(id){return elements[id]||null;},createElement(){return row(-1);}};
-vm.runInNewContext(code, {document, window:{setTimeout(callback){timers.push(callback);}}});
+let dirtyMarks = 0;
+vm.runInNewContext(code, {document, markGeneralDirty(){dirtyMarks++;}, window:{setTimeout(callback){timers.push(callback);}}});
 add.click();
 assert(rows[2].inputs.every(field=>field.name.startsWith('desktop_clients[3]')),'delete/add reused an existing row index');
+assert.equal(dirtyMarks,1,'adding a desktop client did not mark General Settings dirty');
 rows.length=0;
 for(let i=0;i<1000;i++)rows.push(row(i));
 form.submit();
@@ -52,10 +54,14 @@ assert(rows.every(row=>row.inputs.every(field=>!field.disabled)),'cancelled subm
 add.click();
 assert.equal(rows.length,1000);
 assert(error.textContent.includes('capacity reached'));
-console.log('Desktop editor: sparse indexes,1000-client serialization,checkboxes,capacity and cancelled-submit recovery passed.');
+assert.equal(dirtyMarks,1,'a rejected add incorrectly changed dirty state');
+console.log('Desktop editor: sparse indexes,1000-client serialization,checkboxes,capacity,dirty-state and cancelled-submit recovery passed.');
 '''.replace('SCRIPT', json.dumps(script))
 subprocess.run([node, '-e', fixture], check=True)
 form_start = source.index('id="sls-other-settings-form"')
 form_end = source.index('</form>', form_start)
 sentinel = source.index('name="sls_general_form_complete"', form_start)
 assert sentinel < form_end and not re.search(r'\bname=', source[sentinel + len('name="sls_general_form_complete"'):form_end])
+assert 'password_enc' not in source, 'Encrypted desktop credentials must never be rendered into HTML.'
+assert 'Stored; enter a new password to rotate' in source
+assert 'Required for a new client' in source

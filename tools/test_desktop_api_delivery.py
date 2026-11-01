@@ -178,9 +178,10 @@ class DesktopApiDeliveryTests(unittest.TestCase):
         """)
         self.assertEqual(result, {"shared_nat_allowed": True, "overactive_allowed": False, "another_client_allowed": True, "next_minute": True})
 
-    def test_registered_authenticated_reads_share_registry_without_bypassing_writers(self):
+    def test_authenticated_shards_do_not_bypass_failed_login_writer_lock(self):
         result = self.php("""
             $now=1800000000;
+            file_put_contents(DESKTOP_AUTH_RATE_FILE,"{}\n");chmod(DESKTOP_AUTH_RATE_FILE,0640);
             $initial=desktop_auth_attempt_allowed('192.0.2.1','alice',true,$now);
             $before=file_get_contents(DESKTOP_AUTH_RATE_FILE);
             $lease=fopen(DESKTOP_AUTH_RATE_FILE.'.lock','r+b');flock($lease,LOCK_SH);
@@ -196,7 +197,7 @@ class DesktopApiDeliveryTests(unittest.TestCase):
         """)
         self.assertEqual(result, {'initial':True,'authenticated':True,'precheck':True,
                                   'failed':False,'failureReason':'state_locked',
-                                  'newClient':False,'unchanged':True,'newClientRetry':True})
+                                  'newClient':True,'unchanged':True,'newClientRetry':True})
 
     def test_registry_write_upgrade_reloads_a_concurrent_committed_change(self):
         self.prefix=self.prefix.replace('function api_state_lock(', 'function fixture_api_state_lock(',1)
@@ -333,12 +334,22 @@ class DesktopApiDeliveryTests(unittest.TestCase):
     def test_personalized_feed_does_not_disclose_other_desktop_recipients(self):
         result=self.php("""
             $event=['id'=>'event-a','desktop_all'=>true,'desktop_recipients'=>['alice','bob'],
-                'desktop_client_ids'=>['alice'=>'first','bob'=>'second'],'created_at'=>'2026-10-23T00:00:00Z'];
+                'desktop_client_ids'=>['alice'=>'first','bob'=>'second'],'created_at'=>'2026-10-23T00:00:00Z',
+                'xml'=>'<YealinkIPPhoneText/>','recipients'=>['1000','1001'],
+                'phone_formats'=>['1000'=>'yealink'],'phone_image_url'=>'https://pbx.test/phone.png',
+                'image_url'=>'https://pbx.test/desktop.png','message'=>'Keep this text',
+                'presentation'=>['severity'=>'warning'],'incident_id'=>'incident-a'];
             echo json_encode(desktop_event_public_payload($event,[],['username'=>'alice']));
         """)
         self.assertEqual(result['desktop_recipients'],['alice']);self.assertFalse(result['desktop_all'])
         self.assertNotIn('bob',json.dumps(result));self.assertNotIn('desktop_client_ids',result)
         self.assertEqual(result['created_at'],'2026-10-23T00:00:00Z')
+        for private in ('xml','recipients','phone_formats','phone_image_url'):
+            self.assertNotIn(private,result)
+        self.assertEqual(result['image_url'],'https://pbx.test/desktop.png')
+        self.assertEqual(result['message'],'Keep this text')
+        self.assertEqual(result['presentation'],{'severity':'warning'})
+        self.assertEqual(result['incident_id'],'incident-a')
 
     def test_authenticated_requests_reuse_registry_and_preserve_preupgrade_counter(self):
         result=self.php("""
@@ -357,16 +368,40 @@ class DesktopApiDeliveryTests(unittest.TestCase):
             $capacities = [desktop_authenticated_capacity([]),
                 desktop_authenticated_capacity(['desktop_client_limit' => 1000]),
                 desktop_authenticated_capacity(['desktop_clients' => array_fill(0, 50, [])]),
-                desktop_authenticated_capacity(['desktop_client_limit' => 100000])];
+                desktop_authenticated_capacity(['deployment_profile'=>'standard','desktop_client_limit'=>1000])];
+            $sameShard = [];
+            for ($i = 0; count($sameShard) < 26; $i++) {
+                $name = 'client-' . $i;
+                if (substr(hash('sha256', 'authenticated:' . $name), 0, 2) === '00') { $sameShard[] = $name; }
+            }
             $allowed = true;
             for ($i = 0; $i < 25; $i++) {
-                $allowed = desktop_auth_attempt_allowed('192.0.2.1', 'client-' . $i, true, 1800000000, false, 25) && $allowed;
+                $allowed = desktop_auth_attempt_allowed('192.0.2.1', $sameShard[$i], true, 1800000000, false, 25) && $allowed;
             }
             echo json_encode(['capacities' => $capacities, 'allowed' => $allowed,
-                'over_capacity' => desktop_auth_attempt_allowed('192.0.2.1', 'new-client', true, 1800000000, false, 25),
-                'enrolled_preserved' => desktop_auth_attempt_allowed('192.0.2.1', 'client-0', true, 1800000000, false, 25)]);
+                'over_capacity' => desktop_auth_attempt_allowed('192.0.2.1', $sameShard[25], true, 1800000000, false, 25),
+                'enrolled_preserved' => desktop_auth_attempt_allowed('192.0.2.1', $sameShard[0], true, 1800000000, false, 25)]);
         """)
         self.assertEqual(result, {"capacities": [25, 1000, 50, 1000], "allowed": True, "over_capacity": False, "enrolled_preserved": True})
+
+    def test_lite_runtime_rejects_damaged_or_oversized_desktop_capacity(self):
+        result = self.php("""
+            $invalid=[];
+            foreach ([
+                ['deployment_profile'=>'invalid'],
+                ['deployment_profile'=>'lite','desktop_client_limit'=>26],
+                ['deployment_profile'=>'lite','desktop_clients'=>array_fill(0,26,[])],
+                ['deployment_profile'=>'lite','desktop_client_limit'=>'25'],
+                ['deployment_profile'=>'standard','desktop_client_limit'=>100000],
+            ] as $settings) {
+                try { desktop_authenticated_capacity($settings); $invalid[]=false; }
+                catch (RuntimeException $error) { $invalid[]=$error->getMessage()==='desktop_capacity_config_invalid'; }
+            }
+            echo json_encode(['invalid'=>$invalid,
+                'lite'=>desktop_authenticated_capacity(['deployment_profile'=>'lite','desktop_client_limit'=>25]),
+                'standard'=>desktop_authenticated_capacity(['deployment_profile'=>'standard','desktop_client_limit'=>1000])]);
+        """)
+        self.assertEqual(result, {'invalid':[True,True,True,True,True], 'lite':25, 'standard':1000})
 
     def test_poll_and_ack_burst_fit_one_authenticated_client_budget(self):
         result = self.php("""
@@ -404,7 +439,7 @@ class DesktopApiDeliveryTests(unittest.TestCase):
             $saved = json_decode(file_get_contents(DESKTOP_AUTH_RATE_FILE), true);
             echo json_encode(['failed' => $failed, 'valid' => $valid, 'count' => count($saved), 'original_preserved' => isset($saved[array_key_first($data)]), 'within_size_bound' => filesize(DESKTOP_AUTH_RATE_FILE) <= 524288]);
         """, timeout=90)
-        self.assertEqual(result, {"failed": False, "valid": True, "count": 3048, "original_preserved": True, "within_size_bound": True})
+        self.assertEqual(result, {"failed": False, "valid": True, "count": 2048, "original_preserved": True, "within_size_bound": True})
 
     def test_cursor_polling_pages_backlog_without_skipping_expired_records(self):
         result = self.php("""
@@ -548,6 +583,23 @@ class DesktopApiDeliveryTests(unittest.TestCase):
         self.assertEqual(result["error"], "stream_capacity_reached")
         self.assertEqual(result["fallback"]["transport"], "json_poll")
         self.assertEqual(result["fallback"]["cursor_parameter"], "last_event_id")
+
+    def test_lite_stream_capacity_is_one_per_user_and_four_global(self):
+        result = self.php("""
+            $held = desktop_stream_slot('alice', ['deployment_profile'=>'lite']);
+            desktop_stream_slot('alice', ['deployment_profile'=>'lite']);
+        """)
+        self.assertEqual(result["error"], "stream_capacity_reached")
+        result = self.php("""
+            $slots=[];
+            for ($i=0; $i<4; $i++) {
+                $slots[] = desktop_stream_slot('client-' . $i, ['deployment_profile'=>'lite']);
+            }
+            desktop_stream_slot('client-4', ['deployment_profile'=>'lite']);
+        """)
+        self.assertEqual(result["error"], "stream_capacity_reached")
+        result = self.php("desktop_stream_slot('alice', ['deployment_profile'=>'invalid']);")
+        self.assertEqual(result["error"], "stream_capacity_unavailable")
 
     def test_stream_slot_directory_created_by_another_request_is_accepted(self):
         self.prefix = self.prefix.replace(

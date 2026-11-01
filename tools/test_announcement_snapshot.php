@@ -191,9 +191,11 @@ try {
     if (($longOrdinary['error_code']??'')!=='message_too_long') { throw new RuntimeException('The trusted Weather path expanded ordinary announcement limits.'); }
     unset($module->settings['outbound_voice']);
     $GLOBALS['sls_control_principal']=['username'=>'fixture_operator','id'=>'api_'.str_repeat('a',24)];
-    $operator=$module->sendSipNotifyAnnouncement(['1000'],'Operator fixture',true,false,[],
-        ['audio_mode'=>'none','trigger_source'=>'SLS Operator Portal','sender'=>'spoofed sender']);
-    if(($operator['request']['sender']??'')!=='Operator: fixture_operator'){throw new RuntimeException('Operator sender attribution was not frozen from the verified principal.');}
+    foreach (['SLL Operator Portal', 'SLS Operator Portal'] as $operatorSource) {
+        $operator=$module->sendSipNotifyAnnouncement(['1000'],'Operator fixture',true,false,[],
+            ['audio_mode'=>'none','trigger_source'=>$operatorSource,'sender'=>'spoofed sender']);
+        if(($operator['request']['sender']??'')!=='Operator: fixture_operator'){throw new RuntimeException('Operator sender attribution was not frozen from the verified principal.');}
+    }
     unset($GLOBALS['sls_control_principal']);
     $resolved = $module->sendSipNotifyAnnouncement(['1000'], 'Original message', true, true, [],
         ['webhook_ids'=>['hook'], 'audio_mode'=>'tts', 'sender'=>'Original sender']);

@@ -1,6 +1,6 @@
 <?php
 require_once __DIR__.'/AdminResponse.php';
-// Southland Servers Mass Notifications Server by the Southland Servers Group
+// SLL Mass Notify Server by the Southland Labs
 
 $slsmassnotifyserver = \FreePBX::create()->Slsmassnotifyserver;
 $slsmassnotifyserver->enforceOperatorPageAccess('slsmassnotifyserver_other');
@@ -136,11 +136,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 			? $slsmassnotifyserver->requestUpdateCheck() : $slsmassnotifyserver->requestManualUpdate();
 		$_SESSION['slsmassnotifyserver_other_save_result'] = $updateResult;
 		header('Location: config.php?display=slsmassnotifyserver_other' . (!empty($updateResult['success']) ? '&sls_update_queued=1' : '') . '#settings-maintenance');
-		exit;
-	} elseif ($action === 'complete_uninstall') {
-		$uninstallResult = $slsmassnotifyserver->requestCompleteUninstall();
-		$_SESSION['slsmassnotifyserver_other_save_result'] = $uninstallResult;
-		header('Location: config.php?display=slsmassnotifyserver_other' . (!empty($uninstallResult['success']) ? '&sls_maintenance_action=uninstall' : ''));
 		exit;
 	} elseif ($action === 'apply_settings') {
 		$_SESSION['slsmassnotifyserver_other_apply_result'] = $slsmassnotifyserver->applySettings();

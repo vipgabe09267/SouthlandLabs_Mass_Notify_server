@@ -8,7 +8,8 @@ required qualification; these fixtures make no production login requests.
 Dashboard browser checks also require a local public jQuery asset through `SLS_UI_JQUERY`. CI installs Debian's `libjs-jquery` and supplies `/usr/share/javascript/jquery/jquery.min.js`. This fixture dependency does not add or replace the PBX's jQuery installation.
 
 The VM controller retains a private report on prerequisite failure and bounded
-logs on scenario failure. It supports 0.1.6 upgrades, early preparation power
+logs on scenario failure. It supports fresh installs and 0.1.4 through 0.1.8
+upgrades, early preparation power
 loss, repair, removal and purge. Controller tests are not successful full PBX
 VM runs. See the [qualification matrix](QUALIFICATION_MATRIX.md).
 
@@ -17,6 +18,27 @@ VM runs. See the [qualification matrix](QUALIFICATION_MATRIX.md).
 `tools/lint_source.sh` checks PHP, shell and Python syntax and the mirrored documentation. `tools/run_isolated_tests.sh` discovers the behavior/failure suites registered in the release build, then masks PBX state and sockets with disposable mount, network and PID namespaces. Privileged container access is required for those namespaces and is confined to the disposable runner. Do not run CI on this production PBX as a self-hosted runner.
 
 Run focused suites while developing; run the complete registered set before a candidate release. Register new meaningful behavior tests in `tools/build_tgz.sh` so both CI and release preparation exercise them. A signing step is deliberately absent from CI.
+
+Cross-repository desktop qualification uses a reviewed checkout supplied in
+`SLS_DESKTOP_APP_SOURCE`; set `SLS_DESKTOP_APP_REQUIRED=1` to fail instead of
+skipping when it is absent. The adapter supports the current consolidated
+contract suite and the earlier separate suites, and rejects incomplete source
+trees before running them. If the client requires a different Python version,
+set `SLS_DESKTOP_PYTHON` to its reviewed absolute interpreter path and provide
+private dependency directories through `SLS_DESKTOP_PYTHON_PATH`. The fixture
+does not install a runtime or change the PBX Python environment. These tests
+exercise client transport contracts, not a Windows GUI or physical display.
+
+Portal HTTP regressions complete federated local MFA with a private production
+settings method and recheck grants revoked before or during session creation.
+Protocol signature and replay fixtures remain separate from this final session
+boundary check.
+
+XML regressions reject document types and internal entities in UTF-8, UTF-16
+with a byte-order mark, and explicit little-/big-endian UTF-16. Positive cases
+retain valid module identities and namespaced Lightning schema/strike parsing
+in each encoding. PHP SAML and CAP paths also check the parsed document type;
+their raw-byte filters are not their only declaration defense.
 
 Concurrency regressions cover simultaneous first-directory creation with valid, linked and non-directory replacements; shared desktop limiter reads with exclusive write revalidation; and receipt retry after lock contention. Browser checks complete obsolete HTTP 200 and 401 responses after a new display login and verify that its session and cursor survive. Recording checks retain case-sensitive names and model an unavailable G.722 decoder. Uninstaller checks verify that help and unsupported arguments cannot reach host operations.
 

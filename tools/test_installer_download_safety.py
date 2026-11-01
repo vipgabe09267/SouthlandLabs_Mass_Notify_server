@@ -20,7 +20,7 @@ INSTALLER = ROOT / 'tools/install_release.sh'
 SOURCE = INSTALLER.read_text()
 VERSION = ET.parse(ROOT / 'slsmassnotifyserver/module.xml').getroot().findtext('version')
 DOWNLOAD = SOURCE.split('fetch_release_asset() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
-URL = ('https://github.com/vipgabe09267/SouthlandServers_Mass_Notify_server/releases/download/'
+URL = ('https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'
        f'slsmassnotifyserver-{VERSION}/slsmassnotifyserver-{VERSION}.tgz')
 
 
@@ -39,6 +39,17 @@ class DownloadTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def test_direct_root_entrypoint_uses_fixed_shell_and_path_before_readlink(self):
+        tools=self.directory/'poisoned-path';tools.mkdir();marker=self.directory/'poisoned-command-ran'
+        for name in ('bash','readlink'):
+            path=tools/name
+            path.write_text('#!/bin/sh\n/bin/printf "%s\\n" "$0" >>"$SLS_POISON_MARKER"\nexit 91\n')
+            path.chmod(0o755)
+        result=subprocess.run([str(INSTALLER),'--definitely-unsupported'],
+            env={'PATH':str(tools),'SLS_POISON_MARKER':str(marker)},capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,2,result.stdout+result.stderr)
+        self.assertFalse(marker.exists(),'Installer trusted a caller-controlled shell or readlink before fixing PATH')
 
     def run_download(self, *, url=URL, limit=64, token='fixture-token', response=None, effects=None):
         with patch.dict(os.environ, {
@@ -175,7 +186,7 @@ rm -rf -- "$DOWNLOAD_DIR"
         script = r'''
 source "$1"
 TGZ="$2"
-URL="https://github.com/example/project/releases/download/slsmassnotifyserver-0.1.8-beta/slsmassnotifyserver-0.1.8-beta.tgz"
+URL="$3"
 SHA256=""
 fetch_release_asset() { printf 'not-the-published-package' >"$2"; }
 verify_publisher_release() { return 0; }
@@ -183,7 +194,7 @@ download_tgz
 verify_tgz
 '''
         result = subprocess.run(
-            ['bash', '-c', script, '_', str(INSTALLER), str(archive)],
+            ['bash', '-c', script, '_', str(INSTALLER), str(archive), URL],
             capture_output=True,
             text=True,
             timeout=15,
@@ -319,8 +330,12 @@ printf '%s\n' "$status"
     def test_executed_installer_rejects_ambiguous_or_unknown_arguments(self):
         cases = (
             (['--unknown'], {}),
+            (['--lite', '--standard'], {}),
+            (['--standard', '--recover', '/var/lib/sls-mass-notify-installer/transaction-' + 'a' * 24], {}),
             (['https://github.com/one', 'https://github.com/two'], {}),
             (['--recover', '/var/lib/sls-mass-notify-installer/transaction-' + 'a' * 24, '--inspect'], {}),
+            (['--history-evidence', '/root/evidence.json'], {}),
+            (['--recover', '/var/lib/sls-mass-notify-installer/transaction-' + 'a' * 24, '--history-evidence'], {}),
             (['https://github.com/positional'], {'SLS_MASS_NOTIFY_TGZ_URL': 'https://github.com/environment'}),
         )
         for arguments, extra_environment in cases:
@@ -329,6 +344,17 @@ printf '%s\n' "$status"
             result = subprocess.run(['bash', str(INSTALLER), *arguments], env=environment,
                                     capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 2, (arguments, result.stdout, result.stderr))
+
+    def test_history_evidence_argument_is_parsed_without_host_actions(self):
+        header=SOURCE.split('\nMODULE="slsmassnotifyserver"',1)[0]
+        caller=self.directory/'argument-parser.sh'
+        caller.write_text(header+'\nprintf "%s\\n%s\\n" "$REQUESTED_RECOVERY" "$REQUESTED_HISTORY_EVIDENCE"\n')
+        transaction='/var/lib/sls-mass-notify-installer/transaction-'+'a'*24
+        evidence='/root/pre upgrade/phone-admission.json'
+        result=subprocess.run(['bash',str(caller),'--recover',transaction,'--history-evidence',evidence],
+                              capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(result.stdout.splitlines(),[transaction,evidence])
         # Helper fixtures and administrators may source the library in a shell
         # that already has unrelated positional arguments; sourcing must not
         # seize or reject those arguments.
@@ -337,6 +363,12 @@ printf '%s\n' "$status"
             capture_output=True, text=True, timeout=15,
         )
         self.assertEqual((result.returncode, result.stdout), (0, 'sourced'), result.stderr)
+        for option, expected in (('--lite', 'lite'), ('--standard', 'standard')):
+            result = subprocess.run(
+                ['bash', '-c', 'source "$1" "$2"; printf "%s" "$REQUESTED_DEPLOYMENT_PROFILE"',
+                 '_', str(INSTALLER), option], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
 
     def test_logged_commands_stream_output_and_preserve_failure_status(self):
         script = r'''

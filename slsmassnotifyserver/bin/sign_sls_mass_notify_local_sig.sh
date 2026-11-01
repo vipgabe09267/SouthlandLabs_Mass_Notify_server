@@ -24,7 +24,7 @@ TRUST_HELPER="${SLS_LOCAL_TRUST_HELPER:-/usr/local/bin/sls_mass_notify/sls_modul
 TRUST_ROOT="/var/lib/sls-mass-notify-trust"
 
 log() {
-	printf 'SLS local signer: %s\n' "$*" >&2
+	printf 'SLL local signer: %s\n' "$*" >&2
 }
 
 # The installer, updater, repair worker, and uninstaller deliberately hold one
@@ -391,7 +391,7 @@ select_usable_signing_key() {
 	local candidate=""
 	local -a fingerprints
 
-	printf '%s\n' "SLS local signing key probe" >"$WORKDIR/key-probe.txt" || return 1
+	printf '%s\n' "SLL local signing key probe" >"$WORKDIR/key-probe.txt" || return 1
 	if [ -f "$fingerprint_file" ] && [ ! -L "$fingerprint_file" ]; then
 		candidate="$(tr -d '[:space:]' <"$fingerprint_file" | tr '[:lower:]' '[:upper:]')"
 		if fingerprint_can_sign "$candidate"; then
@@ -417,7 +417,7 @@ select_usable_signing_key() {
 		if ! cat >"$WORKDIR/keyparams" <<EOF
 Key-Type: RSA
 Key-Length: 3072
-Name-Real: Southland Servers Mass Notifications Local Signing
+Name-Real: SLL Mass Notify Servers Local Signing
 Name-Email: root@${SLS_SIGNER_HOSTNAME}
 Expire-Date: 0
 %no-protection
@@ -637,7 +637,7 @@ build_candidate_signature() {
 version=1
 hash=sha256
 signedwith=${keyid}
-signedby='Southland Servers Mass Notifications Local Signing <root@${SLS_SIGNER_HOSTNAME}>'
+signedby='SLL Mass Notify Servers Local Signing <root@${SLS_SIGNER_HOSTNAME}>'
 repo=local
 timestamp=${timestamp}
 [hashes]

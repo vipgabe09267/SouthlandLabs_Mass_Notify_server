@@ -1,12 +1,12 @@
-# SLS Mass Notifications Control API
+# SLL Mass Notify Server Control API
 
-This document describes the published `0.1.8-beta` API. Its changes are additive
+This document describes the unpublished `0.1.9-beta` candidate API. Its changes are additive
 to the existing routes and authentication. Notification payload schema **1** and
 desktop SSE protocol **2** are retained. Features marked **Labs** in the module
 need acceptance with the actual devices, providers and desktop client before
 operational use.
 
-`0.1.8-beta` adds bounded pre-authentication admission and sampled rejection
+The API includes bounded pre-authentication admission and sampled rejection
 auditing. Successful and attributable authenticated operations retain individual
 audit records. Anonymous rejection bursts cannot launch one audit process per
 request; busy admission returns a retryable response.
@@ -144,7 +144,7 @@ them with saved IDs from your own PBX.
 Announcement IDs have the form `job_` plus 32 lowercase hexadecimal digits.
 Incident IDs use `inc_` plus 32 lowercase hexadecimal digits. Treat them as opaque
 identifiers. A job ID and a published desktop event ID are different identifiers.
-The discovery `phone_targets` list contains targets already present in saved SLS
+The discovery `phone_targets` list contains targets already present in saved SLL
 routing; it is not a complete PJSIP registration inventory or a delivery promise.
 
 ### POST actions
@@ -581,7 +581,7 @@ Peer traffic is a separate disabled interface requiring explicitly provisioned m
 
 ## Runtime admission and one-way delivery
 
-An administrator can pause new SLS notification admission with `sudo slsconsole stop`. An announcement submitted while paused returns `success: false`, `error_code: runtime_stopped` and `delivery_started: false`; resume with `sudo slsconsole start`. Receipt ingestion, status and administrative recovery remain available. Pausing never extends a queued event's original expiry.
+An administrator can pause new SLL notification admission with `sudo slsconsole stop`. An announcement submitted while paused returns `success: false`, `error_code: runtime_stopped` and `delivery_started: false`; resume with `sudo slsconsole start`. Receipt ingestion, status and administrative recovery remain available. Pausing never extends a queued event's original expiry.
 
 Webhook receipts retain `http_status` and a safe `failure_code` when available. `accepted` means the webhook service accepted the HTTP request, not that a person read it. `uncertain` with `needs_attention: false` means response confirmation is unavailable for this one-way submission. It must not be replayed automatically. A definite transmission failure or HTTP rejection remains a failure; uncertainty in other channels retains its existing meaning. Historical receipts are preserved, with display-only projections clearing obsolete webhook dashboard faults.
 

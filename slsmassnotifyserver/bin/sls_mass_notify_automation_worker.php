@@ -24,5 +24,5 @@ try {
     $module=\FreePBX::create()->Slsmassnotifyserver;
     $result=in_array($argv[1],['--sources','--observe'],true) ? $module->processAutomationSources($argv[1]==='--sources') : $module->processAutomationEvents($argv[1]);
     exit(!empty($result['success']) ? 0 : 1);
-} catch (Throwable $error) { error_log('SLS trigger worker could not confirm completion; preserve the trigger journal and review its event results.'); exit(1); }
+} catch (Throwable $error) { error_log('SLL trigger worker could not confirm completion; preserve the trigger journal and review its event results.'); exit(1); }
 finally { if ($startupLease!==null) { SlsAnnouncementJobStore::unlock($startupLease); } }

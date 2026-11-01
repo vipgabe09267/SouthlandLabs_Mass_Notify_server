@@ -12,7 +12,7 @@ function escalationEditor(parent, policy) {
     const add = node('button', {type: 'button', class: 'btn btn-default btn-sm', id: 'sls-inc-escalation-add'});
     add.append(node('i', {class: 'fa fa-plus', 'aria-hidden': 'true'}), document.createTextNode(' Add follow-up'));
     container.append(rows, empty, add, node('p', {class: 'sls-inc-help'},
-        'Use increasing delays from 60 to 86400 seconds. A delayed worker preserves the interval between levels. Uncertain submissions pause the ladder and require review in delivery details; SLS does not replay them automatically.'));
+        'Use increasing delays from 60 to 86400 seconds. A delayed worker preserves the interval between levels. Uncertain submissions pause the ladder and require review in delivery details; SLL does not replay them automatically.'));
     section.append(container); parent.append(section);
     const entries = [];
     function refresh() {

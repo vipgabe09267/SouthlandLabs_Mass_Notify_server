@@ -29,6 +29,53 @@ def hardware(cpu=2, memory=4, total=60, available=4):
 
 
 class ResourceCapacityTests(unittest.TestCase):
+    def test_runtime_speech_workspace_is_checked_separately_from_installer_fallback(self):
+        probe={'path':'/tmp','available_bytes':48 * RESOURCE.MIB,'required_free_bytes':203 * RESOURCE.MIB,
+               'read_only':False,'inodes_exhausted':False}
+        machine=hardware();machine['storage']=RESOURCE.storage_requirements(temporary_directory='/var/tmp')
+        machine['runtime_speech_scratch']=probe
+        report=RESOURCE.evaluate(machine,25)
+        self.assertIn('runtime_speech_workspace_insufficient',[row['code'] for row in report['errors']])
+        self.assertFalse(report['resource_checks']['runtime_temporary']['ok'])
+        self.assertFalse(report['resource_checks']['temporary']['ok'])
+        self.assertEqual(report['eligible_limit'],0)
+        self.assertTrue(any('/tmp' in row['message'] for row in report['errors']))
+
+    def test_runtime_preview_displays_the_enforced_audio_temporary_requirement(self):
+        machine=hardware();machine['storage']=RESOURCE.storage_requirements(mode='runtime')
+        machine['filesystems'][0]['paths'].append('/tmp')
+        machine['runtime_speech_scratch']={'path':'/tmp','available_bytes':256 * RESOURCE.MIB,
+            'required_free_bytes':221 * RESOURCE.MIB,'read_only':False,'inodes_exhausted':False}
+        report=RESOURCE.evaluate(machine,25)
+        self.assertEqual(report['requirements']['temporary_free_bytes'],221 * RESOURCE.MIB)
+        self.assertTrue(report['resource_checks']['temporary']['ok'])
+
+    def test_runtime_speech_workspace_preserves_the_configured_reserve_and_parallelism(self):
+        with patch.object(RESOURCE,'trusted_temporary_directory',return_value=True), \
+             patch.object(RESOURCE.os,'statvfs',return_value=SimpleNamespace(f_bavail=1024,f_frsize=RESOURCE.MIB)):
+            small=RESOURCE.probe_runtime_speech_scratch('lite',{})
+            larger=RESOURCE.probe_runtime_speech_scratch('standard',{'speech_synthesis_limit':4,'generated_media_min_free_mib':256})
+        self.assertEqual(small['required_free_bytes'],128 * RESOURCE.MIB + 600 * 160000 + RESOURCE.MIB)
+        self.assertEqual(larger['required_free_bytes'],256 * RESOURCE.MIB + 4 * (600 * 160000 + RESOURCE.MIB))
+        for settings in ({'speech_synthesis_limit':True},{'generated_media_min_free_mib':63}):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):RESOURCE.probe_runtime_speech_scratch('standard',settings)
+
+    def test_runtime_scratch_requires_actual_pbx_write_and_traversal_access(self):
+        with patch.object(RESOURCE,'trusted_temporary_directory',return_value=True), \
+             patch.object(RESOURCE.os,'geteuid',return_value=1000), \
+             patch.object(RESOURCE.os,'access',return_value=False):
+            with self.assertRaises(RESOURCE.ResourceProbeError) as error:RESOURCE.probe_runtime_speech_scratch('lite',{})
+        self.assertEqual(error.exception.code,'runtime_speech_workspace_unsafe')
+
+    def test_runtime_scratch_root_access_probe_failure_is_bounded_and_redacted(self):
+        for failure in (subprocess.TimeoutExpired('sensitive command detail',2),FileNotFoundError('sensitive path')):
+            with self.subTest(failure=type(failure).__name__), \
+                 patch.object(RESOURCE,'trusted_temporary_directory',return_value=True), \
+                 patch.object(RESOURCE.os,'geteuid',return_value=0), \
+                 patch.object(RESOURCE.subprocess,'run',side_effect=failure):
+                with self.assertRaises(RESOURCE.ResourceProbeError) as error:RESOURCE.probe_runtime_speech_scratch('lite',{})
+                self.assertNotIn('sensitive',str(error.exception))
+
     def test_browser_shards_allow_simultaneous_atomic_replacements(self):
         storage = RESOURCE.storage_requirements()
         parts = storage['component_budgets_bytes'][RESOURCE.MANAGED_TREES['data']]
@@ -504,7 +551,16 @@ class ResourceCapacityTests(unittest.TestCase):
                 path.write_text(json.dumps(value))
                 self.assertEqual(RESOURCE.configured_limits(path), {
                     'desktop_client_limit': value.get('desktop_client_limit', 25),
-                    'phone_device_limit': value.get('phone_device_limit', 25)})
+                    'phone_device_limit': value.get('phone_device_limit', 25),
+                    'deployment_profile': 'standard'})
+            path.write_text(json.dumps({'deployment_profile': 'lite'}))
+            self.assertEqual(RESOURCE.configured_limits(path), {
+                'desktop_client_limit': 25, 'phone_device_limit': 25,
+                'deployment_profile': 'lite'})
+            for profile in (None, True, 'small', 'LITE'):
+                path.write_text(json.dumps({'deployment_profile': profile}))
+                with self.assertRaises(ValueError):
+                    RESOURCE.configured_limits(path)
             for key in ('desktop_client_limit', 'phone_device_limit'):
                 for value in (True, '100', 0, 1001):
                     path.write_text(json.dumps({key: value}))
@@ -583,7 +639,9 @@ class ResourceCapacityTests(unittest.TestCase):
             path.write_bytes(crypto.encode_config({'desktop_client_limit': 100, 'phone_device_limit': 150}))
             path.chmod(0o640)
             with patch.object(RESOURCE, '__file__', str(folder / SOURCE.name)):
-                self.assertEqual(RESOURCE.configured_limits(path), {'desktop_client_limit': 100, 'phone_device_limit': 150})
+                self.assertEqual(RESOURCE.configured_limits(path), {
+                    'desktop_client_limit': 100, 'phone_device_limit': 150,
+                    'deployment_profile': 'standard'})
                 damaged = json.loads(path.read_bytes())
                 damaged['nonce'] = 'AAAAAAAAAAAAAAAA'
                 path.write_text(json.dumps(damaged))
@@ -602,6 +660,47 @@ class ResourceCapacityTests(unittest.TestCase):
             report = json.loads(output.getvalue())
             self.assertEqual(status, 0)
             self.assertEqual((report['requested_limit'], report['requested_phone_limit']), expected)
+
+    def test_lite_profile_is_a_bounded_two_gib_runtime_not_a_check_bypass(self):
+        lite = RESOURCE.evaluate(hardware(cpu=2, memory=2), 25, 25, 'lite')
+        self.assertEqual(lite['errors'], [])
+        self.assertEqual(lite['deployment_profile'], 'lite')
+        self.assertEqual((lite['eligible_limit'], lite['eligible_phone_limit']), (25, 25))
+        self.assertEqual(lite['requirements']['memory_bytes'], 2 * GIB)
+        self.assertEqual(lite['assumptions']['desktop_sse_limit'], 4)
+        self.assertEqual(lite['assumptions']['maximum_synthesis_workers'], 1)
+        self.assertEqual(lite['assumptions']['maximum_speech_queue'], 2)
+        self.assertIn('memory_insufficient', [row['code'] for row in
+            RESOURCE.evaluate(hardware(cpu=2, memory=2), 25, 25, 'standard')['errors']])
+        for desktops, phones in ((26, 25), (25, 26)):
+            with self.assertRaisesRegex(RESOURCE.ResourceProbeError, 'at most 25'):
+                RESOURCE.capacity_requirements(desktops, phones, 'lite')
+        with self.assertRaisesRegex(RESOURCE.ResourceProbeError, 'detected'):
+            RESOURCE.rounded_phone_capacity(26, 'lite')
+
+    def test_installer_profile_offer_uses_real_allocation_and_kernel_allowance(self):
+        for memory, standard, lite in ((1, False, False), (2, False, True),
+                (3, False, True), (3.8, True, False), (4, True, False), (8, True, False)):
+            with self.subTest(memory=memory):
+                report = RESOURCE.evaluate(hardware(memory=memory), 25, 25)
+                self.assertEqual(report['profile_selection']['standard_memory_eligible'], standard)
+                self.assertEqual(report['profile_selection']['lite_memory_eligible'], lite)
+        constrained = hardware(memory=1.95)
+        constrained['memory_limit_bytes'] = int(1.95 * GIB)
+        self.assertFalse(RESOURCE.evaluate(constrained, 25, 25)['profile_selection']['lite_memory_eligible'])
+
+    def test_explicit_profile_overrides_saved_profile_for_installer_conversion(self):
+        output = io.StringIO()
+        with patch.object(RESOURCE, 'configured_limits', return_value={
+                'desktop_client_limit': 25, 'phone_device_limit': 25,
+                'deployment_profile': 'standard'}), \
+             patch.object(RESOURCE, 'probe_compute', return_value=(2, 2 * GIB)), \
+             patch.object(RESOURCE, 'probe_filesystems', return_value=hardware(available=8)['filesystems']), \
+             contextlib.redirect_stdout(output):
+            status = RESOURCE.main(['--check', '--config', '/fixture/config', '--profile', 'lite'])
+        report = json.loads(output.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual(report['deployment_profile'], 'lite')
 
     def test_standalone_bootstrap_matches_packaged_helper(self):
         installer = (ROOT / 'tools/install_release.sh').read_text()
@@ -676,7 +775,7 @@ preflight_hardware_requirements || exit $?
 [[ "$FRESH_PHONE_CAPACITY" == "$FIXTURE_LIMIT" ]]
 '''
             for count,limit in ((4,25),(79,100),(89,100),(125,150)):
-                report={'requested_phone_limit':limit,'auto_phone_selection':{'detected_phone_contacts':count,
+                report={'deployment_profile':'standard','profile_selection':{'standard_memory_eligible':True,'lite_memory_eligible':False},'requested_phone_limit':limit,'auto_phone_selection':{'detected_phone_contacts':count,
                         'rounded_phone_capacity':limit},'errors':[]}
                 result=subprocess.run(['bash','-c',script,'fixture',str(ROOT/'tools/install_release.sh'),name],
                     env={**os.environ,'FIXTURE_REPORT':json.dumps(report),'FIXTURE_LIMIT':str(limit)},
@@ -688,6 +787,16 @@ preflight_hardware_requirements || exit $?
                 capture_output=True,text=True,timeout=10)
             self.assertNotEqual(result.returncode,0)
             self.assertFalse((Path(name)/'absent.config').exists())
+
+            lite_script=script.replace(
+                'source "$1"', 'source "$1" --lite').replace(
+                '--auto-phone-limit"', '--auto-phone-limit --profile lite"')
+            lite={'deployment_profile':'lite','profile_selection':{'standard_memory_eligible':False,'lite_memory_eligible':True},'requested_phone_limit':25,
+                  'auto_phone_selection':{'detected_phone_contacts':25,'rounded_phone_capacity':25},'errors':[]}
+            result=subprocess.run(['bash','-c',lite_script,'fixture',str(ROOT/'tools/install_release.sh'),name],
+                env={**os.environ,'FIXTURE_REPORT':json.dumps(lite),'FIXTURE_LIMIT':'25'},
+                capture_output=True,text=True,timeout=10)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
 
     def test_privileged_probe_ignores_writable_working_directory_modules(self):
         with tempfile.TemporaryDirectory(prefix='sls-capacity-imports-') as name:

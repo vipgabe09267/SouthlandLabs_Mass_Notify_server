@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""SLS runtime console entrypoint; installed by the authenticated installer."""
+"""SLL runtime console entrypoint; installed by the authenticated installer."""
 import os
 from pathlib import Path
 import stat
@@ -11,13 +11,13 @@ try:
     for item in [Path(__file__).absolute(), helper, *helper.parents]:
         info = item.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
-            raise RuntimeError('SLS console executable or directory is not protected.')
+            raise RuntimeError('SLL console executable or directory is not protected.')
     for item in (Path(__file__).absolute(), helper):
         info = item.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise RuntimeError('SLS console executable is not a protected regular file.')
+            raise RuntimeError('SLL console executable is not a protected regular file.')
     os.execve('/usr/bin/python3', ['/usr/bin/python3', '-I', str(helper), *sys.argv[1:]],
               {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8'})
 except (OSError, RuntimeError) as error:
-    print('SLS console: ' + str(error), file=sys.stderr)
+    print('SLL console: ' + str(error), file=sys.stderr)
     raise SystemExit(1)

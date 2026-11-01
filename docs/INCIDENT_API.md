@@ -62,7 +62,7 @@ recipient identity, consent, routing and originating credential permissions.
 Operator launch/update permissions cover all enabled steps, not just the first.
 
 An uncertain or interrupted submission pauses automatic progression; inspect its
-job and record before taking a deliberate new action. SLS never replays that
+job and record before taking a deliberate new action. SLL never replays that
 attempt. A definite pre-send rejection is recorded as `not_submitted`; a separately
 configured later audience may still receive its own step at its due time.
 Operations add `escalation_step` and `escalation_name` for report/display purposes.
@@ -82,7 +82,7 @@ control characters, duplicate URLs and other URL schemes are rejected.
 
 Use versioned links to approved floor plans, evacuation instructions and responder
 references. Confirm access from responders' accounts. The incident page opens
-links in a separate tab without passing its opener or referrer. SLS does not fetch,
+links in a separate tab without passing its opener or referrer. SLL does not fetch,
 embed or host these documents, and does not append links to outgoing announcements.
 A remote document's contents can change independently; its owner must retain the
 reviewed revision. The exact saved links/notes are frozen in the incident and its
@@ -116,7 +116,7 @@ unsupported text variants can still use no speech or tones only for every step.
 Ordinary incident wording preserves the administrator's internal/external voice
 choices, including the separate external quality setting. Spoken announcement
 prefixes and supervisor status counts use the model/variant language. Required
-drill/test markers remain explicit. SLS never translates the supplied message or
+drill/test markers remain explicit. SLL never translates the supplied message or
 verifies the accuracy of a reviewer-approved translation.
 
 The selected title/message and locale are frozen for immediate and planned-drill
@@ -186,7 +186,7 @@ reviewed wording. For example, alongside `incident_id`, `request_id`, `kind` and
 
 Locales must exist in the incident's frozen reviewed template. Omitting a locale
 uses the new base message and its matching base voice; the initial translation is
-never reused as an update. SLS does not translate text or verify its meaning.
+never reused as an update. SLL does not translate text or verify its meaning.
 Every language batch subject to two-person approval requires its own review.
 All-clear closes the incident only after every required batch has a durable
 accepted job. Partial or uncertain results leave it open. An unknown submission

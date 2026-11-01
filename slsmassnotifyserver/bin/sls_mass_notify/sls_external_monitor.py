@@ -129,7 +129,7 @@ def probe(origin, token, timeout=8, max_age=120, connection_factory=None):
         connection.sock.settimeout(remaining)
         connection.request('GET', '/api/sls-mass-notify/?resource=readiness', headers={
             'Authorization': 'Bearer ' + token, 'Accept': 'application/json', 'Cache-Control': 'no-cache',
-            'User-Agent': 'SLS-External-Monitor/1'})
+            'User-Agent': 'SLL-External-Monitor/1'})
         remaining = timeout - (time.monotonic() - began)
         if remaining <= 0:
             raise MonitorError('The readiness request exceeded its total deadline.')

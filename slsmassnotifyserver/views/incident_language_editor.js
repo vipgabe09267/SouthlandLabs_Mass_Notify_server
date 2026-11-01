@@ -4,7 +4,7 @@ function languageEditor(parent, initial) {
     const heading = node('h3');
     heading.append(node('i', {class: 'fa fa-language', 'aria-hidden': 'true'}), document.createTextNode(' Reviewed language variants'));
     section.append(heading, node('p', {class: 'sls-inc-help'},
-        'Store up to six reviewed translations using the same required {{fields}} as the default message. Recipient language preferences select these versions; recipients without an available translation receive the launch language. English, Spanish, French, German and Portuguese can use matching installed speech voices. Other languages require text or tones. SLS does not translate messages.'));
+        'Store up to six reviewed translations using the same required {{fields}} as the default message. Recipient language preferences select these versions; recipients without an available translation receive the launch language. English, Spanish, French, German and Portuguese can use matching installed speech voices. Other languages require text or tones. SLL does not translate messages.'));
     const rows = node('div', {class: 'sls-inc-resource-grid'});
     const add = node('button', {type: 'button', class: 'btn btn-default btn-sm'});
     add.append(node('i', {class: 'fa fa-plus', 'aria-hidden': 'true'}), document.createTextNode(' Add language'));
