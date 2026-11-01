@@ -23,7 +23,7 @@ The installer detects these capabilities and installs only missing Debian packag
 
 ## Recommended Install
 
-Do not use the withdrawn October 31 installer. Use the corrected `0.1.9-beta` release and the [checksum-pinned command in README](README.md#install-or-update) for a fresh installation. Existing installations must use **General Settings > Check for updates > Install Selected Release** or an independently verified recovery installer. The fresh bootstrap refuses an initialized publisher policy so it cannot replace, rewind or bypass established keys and revocations.
+Do not use the withdrawn October 31 installer. Use the corrected `0.1.9-beta` release and the [checksum-pinned command in README](README.md#install-or-update) for a fresh installation. Existing 0.1.8-beta and withdrawn 0.1.9-beta installations need the checksum-pinned `--upgrade` command in README once. Older updaters do not recognize the new `v0.1.9-beta` GitHub tag. The upgrade bootstrap verifies the active installed publisher policy before executing the installer; keys, revocations and trust sequence are preserved. The fresh bootstrap refuses an initialized publisher policy so it cannot replace, rewind or bypass established keys and revocations.
 
 The default `standard` profile requires the normal 4 GiB baseline, allowing bounded kernel reservations. Below that baseline, an interactive installation checks Lite eligibility, explains its hard limits and asks whether to install Lite. Only an explicit yes selects it; No, EOF and a 120-second timeout cancel. A noninteractive installation must explicitly pass `--lite` after the version: `bash ./sls-bootstrap.sh 0.1.9-beta --lite`. Lite is unavailable when the host meets Standard RAM requirements. Lite mode requires two effective cores, supports no more than 25 desktops and 25 phone contacts, and reduces bounded speech, SSE and Weather worker concurrency. Enterprise Labs and enterprise SSO are unavailable in Lite, with saved settings retained. Core notifications and local operator logins remain available. It does not skip a prerequisite, storage, signature, configuration, rollback or post-install check. More than 25 detected contacts is an error, never a truncated audience.
 
@@ -255,7 +255,7 @@ For the previous root runtime, missing helpers are reconstructed only from the a
 Collect private inspection evidence with the matching installer and verified release assets. Inspection does not bootstrap FreePBX, install dependencies, create worker/settings locks, rotate keys, change trust pointers or write Dashboard failure notices:
 
 ```bash
-bash ./sls-install.sh --inspect 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+bash ./sls-install.sh --inspect 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
 # SLS_MASS_NOTIFY_INVENTORY_ONLY=1 remains an equivalent compatibility option.
 ```
 
@@ -263,7 +263,7 @@ For disconnected preparation, set `SLS_MASS_NOTIFY_UPSTREAM_PACKAGES` to a root-
 
 The supported legacy Piper compatibility layout contains only `venv/bin/piper -> /usr/local/bin/piper`. The installer validates its exact contents and safe ownership/modes, retains recovery metadata, then recreates root-owned compatibility directories. A known authenticated wrapper missing its execute bit is repaired by dependency preparation. Unknown executables, additional files, unsafe links and writable environments require investigation; do not recursively change ownership to bypass validation.
 
-The corrected 0.1.9-beta release has newly signed artifact hashes. The updater can select it from 0.1.8-beta or an earlier supported beta; equal versions remain ignored. A PBX already running the withdrawn 0.1.9-beta package needs the independently authenticated manual installer. Saved settings and delivery history are preserved.
+The corrected 0.1.9-beta release has newly signed artifact hashes. The release uses GitHub tag `v0.1.9-beta` because GitHub permanently retired the withdrawn tag. Older updaters require the one-time verified manual upgrade above; updated installations recognize new and legacy tags. Equal versions remain ignored. A PBX already running the withdrawn 0.1.9-beta package needs the independently authenticated manual installer. Saved settings and delivery history are preserved.
 
 Keep all recovery paths printed by a failed installer. Static recovery preserves the original snapshot and does not rewind notification or schedule execution history. Rollback restores the previous maintenance schedule only after its release, recovered web files and root runtime match the approval made before installation. If any recovery check fails, SLL root jobs remain disabled and the installer reports the failed postcondition and recovery paths. A restored file tree alone is not sufficient proof of a complete repair.
 

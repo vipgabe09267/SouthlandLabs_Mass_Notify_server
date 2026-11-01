@@ -1,15 +1,10 @@
-# Verify a first installation
+# Verify an installation or upgrade
 
-## Manual verification
+The software version is **0.1.9-beta** and the GitHub tag is **v0.1.9-beta**. GitHub permanently retired the withdrawn release's original tag. Existing 0.1.8-beta and withdrawn 0.1.9-beta installations need the one-time `--upgrade` command in [README](../README.md); their old updaters cannot recognize the new tag format.
 
-The first installation has no trusted SLL verifier on the PBX. Verify the
-downloaded installer with the host's OpenSSL and Python before executing it.
-Upgrades through the installed protected updater already verify the release
-manifest, installer and package before execution.
+## Publisher identity
 
-Confirm the publisher key below against your independently retained SLL key
-record. A key downloaded with an installer cannot establish its own authority.
-The current publisher key remains unchanged:
+Compare this public key with your independently retained SLL publisher record. A key downloaded alongside an installer cannot establish its own authority.
 
 ```text
 -----BEGIN PUBLIC KEY-----
@@ -17,83 +12,41 @@ MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
 -----END PUBLIC KEY-----
 ```
 
-The following reference commands are for the `0.1.9-beta` candidate after its release is published.
-They create a root-private directory and execute no downloaded code until both
-signature and installer hash checks succeed.
+DER SHA-256 fingerprint: `f2101cc51ecd5fdda7104d7e63ec166928c8985a0b3870f866849f5df6819bbd`.
+
+## Online installation
+
+Use the complete checksum-pinned command in [README](../README.md#install-or-update). The bootstrap's SHA-256 is `2bc923928a8adbc30e8fb6fffc99c717d0a1269a702ddca3e523b7b70635fd5e`.
+
+For a fresh host, omit `--upgrade`. If publisher trust is already initialized, the default command refuses to proceed. For an existing installation, append `--upgrade` after the version. That mode requires the protected installed publisher verifier and an initialized policy; it checks active keys, expiry, revocations and the trust sequence before downloaded installer code can execute. It does not initialize replacement trust or change the policy.
+
+Both paths verify the signed release identity, validity and exact installer hash. The authenticated installer then verifies the package and applies the normal admission, recovery and preservation checks. Lite still requires consent on eligible hardware; unattended users explicitly append `--lite` after `--upgrade` when upgrading.
+
+## Offline bundle
+
+Obtain the corrected release bundle and its checksum through a trusted channel. Extract it as root into a new root-owned directory with mode 0700. Preserve all files together. Independently compare the bootstrap digest above and the publisher fingerprint, then verify:
 
 ```bash
- /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root LANG=C.UTF-8 \
- /usr/bin/bash --noprofile --norc <<'SLS_BOOTSTRAP'
- (
-  set -euo pipefail
-  umask 077
-  SLS_INSTALL_DIR="$(/usr/bin/mktemp -d /tmp/sls-verified-install.XXXXXXXX)"
-  cd "$SLS_INSTALL_DIR"
-  SLS_VERSION='0.1.9-beta'
-  SLS_TAG="slsmassnotifyserver-$SLS_VERSION"
-  SLS_RELEASE="https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/$SLS_TAG"
-  /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 --max-filesize 16384 -fsSL -o release-manifest.json "$SLS_RELEASE/release-manifest.json"
-  /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 60 --max-filesize 64 -fsSL -o release-manifest.sig "$SLS_RELEASE/release-manifest.sig"
-  /usr/bin/curl --disable --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 --max-filesize 1048576 -fsSL -o sls-install.sh "https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/$SLS_TAG/tools/install_release.sh"
-  /usr/bin/cat >publisher.pub <<'KEY'
------BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
------END PUBLIC KEY-----
-KEY
-  /usr/bin/openssl pkeyutl -verify -pubin -inkey publisher.pub -rawin \
-    -in release-manifest.json -sigfile release-manifest.sig
-  /usr/bin/python3 -I - "$SLS_VERSION" <<'PY'
-import base64, hashlib, json, pathlib, re, sys, time
-
-def require(condition, message):
-    if not condition:
-        raise SystemExit(message)
-
-def unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        require(key not in result, 'Release manifest contains duplicate members')
-        result[key] = value
-    return result
-
-def reject_constant(value):
-    raise SystemExit('Release manifest contains a non-finite number')
-
-path = pathlib.Path('release-manifest.json')
-require(path.stat().st_size <= 16384, 'Release manifest exceeds 16 KiB')
-manifest = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=unique_object,
-                      parse_constant=reject_constant)
-require(isinstance(manifest, dict) and type(manifest.get('schema')) is int and manifest['schema'] == 1, 'Unsupported release schema')
-require(set(manifest) == {'schema', 'version', 'tag', 'package', 'package_sha256', 'installer_sha256', 'signing'},
-        'Release manifest fields are incomplete or unsupported')
-require(manifest.get('version') == sys.argv[1], 'Release version mismatch')
-require(manifest.get('tag') == 'slsmassnotifyserver-' + sys.argv[1], 'Release tag mismatch')
-require(manifest.get('package') == 'slsmassnotifyserver-' + sys.argv[1] + '.tgz', 'Release package mismatch')
-expected = manifest.get('installer_sha256', '')
-require(isinstance(expected, str) and re.fullmatch('[a-f0-9]{64}', expected), 'Missing installer hash')
-require(isinstance(manifest.get('package_sha256'), str) and re.fullmatch('[a-f0-9]{64}', manifest['package_sha256']),
-        'Missing package hash')
-public = pathlib.Path('publisher.pub').read_text().splitlines()
-der = base64.b64decode(''.join(public[1:-1]), validate=True)
-signing = manifest.get('signing')
-require(isinstance(signing, dict) and set(signing) == {'key_id', 'issued_at', 'expires_at'},
-        'Missing or unsupported signed validity metadata')
-require(signing.get('key_id') == hashlib.sha256(der).hexdigest(), 'Publisher key mismatch')
-issued, expires = signing.get('issued_at'), signing.get('expires_at')
-require(type(issued) is int and type(expires) is int, 'Missing signed validity dates')
-now = int(time.time())
-require(0 <= issued <= now + 300 and issued < expires and now < expires, 'Release validity failed; check PBX time')
-with pathlib.Path('sls-install.sh').open('rb') as source:
-    require(hashlib.file_digest(source, 'sha256').hexdigest() == expected, 'Installer hash mismatch')
-PY
-  SLS_MASS_NOTIFY_TGZ_URL="$SLS_RELEASE/$SLS_TAG.tgz" /usr/bin/bash ./sls-install.sh
-)
-SLS_BOOTSTRAP
+sha256sum --check SHA256SUMS
+printf '%s\n' '2bc923928a8adbc30e8fb6fffc99c717d0a1269a702ddca3e523b7b70635fd5e  install_bootstrap.sh' | sha256sum --check
+cp release-signing.pub publisher.pem
+source ./install_bootstrap.sh
+existing_policy=0
+if [ -e /var/lib/sls-mass-notify-trust/publisher-trust.json ] ||
+   [ -L /var/lib/sls-mass-notify-trust/publisher-trust.json ] ||
+   [ -e /var/lib/sls-mass-notify-trust/release-trust.initialized ] ||
+   [ -L /var/lib/sls-mass-notify-trust/release-trust.initialized ]; then
+  existing_policy=1
+fi
+bootstrap_verify "$PWD" 0.1.9-beta v0.1.9-beta "$existing_policy" &&
+SLS_MASS_NOTIFY_TGZ="$PWD/slsmassnotifyserver-0.1.9-beta.tgz" \
+SLS_MASS_NOTIFY_MANIFEST="$PWD/release-manifest.json" \
+SLS_MASS_NOTIFY_MANIFEST_SIGNATURE="$PWD/release-manifest.sig" \
+bash ./install_release.sh
 ```
 
-That command uses Standard mode. Below the Standard RAM baseline, an interactive installer offers Lite only when its two-core, nominal 2 GiB and at-most-25-contact requirements pass. It prints the limits, including unavailable Enterprise Labs/SSO, and requires an explicit yes. For unattended use on eligible hardware, add `--lite` after `./sls-install.sh`. A Standard-capable host rejects `--lite`. The same authenticated installer accepts `--standard` to return an existing installation to Standard mode after its 4 GiB resource check passes. Do not combine either profile flag with `--recover`; recovery restores the original profile first.
+The package filename remains `slsmassnotifyserver-0.1.9-beta.tgz` for compatibility. Missing, unsafe, expired or revoked authority stops verification before installer execution. Keep the failure evidence; never delete trust files, replace the live operational ledger or manually enable maintenance jobs to bypass a refusal.
 
-Keep failed verification or installation evidence for review. Never remove
-signature/hash checks to make a download run. For an established installation,
-follow [publisher policy and recovery](RELEASE_TRUST.md); this first-install
-procedure does not rewind a PBX's key revocations or approved generations.
+## Interrupted installation
+
+Complete the exact printed `--recover` transaction before starting another upgrade. Use the independently verified corrected installer and retained signed assets. A legacy hash-only baseline may need matching protected pre-upgrade history supplied with `--history-evidence`; that history is evidence, never a replacement for the live ledger. A `transaction-sequence` counter is not a recovery directory. See [installer recovery](INSTALLER_OPERATIONS.md#interrupted-installations).

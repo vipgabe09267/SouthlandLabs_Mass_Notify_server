@@ -94,6 +94,10 @@ class FixturePagingAgi extends SlsLivePagingNotifyAgi {
         if ($this->cueProofCalls===2 && $this->variable('${SLS_FIXTURE_CASE}')==='immediate_speech') usleep(1000000);
         return parent::checkCallerCue($request,$mode);
     }
+    protected function rejectAdmission($result): array {
+        file_put_contents(ROOT.'/admission-rejection.json',json_encode($result));
+        return parent::rejectAdmission($result);
+    }
     protected function command(string $command,int $timeout=5): string {
         $result=parent::command($command,$timeout);
         if ($command==='EXEC PlayTones "880"' || $command==='SET VARIABLE MUTEAUDIO(in) "off"') {
@@ -429,7 +433,7 @@ raise SystemExit(module.main())
                 wait_collector_ready('case '+case)
                 behavior['answer'] = case in ('visual_connected','no_text_connected','immediate_speech')
                 sip_start=len(sip_evidence);rtp_start=len(rtp_evidence)
-                for name in ('cue-result.json','cue-results.jsonl','cue-events.jsonl','caller.wav','caller-read.wav','speech-start.json'):(root/name).unlink(missing_ok=True)
+                for name in ('cue-result.json','cue-results.jsonl','cue-events.jsonl','caller.wav','caller-read.wav','speech-start.json','admission-rejection.json'):(root/name).unlink(missing_ok=True)
                 current=json.loads(json.dumps(settings))
                 if case=='no_text_connected':
                     for group in current['live_paging']['groups']:group['notify_extensions']=[]
@@ -460,6 +464,7 @@ raise SystemExit(module.main())
                         'asterisk_log': (root/'log/evidence').read_text()[-6000:],
                         'console': (root/'console.log').read_text()[-8000:]}
                     for label, path in [('admission_ledger', data/'phone-admission.json'),
+                                        ('admission_rejection', root/'admission-rejection.json'),
                                         ('visual_debug', root/'visual-debug.log')]:
                         if path.exists(): diagnostics[label] = path.read_text()[-8000:]
                     raise AssertionError(diagnostics)

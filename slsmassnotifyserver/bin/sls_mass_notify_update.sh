@@ -377,12 +377,12 @@ for release in releases if isinstance(releases, list) else []:
         continue
     matching_releases += 1
     tag = str(release.get("tag_name") or "")
-    if not re.fullmatch(r"slsmassnotifyserver-\d+\.\d+\.\d+(?:-beta)?", tag):
+    if not re.fullmatch(r"(?:slsmassnotifyserver-|v)\d+\.\d+\.\d+(?:-beta)?", tag):
         continue
     for asset in release.get("assets", []) if isinstance(release.get("assets"), list) else []:
         if not isinstance(asset, dict):
             continue
-        expected_name = tag + ".tgz"
+        expected_name = "slsmassnotifyserver-" + norm(tag) + ".tgz"
         if str(asset.get("name") or "") != expected_name:
             continue
         digest = str(asset.get("digest") or "")

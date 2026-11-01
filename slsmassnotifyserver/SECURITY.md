@@ -16,7 +16,7 @@ Security fixes target the latest published prerelease, currently `0.1.9-beta`. E
 
 The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected release retains version `0.1.9-beta` with new signed artifacts. Do not reuse the withdrawn installer.
 
-Corrections receive signed assets. The updater does not replace equal versions; same-version corrections require the independently authenticated manual installer. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
+Corrections receive signed assets. The updater does not replace equal versions; same-version corrections require the independently authenticated manual installer. The checked bootstrap accepts an explicit `--upgrade` mode, verifies against the protected installed publisher policy before executing downloaded code, and never resets keys or revocations. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
 
 ## Administrative and authentication boundaries
 

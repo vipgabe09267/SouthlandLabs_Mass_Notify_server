@@ -33,6 +33,8 @@ The original October 31 installer was withdrawn after a history-retention confli
 
 Native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. See docs/QUALIFICATION_MATRIX.md for evidence and limits. The corrected release passed owner manual acceptance.
 
+The GitHub release tag is `v0.1.9-beta`; the module version is unchanged. The withdrawn immutable tag cannot be reused. A checksum-pinned `--upgrade` bootstrap provides a one-time manual update for older installations, enforcing their existing publisher policy before executing the installer. Updated clients recognize both tag formats.
+
 ### Southland Labs rebrand
 
 - Rename the public product to SLL Mass Notify Server and the publisher to Southland Labs. Update website, project, support, schema, GitHub repository and updater links throughout the module, notifications, API descriptions, installer and documentation.

@@ -72,6 +72,20 @@ class UpdatePolicy(unittest.TestCase):
         self.assertTrue(policy.release_allowed(release('1.2.3-beta'), pinned))
         self.assertFalse(policy.release_allowed(release('1.2.4-beta'), pinned))
 
+    def test_v_tag_feed_keeps_version_pin_and_canonical_package_name(self):
+        row = release('0.1.9-beta', tag_name='v0.1.9-beta')
+        row['assets'][0]['browser_download_url'] = 'https://github.com/'+REPO+'/releases/download/v0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        self.assertTrue(policy.release_allowed(row, policy.validate({'pinned_version':'0.1.9-beta'})))
+        result = self.feed([row], CURRENT_VERSION='0.1.8-beta', GITHUB_UPDATES_PIN='0.1.9-beta')
+        self.assertTrue(result['ok'], result)
+        self.assertTrue(result['update_available'], result)
+        self.assertEqual(result['latest_version'], '0.1.9-beta')
+        self.assertEqual(result['tag_name'], 'v0.1.9-beta')
+        self.assertEqual(result['tgz_url'], row['assets'][0]['browser_download_url'])
+        self.assertFalse(self.feed([row], CURRENT_VERSION='0.1.9-beta')['update_available'])
+        row['assets'][0]['name'] = 'v0.1.9-beta.tgz'
+        self.assertFalse(self.feed([row], CURRENT_VERSION='0.1.8-beta')['ok'])
+
     def test_absolute_delay_overnight_window_and_local_time(self):
         p = policy.validate({'window_start': '22:00', 'window_end': '03:00', 'rollout_delay_hours': 24})
         r = release(published_at='2026-01-01T06:00:00Z')
@@ -96,7 +110,7 @@ class UpdatePolicy(unittest.TestCase):
                 raise rows
             if request.full_url == f'https://api.github.com/repos/{REPO}/releases?per_page=100':
                 return io.BytesIO(rows if isinstance(rows, bytes) else json.dumps(rows).encode())
-            if request.full_url.startswith(f'https://api.github.com/repos/{REPO}/commits/slsmassnotifyserver-'):
+            if request.full_url.startswith((f'https://api.github.com/repos/{REPO}/commits/slsmassnotifyserver-', f'https://api.github.com/repos/{REPO}/commits/v')):
                 return io.BytesIO(json.dumps({'sha': 'b' * 40}).encode())
             raise AssertionError('Unexpected network destination: ' + request.full_url)
         output = io.StringIO()

@@ -68,6 +68,20 @@ class DownloadTests(unittest.TestCase):
                 raise
             return factory
 
+    def test_v_tag_download_keeps_canonical_package_name_and_url_bounds(self):
+        url = 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v'+VERSION+'/slsmassnotifyserver-'+VERSION+'.tgz'
+        try:
+            self.run_download(url=url)
+        except SystemExit as error:
+            self.fail('The valid v-tag asset URL was rejected: '+str(error))
+        self.assertEqual(self.output.read_bytes(), b'package')
+        for bad in (url+'?token=hidden', url.replace('/v'+VERSION+'/', '/v0.0.1-beta/')):
+            self.output.unlink()
+            with self.assertRaises(SystemExit):
+                self.run_download(url=bad)
+            self.assertFalse(self.output.exists())
+            self.output.write_bytes(b'fixture')
+
     def test_invalid_urls_are_rejected_before_network_or_file_creation(self):
         for url in (
             URL.replace('https:', 'http:'), URL.replace('github.com', 'example.com'),

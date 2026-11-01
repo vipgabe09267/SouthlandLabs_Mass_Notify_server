@@ -198,7 +198,7 @@ try:
     exec(compile(loader.read(runtime/'sls_release_trust.py',262144,protected=True),publisher.__file__,'exec'),publisher.__dict__)
     manifest=publisher.authenticate_manifest(loader.read(generation/'release-manifest.json',16384,protected=True),loader.read(generation/'release-manifest.sig',64,protected=True),loader.PUBLIC_KEY,root)
     version=inventory['version']
-    if manifest.get('version')!=version or manifest.get('tag')!='slsmassnotifyserver-'+version or manifest.get('package')!='slsmassnotifyserver-'+version+'.tgz' or manifest.get('package_sha256')!=inventory['source']['archive_sha256']:raise ValueError()
+    if manifest.get('version')!=version or manifest.get('tag') not in ('v'+version,'slsmassnotifyserver-'+version) or manifest.get('package')!='slsmassnotifyserver-'+version+'.tgz' or manifest.get('package_sha256')!=inventory['source']['archive_sha256']:raise ValueError()
     loader.check(root,'slsmassnotifyserver',webroot)
     stock={}
     for module in ('framework','dashboard'):

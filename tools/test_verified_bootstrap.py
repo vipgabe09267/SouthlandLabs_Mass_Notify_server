@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Exercise the standalone pre-execution verifier with a private ephemeral key."""
 import hashlib
+import importlib.util
+import shutil
 import json
 import os
 from pathlib import Path
@@ -120,6 +122,63 @@ class VerifiedBootstrap(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.marker.read_text(), "verified")
 
+    def test_v_tag_executes_only_the_matching_signed_installer(self):
+        self.manifest['tag'] = 'v0.1.9-beta'
+        self.sign()
+        result = self.execute()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.marker.read_text(), 'verified')
+
+    def test_existing_policy_revocation_is_checked_before_execution(self):
+        if os.geteuid() != 0 or os.environ.get('SLS_TEST_NAMESPACE') != 'entered':
+            self.skipTest('Requires the isolated root fixture')
+        helper = Path('/usr/local/bin/sls_mass_notify/sls_release_trust.py')
+        previous = helper.read_bytes() if helper.exists() else None
+        previous_mode = helper.stat().st_mode & 0o777 if helper.exists() else None
+        helper.write_bytes((ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_release_trust.py').read_bytes())
+        helper.chmod(0o600)
+        def restore():
+            if previous is None:
+                helper.unlink(missing_ok=True)
+            else:
+                helper.write_bytes(previous)
+                helper.chmod(previous_mode)
+        self.addCleanup(restore)
+        spec = importlib.util.spec_from_file_location('bootstrap_policy_fixture', helper)
+        trust = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(trust)
+        policy_path = Path(tempfile.mkdtemp(prefix='sls-bootstrap-policy-', dir='/run'))
+        self.addCleanup(shutil.rmtree, policy_path)
+        store = trust.TrustStore(policy_path, (self.path/'publisher.pem').read_bytes())
+        store.initialize()
+        fixture = self.path/'existing-bootstrap.sh'
+        fixture.write_text(BOOTSTRAP.read_text().replace('/var/lib/sls-mass-notify-trust', str(policy_path)))
+        self.manifest['tag'] = 'v0.1.9-beta'
+        self.sign()
+        command = 'source "$1"; bootstrap_verify "$2" "$3" "v$3" 1 && /bin/bash "$2/install_release.sh"'
+        args = ['bash','-c',command,'fixture',str(fixture),str(self.path),self.version]
+        result = subprocess.run(args,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(self.marker.exists())
+        self.marker.unlink()
+        state, initialized = store.load()
+        self.assertTrue(initialized)
+        state['policy']['keys'][0]['revoked_at'] = int(time.time())-1
+        store.state.write_bytes(trust.canonical(state))
+        before = {x.name:x.read_bytes() for x in policy_path.iterdir() if x.is_file()}
+        result = subprocess.run(args,capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0,'Revoked publisher was allowed to execute an upgrade')
+        self.assertFalse(self.marker.exists())
+        self.assertEqual({x.name:x.read_bytes() for x in policy_path.iterdir() if x.is_file()},before)
+        state['policy']['keys'][0]['revoked_at'] = 0
+        store.state.write_bytes(trust.canonical(state))
+        current_key=(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/release-signing.pub').read_text().strip()
+        fixture.write_text(fixture.read_text().replace(current_key,(self.path/'publisher.pem').read_text().strip()))
+        command = 'source "$1"; fixture_assets="$2"; bootstrap_download(){ cp "$fixture_assets/install_release.sh" "$fixture_assets/release-manifest.json" "$fixture_assets/release-manifest.sig" "$1/"; }; bootstrap_main "$3" --upgrade'
+        result=subprocess.run(['bash','-c',command,'fixture',str(fixture),str(self.path),self.version],capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(self.marker.exists())
+
     def test_tampered_installer_is_not_executed(self):
         self.sign()
         (self.path / "install_release.sh").write_bytes(
@@ -132,6 +191,7 @@ class VerifiedBootstrap(unittest.TestCase):
     def test_identity_expiry_future_issued_and_ambiguous_fields_are_rejected(self):
         for field, value in [
             ("version", "0.1.7-beta"),
+            ("tag", "v0.1.8-beta"),
             ("package", "../package.tgz"),
             ("schema", True),
         ]:

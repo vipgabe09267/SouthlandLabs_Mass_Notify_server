@@ -443,7 +443,7 @@ def enroll_sls(root: Path, archive: Path, manifest_path: Path, signature_path: P
         raise TrustError('publisher manifest root must be an object')
     version = release.get('version', '')
     if (release.get('schema') != 1 or not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', version)
-            or release.get('tag') != 'slsmassnotifyserver-' + version
+            or release.get('tag') not in ('v' + version, 'slsmassnotifyserver-' + version)
             or release.get('package') != 'slsmassnotifyserver-' + version + '.tgz'
             or release.get('package_sha256') != digest(package)):
         raise TrustError('publisher release identity or archive hash mismatch')

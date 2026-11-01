@@ -37,9 +37,12 @@ def release_allowed(release, policy):
     if not isinstance(release, dict) or release.get('draft') is not False:
         return False
     tag = release.get('tag_name', '')
-    if not isinstance(tag, str) or not re.fullmatch('slsmassnotifyserver-' + VERSION, tag):
+    if not isinstance(tag, str):
         return False
-    version = tag[len('slsmassnotifyserver-'):]
+    match = re.fullmatch(r'(?:slsmassnotifyserver-|v)(' + VERSION + ')', tag)
+    if not match:
+        return False
+    version = match.group(1)
     if type(release.get('prerelease')) is not bool:
         return False
     if policy['channel'] == 'stable' and (release['prerelease'] or version.endswith('-beta')):

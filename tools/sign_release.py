@@ -257,7 +257,7 @@ def main():
         input=key_material, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10,
         env=environment, cwd=distribution).stdout
     issued = int(time.time())
-    data = {'schema': 1, 'version': version, 'tag': f'slsmassnotifyserver-{version}', 'package': package.name,
+    data = {'schema': 1, 'version': version, 'tag': f'v{version}', 'package': package.name,
             'package_sha256': package_digest, 'installer_sha256': installer_digest,
             'signing': {'key_id': verifier.trust.key_entry(public)['id'], 'issued_at': issued,
                         'expires_at': issued + 366 * 86400}}

@@ -19,12 +19,24 @@ For a fresh installation, run the following command as root:
 ```bash
 cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/slsmassnotifyserver-0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '9131408d0a21bcc6aadbce9e7810b7ea2ff5a71824807927315d934981b4525e  sls-bootstrap.sh' | sha256sum --check &&
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '2bc923928a8adbc30e8fb6fffc99c717d0a1269a702ddca3e523b7b70635fd5e  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
-For an existing installation, use **General Settings > Check for updates > Install Selected Release**. The fresh bootstrap refuses an installation that already has a publisher trust policy. For offline installation or recovery, follow [INSTALL.md](INSTALL.md) and the [manual verification guide](docs/FIRST_INSTALL_VERIFICATION.md). If you installed the withdrawn October 31 version of 0.1.9-beta, use the independently authenticated manual installer; the updater ignores equal versions.
+For an existing **0.1.8-beta or 0.1.9-beta installation**, use this one-time verified upgrade command:
+
+```bash
+cd "$(mktemp -d /tmp/sls-upgrade.XXXXXXXX)" &&
+curl -fsSL -o sls-bootstrap.sh \
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '2bc923928a8adbc30e8fb6fffc99c717d0a1269a702ddca3e523b7b70635fd5e  sls-bootstrap.sh' | sha256sum --check &&
+bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
+```
+
+`--upgrade` authenticates the installer against the PBX's existing publisher policy before execution. It preserves installed keys and revocations. The default fresh-install command refuses an initialized policy.
+
+The GitHub tag is now `v0.1.9-beta`; the software version remains `0.1.9-beta`. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
 
 The installer checks resources, verifies signatures and keeps recovery files. It preserves saved settings during an update. Back up your PBX before installing.
 

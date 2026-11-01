@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$SLS_RELEASE_TAG" =~ ^slsmassnotifyserver-[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]
+          [[ "$SLS_RELEASE_TAG" =~ ^(slsmassnotifyserver-|v)[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.SLS_RELEASE_TAG }}
@@ -44,12 +44,14 @@ jobs:
           PY
           mkdir -m 0700 provenance-assets
           version="${SLS_RELEASE_TAG#slsmassnotifyserver-}"
+          version="${version#v}"
+          package="slsmassnotifyserver-$version.tgz"
           gh release download "$SLS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir provenance-assets \
-            --pattern "$SLS_RELEASE_TAG.tgz" --pattern release-manifest.json --pattern release-manifest.sig
+            --pattern "$package" --pattern release-manifest.json --pattern release-manifest.sig
           cp tools/install_release.sh provenance-assets/install_release.sh
           python3 slsmassnotifyserver/bin/sls_mass_notify/sls_release_verify.py \
             --manifest provenance-assets/release-manifest.json --signature provenance-assets/release-manifest.sig \
-            --installer provenance-assets/install_release.sh --package "provenance-assets/$SLS_RELEASE_TAG.tgz" --version "$version"
+            --installer provenance-assets/install_release.sh --package "provenance-assets/$package" --version "$version"
       - name: Attest the verified release bytes
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

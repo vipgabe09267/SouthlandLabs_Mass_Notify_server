@@ -35,7 +35,7 @@ def verify(manifest, signature, installer, package, version, public_key=PUBLIC_K
         Path(public_key).read_bytes(), trust_directory, now)
     expected_name = f'slsmassnotifyserver-{version}.tgz'
     if not isinstance(data, dict) or data.get('schema') != 1 or data.get('version') != version \
-            or data.get('tag') != f'slsmassnotifyserver-{version}' or data.get('package') != expected_name:
+            or data.get('tag') not in (f'v{version}', f'slsmassnotifyserver-{version}') or data.get('package') != expected_name:
         raise ValueError('Signed release identity does not match the requested version')
     for key, path in [('installer_sha256', installer), ('package_sha256', package)]:
         expected = data.get(key)

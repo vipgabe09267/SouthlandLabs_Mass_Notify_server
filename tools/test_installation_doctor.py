@@ -223,6 +223,17 @@ class Doctor(unittest.TestCase):
         with patch.object(DOCTOR.os,'geteuid',return_value=pwd.getpwnam('asterisk').pw_uid),patch.object(DOCTOR,'command',side_effect=AssertionError('Unexpected trust command')):
             self.assertEqual(DOCTOR.release_probe()['failure_code'],'release_trust_root_inspection_required')
     def test_real_publisher_and_installed_inventory_verification_is_read_only(self):
+        self._check_real_publisher_inventory('slsmassnotifyserver-0.1.6-beta')
+
+    def test_v_tag_publisher_inventory_remains_authenticated_and_read_only(self):
+        try:
+            self._check_real_publisher_inventory('v0.1.6-beta')
+        except Exception as error:
+            if type(error).__name__ != 'TrustError':
+                raise
+            self.fail('A valid signed v-tag inventory was rejected: '+str(error))
+
+    def _check_real_publisher_inventory(self, release_tag):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name);runtime=root/'runtime';runtime.mkdir(mode=0o700);web=root/'web';web.mkdir(mode=0o700)
             key=root/'private-key'
@@ -240,7 +251,7 @@ class Doctor(unittest.TestCase):
                 member=tarfile.TarInfo('slsmassnotifyserver/module.xml');member.size=len(body);package.addfile(member,io.BytesIO(body))
             manifest=root/'release-manifest.json';signature=root/'release-manifest.sig'
             archive_sha=hashlib.sha256(archive.read_bytes()).hexdigest()
-            manifest.write_text(json.dumps({'schema':1,'version':'0.1.6-beta','tag':'slsmassnotifyserver-0.1.6-beta',
+            manifest.write_text(json.dumps({'schema':1,'version':'0.1.6-beta','tag':release_tag,
                 'package':archive.name,'package_sha256':archive_sha,'installer_sha256':'a'*64}))
             subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(key),'-in',str(manifest),'-out',str(signature)],check=True,capture_output=True)
             generation=store/trust.enroll_sls(store,archive,manifest,signature)

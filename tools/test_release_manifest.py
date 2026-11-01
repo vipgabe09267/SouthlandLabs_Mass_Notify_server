@@ -4,6 +4,8 @@ import importlib.util
 import contextlib
 import hashlib
 import io
+import os
+import textwrap
 import json
 from pathlib import Path
 import subprocess
@@ -117,6 +119,34 @@ class ReleaseManifestTests(unittest.TestCase):
 
     def test_valid(self):
         self.assertEqual(self.verify(), self.data)
+
+    def test_v_tag_preserves_signed_version_and_artifact_binding(self):
+        self.data['tag'] = 'v0.1.2-beta'
+        self.sign()
+        try:
+            verified = self.verify()
+        except ValueError as error:
+            self.fail('A valid signed v tag was rejected: '+str(error))
+        self.assertEqual(verified, self.data)
+        self.package.write_bytes(b'changed archive')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+            self.verify()
+
+    def test_signed_tag_cannot_change_version_or_escape_its_namespace(self):
+        for tag in ('v0.1.1-beta', 'v0.1.2-beta-extra', 'v0.1.2-beta/other', 'slsmassnotifyserver-0.1.1-beta'):
+            with self.subTest(tag=tag):
+                self.data['tag'] = tag
+                self.sign()
+                with self.assertRaisesRegex(ValueError, 'identity'):
+                    self.verify()
+
+    def test_release_workflow_accepts_v_and_legacy_tags_but_rejects_unsafe_names(self):
+        source = (ROOT / '.github/workflows/release-provenance.yml').read_text()
+        script = textwrap.dedent(source.split('- name: Validate release identity', 1)[1].split('run: |\n', 1)[1].split('      - uses:', 1)[0])
+        for tag, allowed in (('v0.1.9-beta', True), ('slsmassnotifyserver-0.1.8-beta', True), ('v0.1.9-beta\n', False), ('v0.1.9-beta;id', False), ('../v0.1.9-beta', False)):
+            with self.subTest(tag=tag):
+                result = subprocess.run(['bash', '-c', script], env={**os.environ, 'SLS_RELEASE_TAG':tag}, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0, allowed, result.stderr)
 
     def test_rejects_modified_manifest(self):
         self.manifest.write_text(self.manifest.read_text() + ' ')

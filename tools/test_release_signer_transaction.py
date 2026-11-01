@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise release signing, rollback, link refusal, and artifact races privately."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -59,6 +60,14 @@ class ReleaseSignerTransaction(unittest.TestCase):
     def outputs(self):
         distribution = self.signer.ROOT / 'dist'
         return distribution / 'release-manifest.json', distribution / 'release-manifest.sig'
+
+    def test_published_signature_binds_the_v_prefixed_release_tag(self):
+        self.invoke()
+        manifest, signature = self.outputs()
+        value = json.loads(manifest.read_text())
+        self.assertEqual(value['tag'], 'v0.1.7-beta')
+        self.assertEqual(value['package'], 'slsmassnotifyserver-0.1.7-beta.tgz')
+        self.private_verify(manifest, signature, self.signer.ROOT/'tools/install_release.sh', self.package, '0.1.7-beta')
 
     def test_refuses_linked_output_without_touching_victim(self):
         manifest, _ = self.outputs()

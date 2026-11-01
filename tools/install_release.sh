@@ -81,7 +81,7 @@ URL="${SLS_MASS_NOTIFY_TGZ_URL:-${1:-}}"
 SHA256="${SLS_MASS_NOTIFY_SHA256:-}"
 TOKEN="${SLS_MASS_NOTIFY_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 LOG_FILE="${SLS_MASS_NOTIFY_INSTALL_LOG:-/tmp/slsmassnotifyserver-install.log}"
-EXPECTED_TGZ_SHA256="6cc1600ac976cb3d27408a4e1deb2ddf68bf7bab1db0deefd0635a5408d3dd21"
+EXPECTED_TGZ_SHA256="2cc94f97ed9ee874ff5df416382697d5ad751893a6e7673f45e8b678d0bcdf8b"
 DATA_DIR="/var/lib/asterisk/SLS_Mass_Notifications_Plugin"
 CONFIG_FILE="$DATA_DIR/mass-notifications.config"
 CONFIG_SNAPSHOT=""
@@ -4862,7 +4862,7 @@ import urllib.request
 
 url = os.environ['SLS_ASSET_URL']
 pattern = (r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/'
-           r'slsmassnotifyserver-([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/'
+           r'(?:slsmassnotifyserver-|v)([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/'
            r'(?:slsmassnotifyserver-\1\.tgz|release-manifest\.json|release-manifest\.sig)')
 if not re.fullmatch(pattern, url):
     raise SystemExit('Use a signed HTTPS GitHub release URL, or an offline TGZ with an explicitly trusted SHA-256.')
@@ -5110,10 +5110,10 @@ import time
 import types
 
 url = os.environ['SLS_RELEASE_URL']
-match = re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/slsmassnotifyserver-([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(slsmassnotifyserver-\1\.tgz)', url)
+match = re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/((?:slsmassnotifyserver-|v)([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?))/(slsmassnotifyserver-\2\.tgz)', url)
 if url and not match:
     raise SystemExit('Use a signed GitHub release URL or a signed offline package.')
-version, package = match.groups() if match else ('0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz')
+release_tag, version, package = match.groups() if match else ('v0.1.9-beta', '0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz')
 public_key = b'-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=\n-----END PUBLIC KEY-----\n'
 try:
     with tempfile.TemporaryDirectory(prefix='sls-release-verification-') as directory:
@@ -5174,7 +5174,7 @@ try:
                         or now >= signing['expires_at']:
                     raise ValueError('Signed release metadata is expired or invalid')
         if not isinstance(manifest, dict) or manifest.get('schema') != 1 or manifest.get('version') != version \
-                or manifest.get('tag') != 'slsmassnotifyserver-' + version or manifest.get('package') != package:
+                or manifest.get('tag') not in ((release_tag,) if url else ('v' + version, 'slsmassnotifyserver-' + version)) or manifest.get('package') != package:
             raise ValueError('Signed release identity mismatch')
         for field, path in [('package_sha256', os.environ['SLS_RELEASE_TGZ']), ('installer_sha256', os.environ['SLS_RELEASE_INSTALLER'])]:
             with open(path, 'rb') as handle:
