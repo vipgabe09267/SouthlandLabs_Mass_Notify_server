@@ -2181,13 +2181,24 @@ def journal_identity(file_descriptor, path, maximum=JOURNAL_MAX_BYTES):
     return opened
 
 
-def open_journal_file(path, maximum=JOURNAL_MAX_BYTES):
+def open_journal_file(path, maximum=JOURNAL_MAX_BYTES, lock_deadline=None):
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
     descriptor = os.open(path, flags, 0o640)
     try:
         opened = os.fstat(descriptor)
-        named = os.stat(path, follow_symlinks=False)
         accepted_uids, accepted_gids = journal_accepted_ids()
+        if opened.st_size > maximum:
+            raise OSError('Desktop journal exceeds the byte limit; existing evidence was preserved')
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or opened.st_mode & 0o022 or opened.st_uid not in accepted_uids
+                or opened.st_gid not in accepted_gids):
+            raise OSError('Desktop journal path is unsafe')
+        if lock_deadline is not None:
+            # A peer may be completing a valid 0644/owner migration. Do not
+            # compare or normalize mutable lock metadata until it releases EX.
+            lock_journal_file(descriptor, lock_deadline)
+            opened = os.fstat(descriptor)
+        named = os.stat(path, follow_symlinks=False)
         if opened.st_size > maximum or named.st_size > maximum:
             raise OSError('Desktop journal exceeds the byte limit; existing evidence was preserved')
         if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
@@ -2456,13 +2467,11 @@ def append_sipnotify_event(config, record, submission_guard=None):
         raise OSError("Desktop journal directory is not a canonical directory")
     lock_path = path.with_name(path.name + ".lock")
     deadline = time.monotonic() + JOURNAL_LOCK_SECONDS
-    lock_fd = open_journal_file(lock_path, 512)
+    lock_fd = open_journal_file(lock_path, 512, lock_deadline=deadline)
     with os.fdopen(lock_fd, "r+b") as lock_handle:
-        lock_journal_file(lock_handle.fileno(), deadline)
         if submission_guard is not None:
             submission_guard()
         journal_identity(lock_handle.fileno(), lock_path)
-        set_journal_file_metadata(lock_handle.fileno())
         journal_fd = open_journal_file(path)
         with os.fdopen(journal_fd, "r+b") as journal_handle:
             lock_journal_file(journal_handle.fileno(), deadline)

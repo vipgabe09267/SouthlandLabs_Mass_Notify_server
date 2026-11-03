@@ -2,6 +2,7 @@
 """Focused regressions for crash-safe desktop journal persistence."""
 
 import configparser
+import fcntl
 import importlib.util
 import json
 import multiprocessing
@@ -42,6 +43,16 @@ def concurrent_append(journal_path, process_index, iterations, barrier):
                 "id": f"event-{process_index:02d}-{iteration:02d}",
             },
         )
+
+
+def normalize_locked_journal(path, ready, normalize, finished):
+    with open(path, 'r+b') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        ready.set()
+        if not normalize.wait(5):
+            raise RuntimeError('Journal metadata interleaving was not reached')
+        SENDER_MODULE.set_journal_file_metadata(handle.fileno())
+        finished.set()
 
 
 class JournalPersistenceTests(unittest.TestCase):
@@ -411,6 +422,117 @@ function posix_geteuid() { return \\posix_getpwnam('asterisk')['uid']; }
                     for iteration in range(iterations)
                 },
             )
+
+    def test_permanent_lock_migration_waits_for_locked_peer_before_full_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / 'events.jsonl'
+            lock_path = Path(str(journal) + '.lock')
+            lock_path.write_bytes(b'')
+            lock_path.chmod(0o644)
+            original = lock_path.stat()
+            context = multiprocessing.get_context('fork')
+            ready, normalize, finished = (context.Event() for _ in range(3))
+            peer = context.Process(target=normalize_locked_journal,
+                                   args=(str(lock_path), ready, normalize, finished))
+            peer.start()
+            real_fstat = os.fstat
+            interleaved = False
+
+            def snapshot_before_peer_normalizes(descriptor):
+                nonlocal interleaved
+                opened = real_fstat(descriptor)
+                if not interleaved and (opened.st_dev, opened.st_ino) == (original.st_dev, original.st_ino):
+                    interleaved = True
+                    normalize.set()
+                    self.assertTrue(finished.wait(5), 'Peer did not normalize the locked inode')
+                return opened
+
+            try:
+                self.assertTrue(ready.wait(5), 'Peer did not acquire the permanent lock')
+                error = None
+                with mock.patch.object(SENDER_MODULE.os, 'fstat', side_effect=snapshot_before_peer_normalizes):
+                    try:
+                        SENDER_MODULE.append_sipnotify_event(journal_config(journal), {'id': 'after-migration'})
+                    except OSError as failure:
+                        error = str(failure)
+                self.assertTrue(interleaved)
+                self.assertIsNone(error, 'A legitimate locked metadata migration refused publication: ' + str(error))
+                self.assertEqual(json.loads(journal.read_bytes())['id'], 'after-migration')
+                self.assertEqual(lock_path.stat().st_ino, original.st_ino)
+                self.assertEqual(lock_path.stat().st_mode & 0o777, 0o640)
+            finally:
+                normalize.set()
+                peer.join(5)
+                if peer.is_alive():
+                    peer.terminate()
+                    peer.join(5)
+            self.assertEqual(peer.exitcode, 0)
+
+    def test_permanent_lock_metadata_is_normalized_only_under_exclusive_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            journal = Path(directory) / 'events.jsonl'
+            lock_path = Path(str(journal) + '.lock')
+            lock_path.write_bytes(b'')
+            lock_path.chmod(0o644)
+            original = lock_path.stat()
+            real_normalize = SENDER_MODULE.set_journal_file_metadata
+            normalized = []
+
+            def inspect_normalization(descriptor):
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) == (original.st_dev, original.st_ino):
+                    with lock_path.open('r+b') as contender:
+                        with self.assertRaises(BlockingIOError, msg='Permanent lock metadata changed before exclusive locking'):
+                            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    normalized.append(opened.st_ino)
+                real_normalize(descriptor)
+
+            with mock.patch.object(SENDER_MODULE, 'set_journal_file_metadata', side_effect=inspect_normalization):
+                SENDER_MODULE.append_sipnotify_event(journal_config(journal), {'id': 'protected-migration'})
+            self.assertTrue(normalized)
+            self.assertEqual(json.loads(journal.read_bytes())['id'], 'protected-migration')
+
+    def test_permanent_lock_revalidates_unsafe_changes_after_exclusive_lock(self):
+        for change in ('inode', 'hardlink', 'writable', 'owner'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                journal = Path(directory) / 'events.jsonl'
+                lock_path = Path(str(journal) + '.lock')
+                lock_path.write_bytes(b'lock evidence\n')
+                lock_path.chmod(0o644)
+                original = lock_path.stat()
+                real_lock = SENDER_MODULE.lock_journal_file
+                changed = []
+
+                def change_after_lock(descriptor, deadline):
+                    real_lock(descriptor, deadline)
+                    opened = os.fstat(descriptor)
+                    if changed or (opened.st_dev, opened.st_ino) != (original.st_dev, original.st_ino):
+                        return
+                    if change == 'inode':
+                        replacement = Path(directory) / 'replacement'
+                        replacement.write_bytes(b'replacement evidence\n')
+                        replacement.chmod(0o640)
+                        os.replace(replacement, lock_path)
+                    elif change == 'hardlink':
+                        os.link(lock_path, Path(directory) / 'other-link')
+                    elif change == 'writable':
+                        lock_path.chmod(0o660)
+                    else:
+                        uids, gids = SENDER_MODULE.journal_accepted_ids()
+                        foreign = next(value for value in (65534, 65533, 65532) if value not in uids | gids)
+                        os.chown(lock_path, foreign, foreign)
+                    changed.append(lock_path.stat())
+
+                with mock.patch.object(SENDER_MODULE, 'lock_journal_file', side_effect=change_after_lock):
+                    with self.assertRaises(OSError):
+                        SENDER_MODULE.append_sipnotify_event(journal_config(journal), {'id': 'blocked'})
+                self.assertEqual(len(changed), 1)
+                after = lock_path.stat()
+                identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid,
+                    value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                self.assertEqual(identity(after), identity(changed[0]))
+                self.assertEqual(lock_path.read_bytes(), b'replacement evidence\n' if change == 'inode' else b'lock evidence\n')
+                self.assertFalse(journal.exists())
 
     def test_announcement_ids_remain_unique_at_the_same_instant(self):
         fixed = datetime(2026, 8, 22, 12, 34, 56, 123456, tzinfo=timezone.utc)
