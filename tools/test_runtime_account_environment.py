@@ -174,12 +174,16 @@ class RuntimeEnvironment(unittest.TestCase):
                 (folder/name).mkdir(parents=True);(folder/name).chmod(0o777)
                 (folder/name).parent.chmod(0o755)
             log=folder/'observations.jsonl';log.touch();log.chmod(0o666)
-            probe=folder/'piper-probe'
+            private_bin=folder/'bin';private_bin.mkdir(mode=0o755);private_bin.chmod(0o755)
+            probe=private_bin/'piper'
             probe.write_text('#!/usr/bin/python3\nimport json,os,sys,wave\n'
                 'with open('+repr(str(log))+',"a") as out: out.write(json.dumps({"uid":os.geteuid(),"telemetry":os.environ.get("ORT_DISABLE_TELEMETRY"),"fds":[os.readlink("/proc/self/fd/"+n) for n in os.listdir("/proc/self/fd") if n.isdigit() and int(n)>2 and os.path.exists("/proc/self/fd/"+n)]})+"\\n")\n'
                 'with wave.open(sys.argv[sys.argv.index("--output-file")+1],"wb") as out: out.setnchannels(1);out.setsampwidth(2);out.setframerate(8000);out.writeframes(b"\\0"*160)\n')
             probe.chmod(0o755)
-            subprocess.run(['/usr/bin/mount','--bind',str(probe),'/usr/local/bin/piper'],check=True,timeout=5)
+            # Supply the whole private command directory. A fresh runner has
+            # no installed Piper file to use as a bind-mount target, and the
+            # read-only host command directory must never be populated here.
+            subprocess.run(['/usr/bin/mount','--bind',str(private_bin),'/usr/local/bin'],check=True,timeout=5)
             try:
                 command='source "$1"; DATA_DIR="$2"; INSTALL_LOG_OUTPUT="$2/log"; SLS_MASS_NOTIFY_MAINTENANCE_LOCK="$2/maintenance.lock"; sha256sum() { cat >/dev/null; }; exec {INSTALL_MAINTENANCE_LOCK_FD}>"$2/maintenance.lock"; verify_piper_voices'
                 result=subprocess.run(['/bin/bash','-c',command,'fixture',str(ROOT/'tools/install_release.sh'),str(folder)],
@@ -192,7 +196,7 @@ class RuntimeEnvironment(unittest.TestCase):
                     self.assertEqual(value['telemetry'],'1')
                     self.assertNotIn(str(folder/'maintenance.lock'),value['fds'])
             finally:
-                subprocess.run(['/usr/bin/umount','/usr/local/bin/piper'],check=True,timeout=5)
+                subprocess.run(['/usr/bin/umount','/usr/local/bin'],check=True,timeout=5)
 
     def test_php_worker_transitions_remove_inherited_environment(self):
         with tempfile.TemporaryDirectory(prefix='sls-root-worker-env-') as temporary:
