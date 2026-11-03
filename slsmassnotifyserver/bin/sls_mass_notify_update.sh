@@ -335,8 +335,10 @@ except Exception:
     raise SystemExit(0)
 
 def norm(value):
-    value = re.sub(r"^slsmassnotifyserver[-_]", "", str(value or ""), flags=re.I)
-    return re.sub(r"^[vV]", "", value).strip()
+    value = str(value or "")
+    if value == "V0.1.9-beta": return "0.1.9-beta"
+    if value.startswith("slsmassnotifyserver-"): return value[len("slsmassnotifyserver-"):]
+    return value[1:] if value.startswith("v") else value
 
 def version_key(value):
     normalized = norm(value)
@@ -377,7 +379,7 @@ for release in releases if isinstance(releases, list) else []:
         continue
     matching_releases += 1
     tag = str(release.get("tag_name") or "")
-    if not re.fullmatch(r"(?:slsmassnotifyserver-|v)\d+\.\d+\.\d+(?:-beta)?", tag):
+    if tag != "V0.1.9-beta" and not re.fullmatch(r"(?:slsmassnotifyserver-|v)\d+\.\d+\.\d+(?:-beta)?", tag):
         continue
     for asset in release.get("assets", []) if isinstance(release.get("assets"), list) else []:
         if not isinstance(asset, dict):
@@ -466,11 +468,12 @@ if [ "$MANUAL_UPDATE" != "1" ] && [ "$automatic_eligible" != "1" ]; then
   exit 0
 fi
 
-readarray -t release_values < <(printf '%s' "$release_json" | /usr/bin/python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d.get("tgz_url", "")); print(d.get("sha256", "")); print(d.get("installer_url", "")); print(d.get("latest_version", ""))')
+readarray -t release_values < <(printf '%s' "$release_json" | /usr/bin/python3 -I -c 'import json,sys; d=json.load(sys.stdin); print(d.get("tgz_url", "")); print(d.get("sha256", "")); print(d.get("installer_url", "")); print(d.get("latest_version", "")); print(d.get("tag_name", ""))')
 tgz_url="${release_values[0]:-}"
 sha256="${release_values[1]:-}"
 installer_url="${release_values[2]:-}"
 latest="${release_values[3]:-}"
+release_tag="${release_values[4]:-}"
 if [ -z "$tgz_url" ] || ! [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || [ -z "$installer_url" ]; then
   log "Automatic update rejected incomplete release metadata"
   fail_update "release_metadata_invalid" "The release metadata was incomplete or invalid."
@@ -512,7 +515,7 @@ if ! fetch_update_asset "$release_base/release-manifest.json" "$release_manifest
   || ! fetch_update_asset "$release_base/release-manifest.sig" "$release_signature" 64 120 >&"$LOG_FD" 2>&1 \
   || ! fetch_update_asset "$tgz_url" "$release_package" 52428800 900 >&"$LOG_FD" 2>&1 \
   || ! /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_release_verify.py \
-      --manifest "$release_manifest" --signature "$release_signature" --installer "$tmp_script" --package "$release_package" --version "$latest" >&"$LOG_FD" 2>&1; then
+      --manifest "$release_manifest" --signature "$release_signature" --installer "$tmp_script" --package "$release_package" --version "$latest" --tag "$release_tag" >&"$LOG_FD" 2>&1; then
   log "Update rejected: publisher signature or artifact verification failed for $latest"
   fail_update "release_verification_failed" "Release authenticity could not be verified. No downloaded installer was executed."
 fi

@@ -1,12 +1,27 @@
 #!/usr/bin/python3
 """Generate the additive Control/desktop API description from action discovery."""
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
+_release_docs_spec = importlib.util.spec_from_file_location(
+    "sls_openapi_release_docs", Path(__file__).with_name("check_release_docs.py")
+)
+_release_docs = importlib.util.module_from_spec(_release_docs_spec)
+_release_docs_spec.loader.exec_module(_release_docs)
+
+
+def release_note(record, version):
+    """Use the same validated release state as the documentation gate."""
+    status = _release_docs.release_state(record, version)
+    if status == "unpublished":
+        return (f"Unpublished {version} candidate. "
+                f"Available published release: {record['published_version']}. ")
+    return f"Published {version} release. "
 
 
 def description():
@@ -23,6 +38,8 @@ def description():
         )
     )
     version = ET.parse(ROOT / "slsmassnotifyserver/module.xml").findtext("version")
+    release = json.loads((ROOT / "docs/release-status.json").read_text())
+    release_status = release_note(release, version)
     error = {
         "description": "Request refused or outcome could not be confirmed. Check the error code before retrying.",
         "headers": {
@@ -192,7 +209,7 @@ def description():
         "info": {
             "title": "SLL Mass Notify Server API",
             "version": version,
-            "description": "Additive Control API, notification schema 1 and desktop SSE protocol 2. Signed trigger, provider callback and operator-portal routes have separate authentication contracts and are outside this OpenAPI document. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
+            "description": release_status + "Additive Control API, notification schema 1 and desktop SSE protocol 2. Signed trigger, provider callback and operator-portal routes have separate authentication contracts and are outside this OpenAPI document. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
             "license": {"name": "AGPL-3.0-or-later", "identifier": "AGPL-3.0-or-later"},
         },
         "servers": [

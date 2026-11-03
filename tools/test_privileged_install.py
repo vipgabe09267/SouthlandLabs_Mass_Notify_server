@@ -5,6 +5,8 @@ import fcntl
 import threading
 import io
 import json
+import hashlib
+import re
 import os
 from pathlib import Path
 import stat
@@ -52,10 +54,11 @@ class PrivilegedInstall(unittest.TestCase):
         self.package = {
             'bin/sls_mass_notify/sls_config_crypto.py': (ROOT / 'slsmassnotifyserver/bin/sls_mass_notify/sls_config_crypto.py').read_bytes(),
             'bin/sls_mass_notify/sls_cron_runner.py': (BIN / 'sls_cron_runner.py').read_bytes(),
+            'bin/sls_mass_notify/sls_installer_recovery.py': (BIN / 'sls_installer_recovery.py').read_bytes(),
             'module.xml': b'<module><rawname>slsmassnotifyserver</rawname><version>0.1.5-beta</version></module>',
             'bin/sls_mass_notify_maintenance.sh': b'#!/bin/bash\n# authenticated maintenance\n',
             'bin/sls_mass_notify_update.sh': b'#!/bin/bash\n# authenticated updater\n',
-            'bin/sls_mass_notify_install_piper_voices.sh': b'#!/bin/bash\n# authenticated dependency operations\n',
+            'bin/sls_mass_notify_install_piper_voices.sh': (BIN.parent/'sls_mass_notify_install_piper_voices.sh').read_bytes(),
             'bin/sign_sls_mass_notify_local_sig.sh': b'#!/bin/bash\n# authenticated signer\n',
             'bin/sls_mass_notify/sls_phone_events.py': b'# authenticated collector\n',
             'bin/sls_mass_notify/sls_voicemail.py': b'# authenticated native voicemail fallback\n',
@@ -94,7 +97,8 @@ class PrivilegedInstall(unittest.TestCase):
         self.fs.write(INSTALL.CONFIG, self.configuration, 0o640, user=True)
         self.action = self.new_action()
     def new_action(self):
-        return INSTALL.PrivilegedInstall(TRUST, self.store, files=self.fs, run=self.services)
+        return INSTALL.PrivilegedInstall(TRUST, self.store, files=self.fs, run=self.services,
+            cron_lock=lambda accounts:__import__('contextlib').nullcontext())
     def bind_mount(self, source, target):
         subprocess.run(['/usr/bin/mount','--bind',str(source),str(target)],check=True,capture_output=True,text=True)
         self.addCleanup(subprocess.run,['/usr/bin/umount',str(target)],check=False,capture_output=True,text=True)
@@ -510,6 +514,58 @@ class PrivilegedInstall(unittest.TestCase):
         metadata = self.fs.path(INSTALL.DATA + '/cron-diagnostics').stat()
         self.assertEqual((metadata.st_uid,metadata.st_gid,stat.S_IMODE(metadata.st_mode)),
                          (self.fs.account.pw_uid,self.fs.account.pw_gid,0o750))
+
+    def test_root_cron_preserves_unrelated_backup_operands_and_comments(self):
+        vectors=json.loads((ROOT/'tools/fixtures/installer_cron_ownership.json').read_text())
+        unrelated=[row['line'].encode() for row in vectors if row['account']=='root' and row['classification']=='unrelated']
+        self.services.cron=b'\n'.join(unrelated)+b'\n'
+        self.action.root_cron(apply=True)
+        self.assertEqual(self.services.cron,b'\n'.join(unrelated+[line.encode() for line in INSTALL.CRON_LINES])+b'\n')
+
+    def test_root_cron_refuses_unknown_execution_and_failed_readback(self):
+        original=self.services.cron
+        self.services.cron+=b'* * * * * /usr/local/bin/sls_mass_notify/unreviewed.sh\n'
+        with self.assertRaises(INSTALL.InstallError):self.action.root_cron(apply=True)
+        self.assertFalse(any(args[-1]=='-' for args,_ in self.services.calls))
+        self.services.cron=original;self.services.calls.clear()
+        actual=self.services
+        def false_success(args,**keywords):
+            if args==['/usr/bin/crontab','-u','root','-']:
+                return subprocess.CompletedProcess(args,0,b'',b'')
+            return actual(args,**keywords)
+        self.action.run=false_success
+        with self.assertRaisesRegex(INSTALL.InstallError,'readback'):self.action.root_cron(apply=True)
+
+    def test_prepare_refuses_unknown_root_cron_before_static_runtime_changes(self):
+        before=self.services.cron+b'* * * * * /usr/local/bin/sls_mass_notify/unreviewed.sh\n'
+        self.services.cron=before
+        with self.assertRaises(INSTALL.InstallError):self.action.prepare()
+        self.assertEqual(self.services.cron,before)
+        self.assertEqual(self.fs.read(INSTALL.CONFIG),self.configuration)
+        self.assertFalse(self.fs.path(INSTALL.RUNTIME).exists())
+
+    def test_root_cron_holds_native_coordination_across_read_merge_and_write(self):
+        from contextlib import contextmanager
+        active=[];seen=[]
+        @contextmanager
+        def guard(accounts):
+            self.assertEqual(accounts,('root',));active.append(True)
+            try:yield
+            finally:active.pop()
+        actual=self.services
+        def checked(args,**keywords):
+            if args[0]=='/usr/bin/crontab':
+                self.assertTrue(active,'Privileged root cron access escaped native FreePBX coordination')
+                seen.append(args[-1])
+            return actual(args,**keywords)
+        self.action.cron_lock=guard;self.action.run=checked
+        self.action.root_cron(apply=True)
+        self.assertEqual(seen,['-l','-','-l']);self.assertFalse(active)
+
+    def test_protected_verification_refuses_an_extra_legacy_root_job(self):
+        self.action.prepare();self.action.activate()
+        self.services.cron+=b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh\n'
+        with self.assertRaisesRegex(INSTALL.InstallError,'schedule'):self.action.verify()
     def test_offline_assets_are_protected_and_passed_to_fixed_piper_operations(self):
         self.action.prepare()
         assets=self.base/'offline-assets';assets.mkdir(mode=0o700)
@@ -576,6 +632,10 @@ class PrivilegedInstall(unittest.TestCase):
         with mock.patch.dict(os.environ, {'TMPDIR':'/home/asterisk/writable'}):
             with self.assertRaisesRegex(INSTALL.InstallError,'unsupported'):
                 INSTALL.runner(['/bin/true'])
+    def test_protected_piper_commands_keep_opt_out_in_the_sanitized_environment(self):
+        with mock.patch.dict(os.environ, {'ORT_DISABLE_TELEMETRY':'1','GITHUB_TOKEN':'private-fixture'}):
+            result=INSTALL.runner(['/usr/bin/python3','-I','-c','import os,json;print(json.dumps({"telemetry":os.environ.get("ORT_DISABLE_TELEMETRY"),"token":os.environ.get("GITHUB_TOKEN")}))'])
+        self.assertEqual(json.loads(result.stdout),{'telemetry':'1','token':None})
     def test_bad_retention_is_rejected_before_root_changes(self):
         for value in ('1\n/etc/shadow {}', 366, True, 0):
             self.fs.write(INSTALL.CONFIG,json.dumps({'log_retention_days':value}).encode(),0o640,user=True)
@@ -645,6 +705,96 @@ class PrivilegedInstall(unittest.TestCase):
         with self.assertRaises(INSTALL.InstallError): self.action.prepare()
         self.assertEqual(os.readlink(directory/'bin/piper'),'/tmp/untrusted-piper')
 
+    def wrapper_generations(self):
+        name='bin/sls_mass_notify_install_piper_voices.sh'
+        script=self.action.contents[name]
+        self.assertEqual(hashlib.sha256(script).hexdigest(),self.action.data['files'][name]['sha256'])
+        expected=re.search(rb"expected=\"\$\(cat <<'EOF'\n(.*?)\nEOF\n\)\"",script,re.S).group(1)+b'\n'
+        previous=expected.replace(b'export ORT_DISABLE_TELEMETRY=1\n',b'',1)
+        self.assertEqual(hashlib.sha256(expected).hexdigest(),'dc52fdc05dc72b9d8637cdc89b6e7bbb59e5ebe542652d6551615643f80688f5')
+        self.assertEqual(hashlib.sha256(previous).hexdigest(),'a2f9671cb1f69acc055a88f58b9fb610578f5efea43a047938b16ed8634f4d56')
+        return expected,previous
+
+    def test_authenticated_preflight_admits_exact_previous_and_current_wrapper_without_mutation(self):
+        current,previous=self.wrapper_generations()
+        for body in (previous,current):
+            for mode in (0o755,0o644):
+                with self.subTest(generation='previous' if body==previous else 'current',mode=oct(mode)):
+                    self.fs.write('/usr/local/bin/piper',body,mode)
+                    path=self.fs.path('/usr/local/bin/piper');before=path.stat()
+                    self.services.calls.clear()
+                    self.assertTrue(self.action.preflight())
+                    after=path.stat()
+                    self.assertEqual((after.st_ino,after.st_uid,after.st_gid,after.st_mode),
+                                     (before.st_ino,before.st_uid,before.st_gid,before.st_mode))
+                    self.assertEqual(path.read_bytes(),body)
+                    self.assertEqual([command for command,_ in self.services.calls],[['/usr/bin/crontab','-u','root','-l']])
+                    self.assertEqual(self.fs.read(INSTALL.CONFIG),self.configuration)
+
+    def test_authenticated_preflight_refuses_modified_historical_wrapper_bytes(self):
+        _current,previous=self.wrapper_generations()
+        for body in (previous+b'# administrator customization\n',previous.replace(b'exit 126',b'exit 125'),
+                     previous.replace(b'/usr/local/bin/sls_mass_notify',b'/opt/unreviewed_runtime')):
+            with self.subTest(digest=hashlib.sha256(body).hexdigest()):
+                self.fs.write('/usr/local/bin/piper',body,0o755)
+                path=self.fs.path('/usr/local/bin/piper');before=path.stat()
+                with self.assertRaisesRegex(INSTALL.InstallError,'wrapper differs'):
+                    self.action.preflight()
+                self.assertEqual(path.read_bytes(),body)
+                self.assertEqual(path.stat().st_ino,before.st_ino)
+
+    def test_recognized_wrapper_hash_never_waives_owner_permission_or_link_guards(self):
+        current,previous=self.wrapper_generations()
+        path=self.fs.path('/usr/local/bin/piper')
+        for label,uid,gid,mode in (
+            ('service-owner',self.fs.account.pw_uid,self.fs.account.pw_gid,0o755),
+            ('service-group',0,self.fs.account.pw_gid,0o755),
+            ('group-writable',0,0,0o775),('other-writable',0,0,0o757),
+            ('setuid',0,0,0o4755),('setgid',0,0,0o2755),('sticky',0,0,0o1755),
+        ):
+            with self.subTest(metadata=label):
+                self.fs.write('/usr/local/bin/piper',previous,0o755)
+                os.chown(path,uid,gid);path.chmod(mode);before=path.stat()
+                with self.assertRaises(INSTALL.InstallError):self.action.preflight()
+                after=path.stat()
+                self.assertEqual((after.st_ino,after.st_uid,after.st_gid,after.st_mode),
+                                 (before.st_ino,before.st_uid,before.st_gid,before.st_mode))
+                self.assertEqual(path.read_bytes(),previous)
+        self.fs.write('/usr/local/bin/piper',current,0o755)
+        duplicate=path.with_name('piper-private-link');os.link(path,duplicate)
+        with self.assertRaises(INSTALL.InstallError):self.action.preflight()
+        self.assertEqual(path.stat().st_nlink,2);duplicate.unlink();path.unlink()
+        for target in ('/tmp/unreviewed-wrapper',INSTALL.RUNTIME+'/piper/venv/bin/piper'):
+            with self.subTest(link=target):
+                path.symlink_to(target)
+                os.chown(path,0,self.fs.account.pw_gid if target.startswith(INSTALL.RUNTIME) else 0,follow_symlinks=False)
+                with self.assertRaises(INSTALL.InstallError):self.action.preflight()
+                self.assertEqual(os.readlink(path),target);path.unlink()
+
+    def test_exact_legacy_wrapper_catalog_matches_existing_shell_adapters(self):
+        expected={'a2f9671cb1f69acc055a88f58b9fb610578f5efea43a047938b16ed8634f4d56',
+                  '97792a8e4ca9f3f48be0be0c24202921008807da030ac85438b58034f21130e4',
+                  '4c6c0dfe69c1b59b8650c0c5a9d38adf5a9c6cbe311c283a929a7fc5580015c0'}
+        self.assertEqual(set(INSTALL.LEGACY_PIPER_WRAPPER_SHA256),expected)
+        for path in (ROOT/'tools/install_release.sh',BIN.parent/'sls_mass_notify_install_piper_voices.sh'):
+            body=path.read_text()
+            for digest in expected:self.assertIn(digest,body)
+
+    def test_authenticated_preflight_keeps_known_root_owned_wrapper_links_without_following(self):
+        self.fs.mkdir('/usr/local/bin',0o755)
+        path=self.fs.path('/usr/local/bin/piper')
+        for target in (INSTALL.RUNTIME+'/piper/venv/bin/piper',INSTALL.DATA+'/piper/venv/bin/piper'):
+            with self.subTest(target=target):
+                path.symlink_to(target);os.chown(path,0,0,follow_symlinks=False)
+                before=path.lstat();self.services.calls.clear()
+                self.assertTrue(self.action.preflight())
+                after=path.lstat()
+                self.assertEqual((after.st_ino,after.st_uid,after.st_gid,after.st_mode),
+                                 (before.st_ino,before.st_uid,before.st_gid,before.st_mode))
+                self.assertEqual(os.readlink(path),target)
+                self.assertEqual([command for command,_ in self.services.calls],[['/usr/bin/crontab','-u','root','-l']])
+                path.unlink()
+
     def test_known_wrapper_without_execute_bit_passes_preflight_without_executing_it(self):
         script=(BIN.parent/'sls_mass_notify_install_piper_voices.sh').read_bytes()
         import re
@@ -653,7 +803,7 @@ class PrivilegedInstall(unittest.TestCase):
         self.fs.write('/usr/local/bin/piper',expected,0o644)
         self.action.preflight()
         self.assertEqual(stat.S_IMODE(self.fs.metadata('/usr/local/bin/piper').st_mode),0o644)
-        self.assertEqual(self.services.calls,[])
+        self.assertEqual([command for command,_ in self.services.calls],[['/usr/bin/crontab','-u','root','-l']])
         self.fs.write('/usr/local/bin/piper',expected+b'unreviewed command\n',0o644)
         with self.assertRaises(INSTALL.InstallError): self.action.preflight()
 
@@ -662,7 +812,8 @@ class PrivilegedInstall(unittest.TestCase):
         recovery=module('sls_installer_recovery')
         private=self.base/'recovery';private.mkdir(mode=0o700)
         command=lambda args,check=True: 'LoadState=not-found\nUnitFileState=not-found\nActiveState=inactive'
-        helper=recovery.Recovery(private/'static',self.fs.prefix,cron=lambda body=None:b'',user_cron=lambda body=None:b'',command=command)
+        helper=recovery.Recovery(private/'static',self.fs.prefix,cron=lambda body=None:b'',user_cron=lambda body=None:b'',command=command,
+                                 cron_lock=lambda accounts:__import__('contextlib').nullcontext())
         helper.snapshot_create()
         self.action.prepare()
         helper.restore()

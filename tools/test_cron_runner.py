@@ -188,19 +188,45 @@ class CronRunnerTests(unittest.TestCase):
 
 class InstallerCronVerificationTests(unittest.TestCase):
     def setUp(self):
+        workspace=tempfile.TemporaryDirectory(prefix='sls-cron-installer-')
+        self.addCleanup(workspace.cleanup)
+        self.fixture=Path(workspace.name);self.fixture.chmod(0o700)
+        self.helper=self.fixture/'sls_installer_recovery.py'
+        executable=self.fixture/'crontab'
+        executable.write_text('#!/usr/bin/python3\nimport json,sys\nfrom pathlib import Path\n'
+            'state=json.loads(Path('+repr(str(self.fixture/'tables.json'))+').read_text())\n'
+            'user=sys.argv[2]\nassert sys.argv[1]=="-u" and sys.argv[3]=="-l"\n'
+            'if state.get("failed_account")==user:sys.stderr.write("private fixture spool failure");sys.exit(2)\n'
+            'sys.stdout.write(state[user])\n')
+        executable.chmod(0o700)
+        self.helper.write_text((SOURCE.parent/'sls_installer_recovery.py').read_text().replace("['/usr/bin/crontab',",'['+repr(str(executable))+','))
+        self.helper.chmod(0o700)
         runner_path = '/usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py'
         self.lines = {job: ('17 * * * * ' if job == 'update' else '* * * * * ') + runner_path + ' ' + job + ' >/dev/null 2>&1' for job in runner.JOBS}
         self.root_cron = '\n'.join(self.lines[job] for job in ('maintenance', 'update'))
         self.user_cron = '\n'.join(self.lines[job] for job in ('weather', 'scheduling', 'announcement_reconcile'))
 
-    def verify(self, root_cron, user_cron):
-        return subprocess.run(['bash', '-c', 'source "$1"; log() { printf "%s\\n" "$*"; }; verify_install_cron "$2" "$3"', 'fixture', str(ROOT / 'tools/install_release.sh'), root_cron, user_cron], capture_output=True, text=True, timeout=10)
+    def verify(self, root_cron, user_cron, failed_account=None):
+        (self.fixture/'tables.json').write_text(json.dumps({'root':root_cron,'asterisk':user_cron,'failed_account':failed_account}))
+        return subprocess.run(['bash', '-c', 'source "$1"; RECOVERY_TOOL="$2"; log() { printf "%s\\n" "$*"; }; verify_install_cron', 'fixture', str(ROOT / 'tools/install_release.sh'),str(self.helper)], capture_output=True, text=True, timeout=10)
 
     def test_exact_five_jobs_preserve_unrelated_jobs_and_ignore_comments(self):
         unrelated = '\nMAILTO=private-fixture@example.invalid\n0 2 * * * /usr/local/sbin/admin-backup --password private-fixture-value\n# old sls_mass_notify_schedule_worker.php disabled\n'
         result = self.verify(self.root_cron + unrelated, self.user_cron + unrelated)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout + result.stderr, '')
+
+    def test_unrelated_marker_operands_survive_final_installer_verification(self):
+        rows=json.loads((ROOT/'tools/fixtures/installer_cron_ownership.json').read_text())
+        root_extra='\n'.join(row['line'] for row in rows if row['account']=='root' and row['classification']=='unrelated')
+        user_extra='\n'.join(row['line'] for row in rows if row['account']=='asterisk' and row['classification']=='unrelated')
+        result=self.verify(self.root_cron+'\n'+root_extra,self.user_cron+'\n'+user_extra)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+
+    def test_failed_crontab_read_never_verifies_an_incomplete_snapshot(self):
+        result=self.verify(self.root_cron,self.user_cron,failed_account='asterisk')
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('private fixture spool failure',result.stdout+result.stderr)
 
     def test_missing_duplicate_wrong_account_or_unsafe_variants_refused(self):
         cases = [

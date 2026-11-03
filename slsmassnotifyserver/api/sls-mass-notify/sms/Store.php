@@ -101,6 +101,16 @@ final class Store
     {
         clearstatcache(true,$path); $m=@lstat($path);
         if (!$m && $optional) { return null; }
+        // SQLite may unlink its DELETE journal during this path lookup. Only
+        // otherwise-safe, zero-link snapshots of its exact optional sidecars
+        // can be reread; permanent ledger evidence never gains this exception.
+        if ($optional && $m && $m['nlink']===0 && ($m['mode']&0170000)===0100000
+            && !($m['mode']&0037) && $m['uid']===posix_geteuid() && $m['size']<=1073741824
+            && in_array($path,[$this->directory.'/deliveries.sqlite-journal',
+                $this->directory.'/deliveries.sqlite-wal',$this->directory.'/deliveries.sqlite-shm'],true)) {
+            clearstatcache(true,$path); $m=@lstat($path);
+            if (!$m) { return null; }
+        }
         if (!$m || ($m['mode']&0170000)!==0100000 || $m['nlink']!==1 || ($m['mode']&0037)
             || $m['uid']!==posix_geteuid() || $m['size']>1073741824) { throw new \RuntimeException('sms_storage_file_unsafe'); }
         return $m;

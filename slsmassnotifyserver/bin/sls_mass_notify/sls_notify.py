@@ -577,13 +577,12 @@ class AmiClient:
                     return response, events
 
 
-def ami_live_paging_actions(ami):
+def ami_authorized_actions(ami, required):
     """Read-only discovery of actions visible to the authenticated AMI account."""
     response, _ = ami.action({"Action": "ListCommands"})
     if (not isinstance(response, dict) or len(response) > 512
             or response.get("Response") != "Success"):
         raise RuntimeError("AMI action discovery failed")
-    required = ("MuteAudio", "PlayDTMF", "Setvar", "Getvar")
     names = {name.lower() for name in required}
     commands = {}
     for key, value in response.items():
@@ -598,6 +597,10 @@ def ami_live_paging_actions(ami):
     if any(name.lower() not in commands for name in required):
         raise RuntimeError("AMI caller-ready paging actions are unavailable or unauthorized")
     return {name: "authorized" for name in required}
+
+
+def ami_live_paging_actions(ami):
+    return ami_authorized_actions(ami, ("MuteAudio", "PlayDTMF", "Setvar", "Getvar"))
 
 
 def resolve_local_ami_endpoint(ami):
@@ -3344,26 +3347,17 @@ def main():
                     contact_status = "authorized_empty"
                 elif contact_response.get("Response", "").lower() != "success":
                     raise RuntimeError(contact_response.get("Message", "AMI PJSIPShowContacts authorization failed"))
-                notify_probe = "__sls_capability_probe__"
-                notify_response, _ = ami.action({
-                    "Action": "PJSIPNotify",
-                    "Endpoint": notify_probe,
-                    "Variable": ["Event=sls-capability-probe"],
-                })
-                if (
-                    notify_response.get("Response", "").lower() != "success"
-                    and not ami_response_is_missing_probe_endpoint(notify_response, notify_probe)
-                ):
-                    raise RuntimeError(
-                        notify_response.get("Message", "AMI PJSIPNotify authorization probe returned an unexpected result")
-                    )
+                # ListCommands is filtered by the authenticated account's
+                # privileges. Discover authorization without issuing an
+                # action that could reach a real endpoint with a fixed name.
+                authorized = ami_authorized_actions(ami, ("PJSIPNotify", "MuteAudio", "PlayDTMF", "Setvar", "Getvar"))
                 print(json.dumps({
                     "status": "ok",
                     "ami": "authenticated",
                     "ping": "pong",
                     "pjsip_show_contacts": contact_status,
                     "pjsip_notify": "authorized",
-                    "live_paging_actions": ami_live_paging_actions(ami),
+                    "live_paging_actions": {name: authorized[name] for name in ("MuteAudio", "PlayDTMF", "Setvar", "Getvar")},
                 }, sort_keys=True))
             return 0
         if args.list_endpoints_json:

@@ -82,9 +82,26 @@ class DownloadTests(unittest.TestCase):
             self.assertFalse(self.output.exists())
             self.output.write_bytes(b'fixture')
 
+    def test_exact_uppercase_candidate_tag_is_supported(self):
+        url='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        self.run_download(url=url)
+        self.assertEqual(self.output.read_bytes(),b'package')
+
+    def test_manifest_url_identity_is_canonical_and_exact_before_authority_loading(self):
+        code=SOURCE.split('verify_publisher_release() {',1)[1].split("<<'PY'\n",1)[1].split('public_key = ',1)[0]
+        upper='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        namespace={}
+        with patch.dict(os.environ,{'SLS_RELEASE_URL':upper}):exec(compile(code,'<shipped signed URL identity>','exec'),namespace)
+        self.assertEqual((namespace['release_tag'],namespace['version']),('V0.1.9-beta','0.1.9-beta'))
+        for url in (upper.replace('vipgabe09267/','other/'),upper.replace('SouthlandLabs_Mass_Notify_server/','other/'),upper.replace('0.1.9-beta','0.1.10-beta')):
+            with self.subTest(url=url),patch.dict(os.environ,{'SLS_RELEASE_URL':url}),self.assertRaises(SystemExit):
+                exec(compile(code,'<shipped signed URL identity>','exec'),{})
+
     def test_invalid_urls_are_rejected_before_network_or_file_creation(self):
         for url in (
-            URL.replace('https:', 'http:'), URL.replace('github.com', 'example.com'),
+            URL.replace('https:', 'http:'), URL.replace('vipgabe09267/', 'other/'),
+            URL.replace('SouthlandLabs_Mass_Notify_server/', 'other/'),
+            'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.10-beta/slsmassnotifyserver-0.1.10-beta.tgz', URL.replace('github.com', 'example.com'),
             URL.replace('github.com', 'github.com.example.com'),
             URL.replace('github.com', 'github.com@evil.example'),
             URL.replace('github.com', 'github.com:8443'),
@@ -304,7 +321,7 @@ printf '%s\n' "$status"
             self.assertLessEqual(len(body), 131073)
             self.assertTrue(body.endswith(b'END-SENTINEL\n'))
 
-    def test_legacy_module_install_retry_is_also_bounded(self):
+    def test_native_module_failure_is_bounded_and_never_retried(self):
         with tempfile.TemporaryDirectory(prefix='sls-install-retry-output-') as name:
             log = Path(name) / 'install.log'
             calls = Path(name) / 'calls'
@@ -334,12 +351,11 @@ printf '%s\n' "$status"
                 capture_output=True, text=True, timeout=15,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertTrue(result.stdout.endswith('9\n'), result.stdout)
-            self.assertIn('requires global options before the module action', result.stdout)
-            self.assertEqual(calls.read_text(), '2')
+            self.assertEqual(result.stdout, '2\n', result.stdout)
+            self.assertEqual(calls.read_text(), '1')
             body = log.read_bytes()
-            self.assertLessEqual(len(body), 262146)
-            self.assertTrue(body.endswith(b'RETRY-SENTINEL\n'))
+            self.assertLessEqual(len(body), 131073)
+            self.assertTrue(body.endswith(b'unknown option autoenable\n'))
 
     def test_executed_installer_rejects_ambiguous_or_unknown_arguments(self):
         cases = (

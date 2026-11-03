@@ -46,7 +46,7 @@ MODULE_REGISTRY_PRESENT=0
 PBX_RUNNING=0
 UNINSTALL_WORKER_PID=""
 
-run_as_asterisk() {
+run_as_asterisk() (
   local -a child_environment=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "LANG=C.UTF-8"
@@ -65,8 +65,14 @@ run_as_asterisk() {
     shift
   done
   [ "$#" -gt 0 ] || return 64
+  close_inherited_maintenance_lock_fds
+  if [ -n "${UNINSTALL_WORKER_PIPE:-}" ]; then
+    exec {UNINSTALL_WORKER_PIPE}>&-
+  fi
+  cd / || return 1
   /usr/bin/env -i "${child_environment[@]}" /usr/sbin/runuser -u asterisk -- "$@"
-}
+)
+asterisk() { run_as_asterisk /usr/sbin/asterisk "$@"; }
 UNINSTALL_WORKER_PIPE=""
 UNINSTALL_GUARD_REQUIRED=0
 
@@ -271,20 +277,106 @@ try:
         if created:
             os.fchown(child, 0, account.pw_gid)
             os.fchmod(child, 0o750)
-            os.fsync(fd)
         info = os.fstat(child)
         if info.st_uid != 0 or info.st_gid != account.pw_gid or stat.S_IMODE(info.st_mode) != 0o750:
             raise SystemExit('Existing uninstall recovery storage requires review; it was not adopted.')
+        os.fsync(child); os.fsync(fd)
+        workspace = Path(tempfile.mkdtemp(prefix=prefix+'.', dir=parent))
+        workspace_fd = os.open(workspace.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=child)
+        try:
+            info = os.fstat(workspace_fd)
+            named = os.stat(workspace.name, dir_fd=child, follow_symlinks=False)
+            if ((info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
+                    or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700):
+                raise SystemExit('New uninstall recovery directory changed during creation.')
+            os.fsync(workspace_fd)
+        finally:
+            os.close(workspace_fd)
+        os.fsync(child)
     finally:
         os.close(child)
 finally:
     os.close(fd)
-print(tempfile.mkdtemp(prefix=prefix+'.', dir=parent))
+print(workspace)
 PYUNINSTALLSPACE
+}
+
+seal_uninstall_recovery_inputs() {
+  /usr/bin/timeout 60 /usr/bin/python3 -I - "$UNINSTALL_TRANSACTION_DIR" "${RECOVERY_SIGNER_DIR:-}" "${RECOVERY_DECODER_DIR:-}" <<'PYSYNCUNINSTALL'
+import os, pathlib, stat, sys
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+count = total = 0
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+def directory(path):
+    path = pathlib.Path(path)
+    if not path.is_absolute() or any(part in ('.', '..') for part in str(path).split('/')):
+        raise RuntimeError('Invalid private recovery evidence path')
+    fd = os.open('/', flags)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, flags, dir_fd=fd)
+            os.close(fd); fd = child
+            info = os.fstat(fd)
+            if info.st_uid != 0 or info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+                raise RuntimeError('Unprotected recovery evidence parent')
+        return fd
+    except BaseException:
+        os.close(fd); raise
+def sync_tree(fd, depth=0):
+    global count, total
+    if depth > 32:
+        raise RuntimeError('Private recovery evidence nesting exceeds its bound')
+    for name in os.listdir(fd):
+        count += 1
+        if count > 100000:
+            raise RuntimeError('Private recovery evidence inventory exceeds its bound')
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if before.st_uid != 0 or before.st_mode & 0o022:
+            raise RuntimeError('Unprotected private recovery evidence entry')
+        if stat.S_ISDIR(before.st_mode):
+            child = os.open(name, flags, dir_fd=fd)
+        elif stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+            total += before.st_size
+            if total > 2 * 1024 ** 3:
+                raise RuntimeError('Private recovery evidence size exceeds its bound')
+            child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+        else:
+            raise RuntimeError('Unsupported private recovery evidence entry')
+        try:
+            if identity(os.fstat(child)) != identity(before):
+                raise RuntimeError('Private recovery evidence changed before synchronization')
+            if stat.S_ISDIR(before.st_mode):
+                sync_tree(child, depth + 1)
+            else:
+                os.fsync(child)
+            if (identity(os.fstat(child)) != identity(before)
+                    or identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) != identity(before)):
+                raise RuntimeError('Private recovery evidence changed during synchronization')
+        finally:
+            os.close(child)
+    os.fsync(fd)
+for value in sys.argv[1:]:
+    if not value: continue
+    path = pathlib.Path(value)
+    fd = directory(path)
+    try:
+        info = os.fstat(fd)
+        if info.st_mode & 0o027:
+            raise RuntimeError('Recovery evidence must remain private')
+        sync_tree(fd)
+    finally:
+        os.close(fd)
+    parent = directory(path.parent)
+    try: os.fsync(parent)
+    finally: os.close(parent)
+PYSYNCUNINSTALL
 }
 
 record_uninstall_stage() {
   [ -n "$UNINSTALL_TRANSACTION_DIR" ] || return 1
+  if [ "$1" = prepared ]; then seal_uninstall_recovery_inputs || return $?; fi
   /usr/bin/python3 -I - "$UNINSTALL_TRANSACTION_DIR" "$1" "$UNINSTALL_APPROVED_SOURCE" "$RECOVERY_SIGNER_DIR" "$RECOVERY_DECODER_DIR" "$PURGE_CONFIG" <<'PYREMOVALSTATE'
 import json, os, secrets, stat, sys, time
 from pathlib import Path
@@ -364,12 +456,13 @@ names = {'bin/sign_sls_mass_notify_local_sig.sh':'sign_sls_mass_notify_local_sig
          'bin/sls_mass_notify/sls_module_trust.py':'sls_module_trust.py',
          'bin/sls_mass_notify/sls_install_guard.py':'sls_install_guard.py',
          'bin/sls_mass_notify/sls_install_idle.py':'sls_install_idle.py',
+         'bin/sls_mass_notify/sls_installer_recovery.py':'sls_installer_recovery.py',
          'bin/sls_mass_notify/sls_audio_state.py':'sls_audio_state.py',
          'bin/sls_mass_notify/sls_config_crypto.py':'sls_config_crypto.py',
          'PhoneEventService.php':'PhoneEventService.php'}
 optional = 'bin/sls_mass_notify/sls_legacy_permissions.py'
 if optional in data['files']: names[optional] = 'sls_legacy_permissions.py'
-for filename in ('sls_upgrade_trust.py','sls_release_trust.py','sls_installer_recovery.py','freepbx-mirror-signing.pub'):
+for filename in ('sls_upgrade_trust.py','sls_release_trust.py','freepbx-mirror-signing.pub'):
     name='bin/sls_mass_notify/'+filename
     if name in data['files']:names[name]=filename
 for name, filename in names.items():
@@ -688,7 +781,7 @@ capture_signing_fingerprint() {
 capture_pbx_running_state() {
   local response=""
   PBX_RUNNING=0
-  if response="$(/usr/bin/timeout --signal=TERM 10 /usr/sbin/asterisk -rx 'core show uptime' 2>/dev/null)" \
+  if response="$(run_as_asterisk /usr/bin/timeout --signal=TERM 10 /usr/sbin/asterisk -rx 'core show uptime' 2>/dev/null)" \
     && grep -Fq 'System uptime:' <<<"$response"; then
     PBX_RUNNING=1
   fi
@@ -1825,104 +1918,33 @@ remove_runtime_files() {
   remove_managed_path /var/tmp/nws_last_clear.ts
 }
 
-read_uninstall_crontab() {
-  local user="$1" target="$2" error_file result=0 diagnostic
-  [[ "$user" = root || "$user" = asterisk ]] || return 1
-  error_file="$(mktemp /tmp/slsmassnotifyserver-cron-errors.XXXXXX)" || return 1
-  LC_ALL=C crontab -u "$user" -l >"$target" 2>"$error_file" || result=$?
-  diagnostic="$(cat "$error_file")"
-  rm -f "$error_file"
-  if [ "$result" = 0 ]; then return 0; fi
-  if [ "$result" = 1 ] && [ "$diagnostic" = "no crontab for $user" ]; then
-    : >"$target"
-    return 0
+uninstall_cron_action() {
+  local action="$1" helper="$RECOVERY_SIGNER_DIR/sls_installer_recovery.py"
+  local -a arguments=(--cron-action "$action")
+  if [ -z "$RECOVERY_SIGNER_DIR" ] || [ ! -f "$helper" ] || [ -L "$helper" ]; then
+    log "The authenticated native cron recovery helper is unavailable. Preserve the uninstall evidence; no cron replacement was authorized."
+    return 1
   fi
-  log "The $user crontab could not be read. No cron replacement was authorized; restore cron access and retry."
-  return 1
-}
-
-filter_uninstall_crontab() {
-  /usr/bin/python3 -I - "$1" "$2" <<'PYCRON'
-from pathlib import Path
-import re, sys
-source, target = map(Path, sys.argv[1:])
-pattern = re.compile(rb'/usr/local/bin/sls_mass_notify/sls_cron_runner\.py|sls_mass_notify_(?:weather_poll|nws_poll|update|maintenance)\.sh|sls_mass_notify_(?:schedule|announcement)_worker\.php|sls_announcement_worker\.py|nwsalerts_ensure_menu_patch\.sh')
-body = source.read_bytes()
-if len(body) > 8 * 1024 * 1024: raise SystemExit('The crontab exceeds the bounded uninstall review size')
-lines = body.splitlines(keepends=True)
-target.write_bytes(b''.join(line for line in lines if line.lstrip().startswith(b'#') or not pattern.search(line)))
-PYCRON
+  if [ "$action" = remove ]; then
+    if [ -z "$UNINSTALL_TRANSACTION_DIR" ]; then
+      log "A persistent uninstall transaction is required before removing scheduled jobs."
+      return 1
+    fi
+    arguments+=(--cron-evidence "$UNINSTALL_TRANSACTION_DIR")
+  fi
+  /usr/bin/python3 -I "$helper" "${arguments[@]}"
 }
 
 remove_cron() {
-  local user restore_user work rollback_failed=0
-  local -a changed_users=()
-  work="$(mktemp -d /tmp/slsmassnotifyserver-cron.XXXXXX)" || return 1
-  # Both reads succeed before either user's crontab may be replaced.
-  for user in root asterisk; do
-    if ! read_uninstall_crontab "$user" "$work/$user.before" \
-      || ! filter_uninstall_crontab "$work/$user.before" "$work/$user.after"; then
-      rm -rf "$work"
-      return 1
-    fi
-  done
-  for user in root asterisk; do
-    if ! read_uninstall_crontab "$user" "$work/$user.current" \
-      || ! cmp -s "$work/$user.before" "$work/$user.current"; then
-      log "The $user crontab changed during uninstall preparation. No replacement was started; preserve the administrator's edits and retry."
-      rm -rf "$work"
-      return 1
-    fi
-  done
-  for user in root asterisk; do
-    cmp -s "$work/$user.before" "$work/$user.after" && continue
-    if ! crontab -u "$user" "$work/$user.after" 2>/dev/null; then
-      for restore_user in "${changed_users[@]}"; do
-        if ! crontab -u "$restore_user" "$work/$restore_user.before" 2>/dev/null; then
-          rollback_failed=1
-          log "The $restore_user crontab could not be restored after the $user replacement failed. Its authenticated original remains in $work."
-        fi
-      done
-      if [ "$rollback_failed" = 1 ]; then
-        log "The $user SLL cron entries could not be removed and cron rollback was incomplete. Preserve $work and restore the named crontab before retrying."
-      else
-        log "The $user SLL cron entries could not be removed. Earlier replacements were rolled back; original crontabs remain in $work for review."
-      fi
-      return 1
-    fi
-    changed_users+=("$user")
-  done
-  rm -rf "$work"
+  uninstall_cron_action remove
 }
 
 verify_uninstall_cron_access() {
-  local user work
-  work="$(mktemp -d /tmp/slsmassnotifyserver-cron-preflight.XXXXXX)" || return 1
-  for user in root asterisk; do
-    if ! read_uninstall_crontab "$user" "$work/$user.before"; then
-      rm -rf "$work"
-      return 1
-    fi
-  done
-  rm -rf "$work"
+  uninstall_cron_action preflight
 }
 
 verify_removed_cron() {
-  local user work
-  work="$(mktemp -d /tmp/slsmassnotifyserver-cron-verify.XXXXXX)" || return 1
-  for user in root asterisk; do
-    if ! read_uninstall_crontab "$user" "$work/$user.before" \
-      || ! filter_uninstall_crontab "$work/$user.before" "$work/$user.after"; then
-      rm -rf "$work"
-      return 1
-    fi
-    if ! cmp -s "$work/$user.before" "$work/$user.after"; then
-      rm -rf "$work"
-      log "Uninstall verification failed; an SLL scheduled job remains in the $user crontab."
-      return 1
-    fi
-  done
-  rm -rf "$work"
+  uninstall_cron_action verify
 }
 
 restore_stock_modules() {

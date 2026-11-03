@@ -2,6 +2,7 @@
 """Exact dependency reconciliation using metadata and installer command fixtures."""
 import importlib.metadata
 import importlib.util
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,60 @@ REPAIR_PERMISSIONS = 'repair_piper_permissions_only() {' + VOICE_INSTALLER.split
 
 
 class PiperDependencyTests(unittest.TestCase):
+    def test_direct_wrapper_sets_lifetime_telemetry_opt_out_before_each_exec_branch(self):
+        wrapper=VOICE_INSTALLER.split('install_piper_wrapper() {',1)[1].split("<<'EOF'\n",1)[1].split('\nEOF',1)[0]+'\n'
+        with tempfile.TemporaryDirectory(prefix='sls-wrapper-privacy-') as directory:
+            root=Path(directory);binary=root/'piper';python=root/'python';script=root/'wrapper'
+            script.write_text(wrapper.replace('/usr/local/bin/sls_mass_notify/piper/venv/bin/piper',str(binary)).replace('/usr/local/bin/sls_mass_notify/piper/venv/bin/python',str(python)));script.chmod(0o755)
+            probe='#!/bin/sh\nprintf "%s\\n" "$ORT_DISABLE_TELEMETRY"\n'
+            for mode in ('binary','script','module'):
+                with self.subTest(mode=mode):
+                    binary.write_text(probe);binary.chmod(0o755 if mode=='binary' else 0o644)
+                    python.write_text(probe);python.chmod(0o755)
+                    if mode=='module':binary.unlink()
+                    result=subprocess.run([str(script),'--help'],env={**os.environ,'ORT_DISABLE_TELEMETRY':'0'},capture_output=True,text=True,timeout=5)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(result.stdout.strip(),'1')
+
+    def test_wrapper_admits_exact_pre_telemetry_current_generation(self):
+        block=VOICE_INSTALLER.split('install_piper_wrapper() {',1)[1].split('\nensure_piper_install_directories() {',1)[0]
+        self.assertIn('a2f9671cb1f69acc055a88f58b9fb610578f5efea43a047938b16ed8634f4d56',block)
+
+    @unittest.skipUnless(os.geteuid()==0, 'Requires root-owned private wrapper fixtures')
+    def test_wrapper_upgrade_accepts_exact_old_bytes_and_preserves_unknown_bytes(self):
+        function='install_piper_wrapper() {'+VOICE_INSTALLER.split('install_piper_wrapper() {',1)[1].split('\nensure_piper_install_directories() {',1)[0]
+        wrapper=function.split("<<'EOF'\n",1)[1].split('\nEOF',1)[0]+'\n'
+        previous=wrapper.replace('export ORT_DISABLE_TELEMETRY=1\n','')
+        self.assertEqual(hashlib.sha256(previous.encode()).hexdigest(),'a2f9671cb1f69acc055a88f58b9fb610578f5efea43a047938b16ed8634f4d56')
+        with tempfile.TemporaryDirectory(prefix='sls-wrapper-upgrade-') as directory:
+            target=Path(directory)/'piper'
+            script=function.replace('/usr/local/bin/piper',str(target)).replace('/usr/local/bin/.sls-piper',str(Path(directory)/'.sls-piper'))+'\ninstall_piper_wrapper\n'
+            for mode in (0o755,0o644):
+                with self.subTest(mode=oct(mode)):
+                    target.write_text(previous);target.chmod(mode)
+                    result=subprocess.run(['/bin/bash','-c',script],capture_output=True,text=True,timeout=5)
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(target.read_text(),wrapper)
+            unknown=previous+'# private administrator customization\n'
+            target.write_text(unknown);target.chmod(0o755)
+            result=subprocess.run(['/bin/bash','-c',script],capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual(target.read_text(),unknown)
+
+    def test_existing_runtime_import_smoke_gets_opt_out_before_python_execution(self):
+        function='ensure_piper_runtime() {'+VOICE_INSTALLER.split('ensure_piper_runtime() {',1)[1].split('\ninstall_piper_wrapper() {',1)[0]
+        with tempfile.TemporaryDirectory(prefix='sls-runtime-smoke-privacy-') as directory:
+            root=Path(directory);python=root/'python';marker=root/'environment'
+            python.write_text('#!/bin/sh\nprintf "%s\\n" "$ORT_DISABLE_TELEMETRY" >>"$SLS_PRIVATE_ENV_MARKER"\n');python.chmod(0o755)
+            script=function+'''\nvalidate_piper_runtime_tree() { :; }
+piper_venv_usable() { :; }
+PIPER_PY="$1"; PIPER_BIN="$1"; PIPER_DEPENDENCY_CHECK=private-checker; PIPER_REQUIREMENTS=private-lock
+ensure_piper_runtime
+'''
+            result=subprocess.run(['/bin/bash','-c',script,'fixture',str(python)],env={**os.environ,'ORT_DISABLE_TELEMETRY':'0','SLS_PRIVATE_ENV_MARKER':str(marker)},capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(marker.read_text().splitlines(),['1','1','1'])
+
     def test_optional_voice_selection_does_not_create_root_only_runtime_bytecode(self):
         block = VOICE_INSTALLER.split("<<'SLS_OPTIONAL_VOICES'\n", 1)[1].split('\nSLS_OPTIONAL_VOICES', 1)[0]
         with tempfile.TemporaryDirectory(prefix='sls-optional-voice-bytecode-') as directory:

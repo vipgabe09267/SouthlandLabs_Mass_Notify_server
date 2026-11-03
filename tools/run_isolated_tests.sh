@@ -4,25 +4,26 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${SLS_TEST_NAMESPACE:-}" != "entered" ]]; then
   if [[ "$EUID" -ne 0 ]]; then
-    printf 'Run this isolation wrapper as root; it needs private mount/network/PID namespaces. No installer is run.\n' >&2
+    printf 'Run this isolation wrapper as root; it needs private mount/network/PID/IPC namespaces. No installer is run.\n' >&2
     exit 2
   fi
   if [[ "${1:-}" != --single && "${1:-}" != --build ]]; then
     exec python3 -I "$ROOT_DIR/tools/isolated_dispatch.py" "$@"
   fi
-  exec unshare --mount --net --pid --fork --kill-child=KILL --mount-proc env \
+  exec unshare --mount --net --pid --ipc --fork --kill-child=KILL --mount-proc env \
     SLS_TEST_NAMESPACE=entered \
     SLS_TEST_PARENT_MOUNT_NS="$(readlink /proc/self/ns/mnt)" \
     SLS_TEST_PARENT_NET_NS="$(readlink /proc/self/ns/net)" \
     SLS_TEST_PARENT_PID_NS="$(readlink /proc/self/ns/pid)" \
+    SLS_TEST_PARENT_IPC_NS="$(readlink /proc/self/ns/ipc)" \
     bash "$0" "$@"
 fi
 if [[ "${1:-}" == --single ]]; then shift; fi
 # Never trust the stage marker alone: refuse all mounts if a caller inherited
 # that variable without entering fresh namespaces.
-for kind in MOUNT NET PID; do
+for kind in MOUNT NET PID IPC; do
   variable="SLS_TEST_PARENT_${kind}_NS"
-  case "$kind" in MOUNT) path=mnt ;; NET) path=net ;; PID) path=pid ;; esac
+  case "$kind" in MOUNT) path=mnt ;; NET) path=net ;; PID) path=pid ;; IPC) path=ipc ;; esac
   if [[ -z "${!variable:-}" || "${!variable}" == "$(readlink "/proc/self/ns/$path")" ]]; then
     printf 'Isolation verification failed for %s namespace; no fixture mounts were made.\n' "$kind" >&2
     exit 2

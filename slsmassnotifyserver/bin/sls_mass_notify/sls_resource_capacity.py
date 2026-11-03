@@ -9,6 +9,7 @@ import json
 import math
 import os
 from pathlib import Path
+import platform
 import pwd
 
 import re
@@ -221,6 +222,64 @@ class ResourceProbeError(ValueError):
         self.code = code
 
 
+def cpu_isa_report(cpuinfo, allowed_cpus):
+    """Check the exact pinned amd64 wheel baseline without importing native code.
+
+    NumPy2.4.6's hash-locked cp311 wheel has X86_V2 as its baseline. Linux
+    exposes SSE3 as pni and long-mode LAHF/SAHF as lahf_lm. AVX is optional
+    dispatch, so it is deliberately absent from this requirement.
+    """
+    unavailable = ResourceProbeError('cpu_isa_unavailable',
+        'The pinned speech runtime CPU instruction set could not be verified for every allowed CPU. Restore readable /proc/cpuinfo and CPU affinity information, then retry; no CPU capability was guessed.')
+    if (not isinstance(cpuinfo, str) or len(cpuinfo) > 32 * MIB or not allowed_cpus
+            or len(allowed_cpus) > 65536 or any(type(cpu) is not int or cpu < 0 for cpu in allowed_cpus)):
+        raise unavailable
+    processors = {}
+    for block in re.split(r'\n\s*\n', cpuinfo.strip()):
+        rows = {}
+        for line in block.splitlines():
+            name, separator, value = line.partition(':')
+            if separator and name.strip() in ('processor', 'flags'):
+                if name.strip() in rows:
+                    raise unavailable
+                rows[name.strip()] = value.strip()
+        if not rows:
+            continue
+        if not re.fullmatch(r'[0-9]{1,9}', rows.get('processor', '')) or 'flags' not in rows:
+            raise unavailable
+        cpu = int(rows['processor'])
+        if cpu in processors or len(processors) >= 65536:
+            raise unavailable
+        processors[cpu] = set(rows['flags'].split())
+    if not set(allowed_cpus) <= processors.keys():
+        raise unavailable
+    required = {'sse', 'sse2', 'pni', 'ssse3', 'sse4_1', 'sse4_2', 'popcnt', 'cx16', 'lahf_lm'}
+    missing = {cpu: required - processors[cpu] for cpu in sorted(allowed_cpus) if not required <= processors[cpu]}
+    if missing:
+        features = ', '.join(sorted(set().union(*missing.values())))
+        cpus = ', '.join(map(str, list(missing)[:8])) + (' (and others)' if len(missing) > 8 else '')
+        raise ResourceProbeError('cpu_isa_unsupported',
+            'The pinned NumPy2.4.6 speech runtime requires x86-64-v2. Allowed CPU(s) ' + cpus +
+            ' lack: ' + features + '. Have the PBX administrator review the hypervisor CPU model or use compatible hardware before retrying. Adding CPU cores or RAM does not add instructions; the installer will not change the VM CPU model or downgrade frozen dependencies.')
+    return {'baseline': 'x86-64-v2', 'checked_cpu_count': len(allowed_cpus),
+            'numpy_version': PINNED_VERSIONS['numpy'], 'avx_required': False}
+
+
+def probe_cpu_isa():
+    try:
+        if platform.machine() not in ('x86_64', 'amd64'):
+            raise ValueError('Unsupported wheel architecture')
+        allowed_cpus = os.sched_getaffinity(0)
+        with open('/proc/cpuinfo', 'r', encoding='ascii') as handle:
+            cpuinfo = handle.read(32 * MIB + 1)
+        return cpu_isa_report(cpuinfo, allowed_cpus)
+    except ResourceProbeError:
+        raise
+    except (OSError, ValueError, AttributeError) as error:
+        raise ResourceProbeError('cpu_isa_unavailable',
+            'The pinned amd64 speech runtime CPU instruction set could not be verified. Check the supported architecture, readable /proc/cpuinfo and CPU affinity before retrying; no CPU capability was guessed.') from error
+
+
 def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
     """Metadata only, without following directory/file links or printing names."""
     result = {'allocated_bytes': 0, 'logical_bytes': 0, 'files': 0, 'directories': 0, 'largest_file_bytes': 0}
@@ -385,30 +444,75 @@ def read_limit(path):
 
 
 def cgroup_directories():
-    """Inspect the current cgroup and all visible parents, including v1 hosts."""
+    """Map memberships through actual cgroup mount roots, including bind mounts.
+
+    A container's mounted hierarchy need not start at its filesystem root or
+    live under /sys/fs/cgroup. Missing mappings must not authorize the host's
+    larger CPU/RAM budget instead of an enforced container limit.
+    """
+    membership = Path('/proc/self/cgroup').read_text(encoding='ascii')
+    mounts = Path('/proc/self/mountinfo').read_text(encoding='utf-8')
+    if len(membership) > 65536 or len(mounts) > 1048576:
+        raise ValueError('Cgroup topology exceeds its inspection bound')
+
+    def canonical(value):
+        if (not re.fullmatch(r'/(?:[^/\x00-\x1f]+(?:/[^/\x00-\x1f]+)*)?', value)
+                or any(part in ('.', '..') for part in value.split('/'))):
+            raise ValueError('Invalid cgroup topology path')
+        return Path(value)
+
+    def unescape(value):
+        return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), value)
+
     entries = []
-    for line in Path('/proc/self/cgroup').read_text().splitlines():
-        _, controllers, relative = line.split(':', 2)
-        parts = Path(relative).parts
-        if '..' in parts or not relative.startswith('/'):
+    for line in membership.splitlines():
+        fields = line.split(':', 2)
+        if len(fields) != 3 or not fields[0].isdigit():
             raise ValueError('Invalid cgroup membership')
-        if not controllers:
-            entries.append((Path('/sys/fs/cgroup'), relative, 'v2'))
-        else:
-            for controller in controllers.split(','):
-                if controller in {'memory', 'cpu'}:
-                    root = Path('/sys/fs/cgroup') / controller
-                    if controller == 'cpu' and not root.exists():
-                        root = Path('/sys/fs/cgroup/cpu,cpuacct')
-                    entries.append((root, relative, controller))
-    for root, relative, kind in entries:
-        current = root / relative.lstrip('/')
-        while True:
-            if current.is_dir():
-                yield current, kind
-            if current == root:
-                break
-            current = current.parent
+        _, controllers, relative = fields
+        path = canonical(relative)
+        for kind in (['v2'] if not controllers else
+                     [item for item in controllers.split(',') if item in ('memory', 'cpu')]):
+            entries.append((path, kind))
+    mounted = []
+    for line in mounts.splitlines():
+        fields = line.split()
+        if '-' not in fields:
+            raise ValueError('Invalid mount topology')
+        separator = fields.index('-')
+        if separator < 6 or len(fields) < separator + 4:
+            raise ValueError('Invalid mount topology')
+        filesystem = fields[separator + 1]
+        if filesystem not in ('cgroup', 'cgroup2'):
+            continue
+        root, target = canonical(unescape(fields[3])), canonical(unescape(fields[4]))
+        kinds = {'v2'} if filesystem == 'cgroup2' else set(fields[separator + 3].split(',')) & {'cpu', 'memory'}
+        mounted.append((root, target, kinds))
+    yielded = set()
+    for member, kind in entries:
+        found = False
+        for root, target, kinds in mounted:
+            if kind not in kinds:
+                continue
+            try:
+                relative = member.relative_to(root)
+            except ValueError:
+                continue
+            current = target / relative
+            if not current.is_dir():
+                continue
+            found = True
+            while True:
+                identity = (current, kind)
+                if identity not in yielded:
+                    yielded.add(identity)
+                    yield current, kind
+                if current == target:
+                    break
+                current = current.parent
+        if not found:
+            raise ResourceProbeError('cgroup_topology_unavailable',
+                'The current container CPU/RAM hierarchy cannot be mapped to a visible cgroup mount. Expose its actual hierarchy and retry; host capacity cannot substitute for an unreadable enforced limit.')
 
 
 def probe_compute():
@@ -522,7 +626,7 @@ def probe_runtime_speech_scratch(profile, saved):
         try:
             access = subprocess.run(['/usr/sbin/runuser', '-u', 'asterisk', '--', '/usr/bin/test',
                                      '-w', '/tmp', '-a', '-x', '/tmp'], stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2).returncode == 0
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, cwd='/').returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             access = False
     else:
@@ -748,18 +852,26 @@ def internal_phone_inventory(device_output, contact_output):
 
 def detect_internal_phones():
     def command(value):
-        result = subprocess.run(['/usr/sbin/asterisk', '-rx', value], capture_output=True,
-                                text=True, timeout=3, check=False)
+        result = subprocess.run(['/usr/sbin/asterisk', '-rx', value], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                                text=True, timeout=3, check=False, close_fds=True, cwd='/', env=environment, **identity)
         if result.returncode != 0 or len(result.stdout) > 2 * MIB:
             raise ValueError('Asterisk inventory command failed')
         return result.stdout
     try:
+        account = pwd.getpwnam('asterisk')
+        if account.pw_uid <= 0 or os.geteuid() not in (0, account.pw_uid):
+            raise ValueError('Asterisk inventory requires its configured runtime identity')
+        identity = {'user': account.pw_uid, 'group': account.pw_gid,
+                    'extra_groups': os.getgrouplist('asterisk', account.pw_gid)} if os.geteuid() == 0 else {}
+        environment = {'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
+                       'HOME': account.pw_dir, 'USER': 'asterisk', 'LOGNAME': 'asterisk'}
         devices = command('database show DEVICE')
         # An empty DEVICE family needs no contact query. This also permits an
         # otherwise healthy new PBX whose PJSIP modules have no endpoints yet.
         empty = internal_phone_inventory(devices, 'Objects found: 0\n')
         return internal_phone_inventory(devices, command('pjsip show contacts')) if empty['configured_pjsip_devices'] else empty
-    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
         raise ResourceProbeError('phone_inventory_unavailable',
             'The internal phone inventory could not be verified. Confirm Asterisk is running and its DEVICE database and PJSIP contact commands are available, then retry installation. No phone capacity was guessed.') from error
 
@@ -936,6 +1048,7 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE, profile='stand
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--cpu-isa-only', action='store_true', help='Check frozen wheel instructions before configuration or runtime preparation')
     parser.add_argument('--config', type=Path)
     parser.add_argument('--desktop-limit', type=int)
     parser.add_argument('--profile', choices=DEPLOYMENT_PROFILES)
@@ -952,6 +1065,12 @@ def main(argv=None):
     stage = 'configuration'
     selection = None
     try:
+        stage = 'CPU instruction set'
+        cpu_isa = probe_cpu_isa()
+        if options.cpu_isa_only:
+            print(json.dumps({'schema': 1, 'cpu_isa': cpu_isa, 'errors': []}, sort_keys=True))
+            return 0
+        stage = 'configuration'
         saved = configured_limits(options.config) if options.config else {}
         profile = options.profile or saved.get('deployment_profile', 'standard')
         if requested is None:
@@ -973,6 +1092,7 @@ def main(argv=None):
         stage = 'runtime audio temporary workspace'
         runtime_scratch = probe_runtime_speech_scratch(profile, saved)
         result = evaluate({'effective_cpu_count': cpu, 'effective_memory_bytes': memory,
+                           'cpu_isa': cpu_isa,
                            'memory_limit_bytes': probe_memory_limit(), 'filesystems': filesystems, 'storage': storage,
                            'runtime_speech_scratch':runtime_scratch}, requested, phone_requested, profile)
         if selection is not None:

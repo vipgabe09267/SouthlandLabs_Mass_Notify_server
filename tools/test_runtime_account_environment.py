@@ -6,6 +6,7 @@ from pathlib import Path
 import pwd
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -31,6 +32,84 @@ TOKENS=(
 
 
 class RuntimeEnvironment(unittest.TestCase):
+    def test_installer_runtime_child_receives_only_fixed_and_required_transaction_environment(self):
+        required={
+            'CONFIG_PATH':'/run/fixture/config.json',
+            'SLS_CONFIG_CRYPTO_PHP':'/run/fixture/config-crypto.php',
+            'SLS_INIT_DEPLOYMENT_PROFILE':'lite', 'SLS_INIT_PHONE_CAPACITY':'25',
+            'SLS_MASS_NOTIFY_MODULE':'slsmassnotifyserver',
+            'SLS_NATIVE_INSTALL_ACTION':'install', 'SLS_NATIVE_INSTALL_MODULE':'slsmassnotifyserver',
+            'SLS_NATIVE_REGISTRY_MODULE':'dashboard', 'SLS_RECOVERY_AMI_NAMES':'["sll-module"]',
+            'SLS_MASS_NOTIFY_DEFER_SIGNING':'1', 'SLS_MASS_NOTIFY_PRESERVE_PENDING':'1',
+        }
+        fixed={'PATH':'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+               'HOME':'/var/lib/asterisk','USER':'asterisk','LOGNAME':'asterisk',
+               'LANG':'C.UTF-8','LC_ALL':'C.UTF-8'}
+        with tempfile.TemporaryDirectory(prefix='sls-installer-clean-env-',dir='/run') as temporary:
+            folder=Path(temporary);folder.chmod(0o755)
+            child=folder/'harmless-child.py'
+            child.write_text('import json,os;print(json.dumps({"uid":os.geteuid(),"cwd":os.getcwd(),"environment":dict(os.environ)}))\n');child.chmod(0o644)
+            for label,inputs,explicit in (
+                ('required',required,{}), ('unset',{},{}), ('set-empty',{'CONFIG_PATH':''},{}),
+                ('explicit-env',required,{'ORT_DISABLE_TELEMETRY':'1','PHP_INI_SCAN_DIR':'/etc/php/8.2/apache2/conf.d'}),
+            ):
+                with self.subTest(case=label):
+                    arguments=['/usr/bin/python3','-I',str(child)]
+                    if explicit:arguments=['/usr/bin/env',*[name+'='+value for name,value in explicit.items()],*arguments]
+                    command='source "$1"; shift; sls_as_asterisk "$@"; [[ "$AWS_SECRET_ACCESS_KEY" = SLS_PRIVATE_BOUNDARY_FIXTURE ]]'
+                    environment={**self.environment,**inputs,'HOME':'/private/root-home','USER':'root','LOGNAME':'root',
+                                 'SLS_UNLISTED_PRIVATE_VALUE':'private fixture','ORT_DISABLE_TELEMETRY':'0',
+                                 'PHP_INI_SCAN_DIR':'/private/root-php-config'}
+                    result=subprocess.run(['/bin/bash','-c',command,'fixture',str(ROOT/'tools/install_release.sh'),*arguments],
+                        env=environment,cwd=folder,capture_output=True,text=True,timeout=10)
+                    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                    self.assertEqual(result.stderr,'')
+                    value=json.loads(result.stdout)
+                    self.assertEqual((value['uid'],value['cwd']),(self.expected_uid,'/'))
+                    self.assertEqual(value['environment'],{**fixed,**inputs,**explicit})
+
+    def test_private_root_working_directory_never_reaches_runtime_cli_children(self):
+        with tempfile.TemporaryDirectory(prefix='sls-cli-private-cwd-',dir='/run') as temporary:
+            folder=Path(temporary);folder.chmod(0o755)
+            private=folder/'root-private';private.mkdir(mode=0o700)
+            (private/'relative-parent-marker').write_text('preserved parent directory')
+            observations=folder/'cwd-observations.jsonl';observations.touch();observations.chmod(0o666)
+            probe=folder/'asterisk-probe'
+            probe.write_text('#!/usr/bin/python3\nimport json,os,sys\n'
+                'value={"uid":os.geteuid(),"cwd":os.getcwd(),"args":sys.argv[1:]}\n'
+                'with open('+repr(str(observations))+',"a") as output:output.write(json.dumps(value)+"\\n")\n'
+                'if not os.access(".",os.X_OK):print("Unable to access running directory; changing to /",file=sys.stderr)\n'
+                'print("0 results found." if sys.argv[-1]=="database show DEVICE" else json.dumps(value))\n')
+            probe.chmod(0o755)
+            subprocess.run(['/usr/bin/mount','--bind',str(probe),'/usr/sbin/asterisk'],check=True,timeout=5)
+            try:
+                for script in ('tools/install_release.sh','tools/uninstall_release.sh'):
+                    with self.subTest(script=script):
+                        command='source "$1"; initial="$PWD"; asterisk -rx "core show version" relative-argument; [[ "$PWD" = "$initial" ]] && [[ "$(cat relative-parent-marker)" = "preserved parent directory" ]]'
+                        result=subprocess.run(['/bin/bash','-c',command,'fixture',str(ROOT/script)],cwd=private,
+                            capture_output=True,text=True,env=self.environment,timeout=10)
+                        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                        self.assertEqual(result.stderr,'')
+                        value=json.loads(result.stdout)
+                        self.assertEqual(value['cwd'],'/')
+                        self.assertEqual(value['args'],['-rx','core show version','relative-argument'])
+                for name,call in (
+                    ('sls_install_doctor.py', "status,raw=m['command'](['/usr/sbin/asterisk','-rx','core show version']); assert status==0; print(raw)"),
+                    ('sls_install_idle.py', "print(m['channel_inventory']())"),
+                    ('sls_resource_capacity.py', "import json; print(json.dumps(m['detect_internal_phones']()))"),
+                ):
+                    with self.subTest(helper=name):
+                        program='import os,runpy,sys; initial=os.getcwd(); m=runpy.run_path(sys.argv[1]); '+call+'; assert os.getcwd()==initial'
+                        result=subprocess.run([sys.executable,'-I','-c',program,str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify'/name)],cwd=private,
+                            capture_output=True,text=True,env=self.environment,timeout=10)
+                        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                        self.assertEqual(result.stderr,'')
+                values=[json.loads(line) for line in observations.read_text().splitlines()]
+                self.assertEqual(len(values),5)
+                self.assertTrue(all(value['uid']==self.expected_uid and value['cwd']=='/' for value in values))
+            finally:
+                subprocess.run(['/usr/bin/umount','/usr/sbin/asterisk'],check=True,timeout=5)
+
     def setUp(self):
         if os.environ.get('SLS_TEST_NAMESPACE')!='entered':self.fail('Use tools/run_isolated_tests.sh')
         account=pwd.getpwnam('asterisk')
@@ -41,6 +120,79 @@ class RuntimeEnvironment(unittest.TestCase):
             'LANG':'C.UTF-8','LC_ALL':'C.UTF-8',
             **dict.fromkeys(TOKENS,'SLS_PRIVATE_BOUNDARY_FIXTURE'),
         }
+
+    def test_installer_and_uninstaller_asterisk_cli_never_run_with_root_identity(self):
+        with tempfile.TemporaryDirectory(prefix='sls-cli-account-',dir='/run') as temporary:
+            folder=Path(temporary);folder.chmod(0o755)
+            probe=folder/'asterisk-probe'
+            probe.write_text('#!/usr/bin/python3\nimport json,os,sys\nprint(json.dumps({"uid":os.geteuid(),"args":sys.argv[1:]}))\n')
+            probe.chmod(0o755)
+            # The runner verified private mount/PID/network namespaces before
+            # this disposable bind. No real Asterisk binary is executed.
+            subprocess.run(['/usr/bin/mount','--bind',str(probe),'/usr/sbin/asterisk'],check=True,timeout=5)
+            try:
+                for script in ('tools/install_release.sh','tools/uninstall_release.sh'):
+                    with self.subTest(script=script):
+                        result=subprocess.run(['/bin/bash','-c','source "$1"; asterisk -rx "core show version"',
+                            'fixture',str(ROOT/script)],capture_output=True,text=True,env=self.environment,timeout=10)
+                        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                        value=json.loads(result.stdout)
+                        self.assertEqual(value['uid'],self.expected_uid)
+                        self.assertEqual(value['args'],['-rx','core show version'])
+                for name,call in (
+                    ('sls_install_doctor.py', "status,raw=m['command'](['/usr/sbin/asterisk','-rx','core show version']); assert status==0; print(raw)"),
+                    ('sls_install_idle.py', "print(m['channel_inventory']())"),
+                ):
+                    with self.subTest(helper=name):
+                        program='import runpy,sys; m=runpy.run_path(sys.argv[1]); '+call
+                        result=subprocess.run([sys.executable,'-I','-c',program,
+                            str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify'/name)],
+                            capture_output=True,text=True,env=self.environment,timeout=10)
+                        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                        self.assertEqual(json.loads(result.stdout)['uid'],self.expected_uid)
+            finally:
+                subprocess.run(['/usr/bin/umount','/usr/sbin/asterisk'],check=True,timeout=5)
+
+    def test_uninstaller_runtime_children_cannot_keep_maintenance_lease_descriptors(self):
+        with tempfile.TemporaryDirectory(prefix='sls-uninstall-fds-',dir='/run') as temporary:
+            folder=Path(temporary);folder.chmod(0o755)
+            probe=folder/'probe.py'
+            probe.write_text('import json,os; print(json.dumps({"uid":os.geteuid(),"fds":[os.readlink("/proc/self/fd/"+n) for n in os.listdir("/proc/self/fd") if n.isdigit() and int(n)>2 and os.path.exists("/proc/self/fd/"+n)]}))')
+            probe.chmod(0o644)
+            command='source "$1"; SLS_MASS_NOTIFY_MAINTENANCE_LOCK="$3"; exec {UNINSTALL_MAINTENANCE_LOCK_FD}>"$3"; run_as_asterisk /usr/bin/python3 -I "$2"'
+            result=subprocess.run(['/bin/bash','-c',command,'fixture',str(ROOT/'tools/uninstall_release.sh'),str(probe),str(folder/'maintenance.lock')],
+                capture_output=True,text=True,env=self.environment,timeout=10)
+            self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+            value=json.loads(result.stdout)
+            self.assertEqual(value['uid'],self.expected_uid)
+            self.assertNotIn(str(folder/'maintenance.lock'),value['fds'])
+
+    def test_installer_voice_checks_close_root_leases_and_disable_telemetry(self):
+        with tempfile.TemporaryDirectory(prefix='sls-voice-boundary-',dir='/run') as temporary:
+            folder=Path(temporary);folder.chmod(0o755)
+            for name in ('piper/voices','sounds/tts'):
+                (folder/name).mkdir(parents=True);(folder/name).chmod(0o777)
+                (folder/name).parent.chmod(0o755)
+            log=folder/'observations.jsonl';log.touch();log.chmod(0o666)
+            probe=folder/'piper-probe'
+            probe.write_text('#!/usr/bin/python3\nimport json,os,sys,wave\n'
+                'with open('+repr(str(log))+',"a") as out: out.write(json.dumps({"uid":os.geteuid(),"telemetry":os.environ.get("ORT_DISABLE_TELEMETRY"),"fds":[os.readlink("/proc/self/fd/"+n) for n in os.listdir("/proc/self/fd") if n.isdigit() and int(n)>2 and os.path.exists("/proc/self/fd/"+n)]})+"\\n")\n'
+                'with wave.open(sys.argv[sys.argv.index("--output-file")+1],"wb") as out: out.setnchannels(1);out.setsampwidth(2);out.setframerate(8000);out.writeframes(b"\\0"*160)\n')
+            probe.chmod(0o755)
+            subprocess.run(['/usr/bin/mount','--bind',str(probe),'/usr/local/bin/piper'],check=True,timeout=5)
+            try:
+                command='source "$1"; DATA_DIR="$2"; INSTALL_LOG_OUTPUT="$2/log"; SLS_MASS_NOTIFY_MAINTENANCE_LOCK="$2/maintenance.lock"; sha256sum() { cat >/dev/null; }; exec {INSTALL_MAINTENANCE_LOCK_FD}>"$2/maintenance.lock"; verify_piper_voices'
+                result=subprocess.run(['/bin/bash','-c',command,'fixture',str(ROOT/'tools/install_release.sh'),str(folder)],
+                    capture_output=True,text=True,env={**self.environment,'ORT_DISABLE_TELEMETRY':'0'},timeout=15)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr+(folder/'log').read_text())
+                observations=[json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual(len(observations),3)
+                for value in observations:
+                    self.assertEqual(value['uid'],self.expected_uid)
+                    self.assertEqual(value['telemetry'],'1')
+                    self.assertNotIn(str(folder/'maintenance.lock'),value['fds'])
+            finally:
+                subprocess.run(['/usr/bin/umount','/usr/local/bin/piper'],check=True,timeout=5)
 
     def test_php_worker_transitions_remove_inherited_environment(self):
         with tempfile.TemporaryDirectory(prefix='sls-root-worker-env-') as temporary:

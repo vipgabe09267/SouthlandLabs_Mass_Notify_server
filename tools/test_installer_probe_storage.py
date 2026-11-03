@@ -50,7 +50,23 @@ class InstallerProbeStorage(unittest.TestCase):
         environment.update(overrides)
         prefix = r'''
 source "$1"
-/usr/bin/env() { while [[ "${1:-}" = -u ]]; do shift 2; done; if [[ "${1:-}" = /usr/sbin/runuser ]]; then shift; runuser "$@"; else command /usr/bin/env "$@"; fi; }
+/usr/bin/env() {
+  [[ "${1:-}" = -i ]] || return 96
+  shift
+  while [[ "${1:-}" = *=* ]]; do
+    case "${1%%=*}" in
+      PATH|HOME|USER|LOGNAME|LANG|LC_ALL|CONFIG_PATH|SLS_CONFIG_CRYPTO_PHP|SLS_INIT_DEPLOYMENT_PROFILE|SLS_INIT_PHONE_CAPACITY|SLS_MASS_NOTIFY_MODULE|SLS_NATIVE_INSTALL_ACTION|SLS_NATIVE_INSTALL_MODULE|SLS_NATIVE_REGISTRY_MODULE|SLS_RECOVERY_AMI_NAMES|SLS_MASS_NOTIFY_DEFER_SIGNING|SLS_MASS_NOTIFY_PRESERVE_PENDING) shift ;;
+      *) return 96 ;;
+    esac
+  done
+  if [[ "${1:-}" = /usr/sbin/runuser ]]; then
+    shift
+    runuser "$@"
+  else
+    [[ "${fixture_runtime_account_entered:-0}" = 1 ]] || return 96
+    fixture_runtime_command "$@"
+  fi
+}
 LOG_FILE="$FIXTURE_ROOT/installer.log"
 INSTALL_LOG_OUTPUT="$LOG_FILE"
 mktemp() {
@@ -89,9 +105,22 @@ refresh_module_install() { printf 'refresh\n' >>"$FIXTURE_ROOT/trace"; }
 sleep() { :; }
 php() { :; }
 runuser() {
-  [[ "$1 $2 $3 $4 $5" == '-u asterisk -- /usr/bin/php -r' ]] || return 95
-  printf 'media-policy\n' >>"$FIXTURE_ROOT/trace"
-  [ "${FAKE_MEDIA:-ok}" = ok ] || { printf 'Fixture media route cannot read protected configuration.\n' >&2; return 1; }
+  [[ "$1 $2 $3" == '-u asterisk --' ]] || return 95
+  shift 3
+  local fixture_runtime_account_entered=1
+  if [[ "${1:-}" = /usr/bin/env ]]; then "$@"; else fixture_runtime_command "$@"; fi
+}
+fixture_runtime_command() {
+  if [[ "$*" == '/usr/bin/timeout 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --ami-health-json' ]]; then
+    # The real account wrapper now puts timeout behind absolute runuser.
+    # Dispatch only this exact read-only AMI probe to the inert timeout double.
+    "$@"
+  elif [[ "$#" -eq 3 && "$1 $2" == '/usr/bin/php -r' ]]; then
+    printf 'media-policy\n' >>"$FIXTURE_ROOT/trace"
+    [ "${FAKE_MEDIA:-ok}" = ok ] || { printf 'Fixture media route cannot read protected configuration.\n' >&2; return 1; }
+  else
+    return 95
+  fi
 }
 curl() {
   local output=""
@@ -382,7 +411,9 @@ identify() { printf '480 272 8 sRGB None'; }
     def test_final_verification_calls_private_helpers_and_keeps_media_temp_reserved(self):
         self.assertIn("verify_pjsip_contact_inventory || exit 1", SOURCE)
         self.assertEqual(len(re.findall(r"^  verify_local_api_route /api/", SOURCE, re.M)), 4)
-        media = SOURCE.split('  media_probe="', 1)[1].split('  if ! /usr/bin/env', 1)[0]
+        render_call = '  if ! sls_as_asterisk convert '
+        self.assertIn(render_call, SOURCE)
+        media = SOURCE.split('  media_probe="', 1)[1].split(render_call, 1)[0]
         self.assertIn('media_fetch="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-render-fetch.XXXXXX")"', media)
         self.assertNotRegex(media, r'rm[^\n]*\$media_fetch')
 

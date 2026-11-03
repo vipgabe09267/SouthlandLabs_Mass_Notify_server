@@ -12,9 +12,9 @@ Do not publish configuration, API keys, passwords, authenticator seeds, AMI cred
 
 ## Supported releases
 
-Security fixes target the latest published prerelease, currently `0.1.9-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
+Security fixes target the latest published prerelease, currently `0.1.8-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
 
-The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected release retains version `0.1.9-beta` with new signed artifacts. Do not reuse the withdrawn installer.
+The original `0.1.9-beta` installer was withdrawn after a recovery failure. Its correction is an unpublished `0.1.9-beta` candidate awaiting final qualification and signed release assets. Do not reuse the withdrawn installer or treat candidate source as a published release.
 
 Corrections receive signed assets. The updater does not replace equal versions; same-version corrections require the independently authenticated manual installer. The checked bootstrap accepts an explicit `--upgrade` mode, verifies against the protected installed publisher policy before executing downloaded code, and never resets keys or revocations. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
 
@@ -130,7 +130,7 @@ Approved scripts execute sealed reviewed bytes as Asterisk, with a restricted en
 
 The dependency inventory covers declared Python, vendored PHP and embedded JavaScript components with their licenses and provenance. Advisory scans are point-in-time checks; OS packages and other FreePBX modules need their own maintenance. The local dashboard Chart.js bundle replaces only the exact legacy CDN request. See [dependencies](docs/DEPENDENCIES.md).
 
-Isolated fixtures use private mount/network/PID namespaces, read-only inherited storage and disposable writable overlays. They are trusted project fixtures, not a boundary against hostile root code. Local tests and advisory checks do not constitute an independent external penetration test, compliance certification, physical-device acceptance or full-PBX disaster-recovery/fleet qualification. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+Isolated fixtures use private mount/network/PID/IPC namespaces, read-only inherited storage and disposable writable overlays. They are trusted project fixtures, not a boundary against hostile root code. Local tests and advisory checks do not constitute an independent external penetration test, compliance certification, physical-device acceptance or full-PBX disaster-recovery/fleet qualification. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
 ## 0.1.9-beta qualification boundaries
 

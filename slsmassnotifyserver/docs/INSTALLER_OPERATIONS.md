@@ -1,5 +1,7 @@
 # Installer diagnostics, recovery and qualification
 
+These instructions describe the unpublished `0.1.9-beta` correction candidate. Current full-build and native results remain pending; obtain qualified signed assets after publication.
+
 Activation reloads Apache and each independently qualified PHP-FPM version. This
 refreshes their separate opcode caches without changing PHP settings or restarting
 Asterisk. Rollback refreshes FPM after restoring the approved files. The local,
@@ -16,6 +18,15 @@ grant another web account access to PBX secrets. Other
 architectures, relocated layouts and restricted containers require explicit
 adapters and qualification; the installer does not guess replacement paths or
 disable its trust checks to accommodate them.
+
+Required native module floors are Framework `17.0.33`, Dashboard `17.0.5`, Backup `17.0.13` and Recordings `17.0.6`. Existing older or unqualified registrations stop before an SLL transaction starts; update them through native Module Admin and retry. SLL does not run an automatic `upgradeall`. These reviewed floors cover the vendor advisories cited below and do not certify the entire host as vulnerability-free:
+
+- [Framework reviewed security fixes](https://github.com/FreePBX/framework/blob/release/17.0/module.xml)
+- [Dashboard fixed version](https://github.com/FreePBX/security-reporting/security/advisories/GHSA-hw7v-v2jp-wc4v)
+- [Backup fixed version](https://github.com/FreePBX/security-reporting/security/advisories/GHSA-5457-hm39-pcfc)
+- [Recordings fixed version](https://github.com/FreePBX/security-reporting/security/advisories/GHSA-9cjf-xw9x-55hh)
+
+The exact locked NumPy wheel requires x86-64-v2; AVX is optional. CPU count and RAM alone do not establish this capability. Admission checks every CPU allowed by process affinity and accounts for cgroup limits using the actual mount root and membership path. An unresolvable hierarchy stops admission instead of assuming host resources are available.
 
 The phone collector continues to update its ledger and heartbeat while install
 workers are guarded. Permission repair takes each file's permanent writer mutex
@@ -178,16 +189,24 @@ merely to get past this check; retain both the live file and original snapshot.
 
 The installer holds an exclusive retention lease while notification workers
 are paused. The collector can update its heartbeat and ledger while pruning is
-deferred. New baselines also record protected closure times. Modified closed
+deferred. New transactions retain protected closure times and a complete,
+root-private copy of their baseline's closed records in `history-evidence.json`.
+The copy is taken under the collector's permanent mutex, matched against every
+original baseline hash, and synced before mutation. It is evidence for history
+verification, never an operational restore source. Modified closed
 records, missing nonexpired records and active voicemail dependencies still
 prevent completion. Final checks require an existing ledger and a fresh
 collector heartbeat, with a bounded wait for startup or a guarded cron worker
 to exit.
 
-The withdrawn `0.1.9-beta` installer could let normal retention prune closed
+An early withdrawn `0.1.9-beta` installer could let retention prune closed
 records after taking its baseline, then fail both installation and rollback.
-Its older baseline contains record hashes without closure times. For that
-case, use a protected pre-upgrade ledger copy from a backup:
+That explains a possible failure mechanism, not the cause of any individual
+missing record. Its hash-only baseline cannot establish when a missing record
+closed or why it disappeared. First seek a genuine pre-upgrade ledger copy in
+site snapshots, private installation evidence or offsite backups. A FreePBX
+configuration backup does not necessarily contain the phone ledger. For a
+matching copy, use:
 
 ```bash
 bash /path/to/publisher-authenticated/install_release.sh --recover \
@@ -203,6 +222,81 @@ The verifier does not copy this evidence over the live ledger. Without enough
 matching evidence, recovery preserves the transaction and leaves root SLL jobs
 disabled. Preserve backups and the failed installer log; do not reset history or
 delete the transaction to bypass the check.
+
+Recovery also retains complete current closed records which still match the
+original hashes. These facts protect the surviving history if an older
+collector expires it during recovery. They do not explain any record already
+missing. The original baseline and live ledger remain unchanged.
+
+### Review when legacy history cannot be proven
+
+Ordinary recovery now checks history before repeating static restoration. An
+unexplained missing record leaves the transaction unfinished, returns exit 4,
+and prints the location of a protected review. It does not create a new
+baseline or enable root maintenance jobs. Collector health may be deferred
+during this preflight; final recovery still requires a fresh healthy collector.
+
+Generate a report without restoring files or changing maintenance schedules:
+
+```bash
+bash /path/to/publisher-authenticated/install_release.sh --recover \
+  '/var/lib/sls-mass-notify-installer/transaction-<id>' --review-history
+```
+
+Add `--history-evidence '/root/pre-upgrade-phone-admission.json'` to check a real
+backup. Matching evidence may accumulate across attempts. The report separates
+unchanged records, proven expired records, unexplained loss and blocking changes.
+The protected `history-loss-review.json` binds the original signed artifacts,
+exact transaction directory, original baseline bytes and missing record hashes.
+Review its counts and `review_sha256` before deciding what to do.
+
+If no matching evidence can be found, an administrator can separately accept
+the **unverified historical loss**. This is a recorded loss decision; it does
+not reconstruct missing history or prove retention expiry. Replace the three
+placeholders below with the exact reviewed SHA256, administrator identity and
+reason:
+
+```bash
+bash /path/to/publisher-authenticated/install_release.sh --recover \
+  '/var/lib/sls-mass-notify-installer/transaction-<id>' \
+  --approve-history-loss 'REVIEW_SHA256' \
+  --history-loss-operator 'ADMINISTRATOR_NAME' \
+  --history-loss-reason 'REASON_AFTER_REVIEWING_AVAILABLE_BACKUPS'
+```
+
+The installer authenticates the original evidence again and requires the
+review to match the current missing set. It cannot accept modified records,
+known nonexpired loss, a missing live ledger, pending reconciliation or active
+voicemail dependencies. A receipt for another transaction or baseline fails.
+Final verification counts accepted missing records separately from proven
+expired records. Later matching evidence may narrow the unverified portion;
+it cannot extend the approval to a newly missing record.
+
+After all restoration and health checks pass, recovery durably records
+`rolled_back`. Manually recovered transactions retain their original baseline,
+signed artifacts and recovery evidence, including evidence-only recovery with
+no accepted loss. A separate loss receipt is retained when applicable. These
+private archives are excluded from automatic installer cleanup.
+Retain a private archive. A later publisher-key expiry or revocation does not
+delete this passive archive or turn it into execution authority. Active recovery
+still enforces the current publisher policy. Start a fresh upgrade only after
+verified recovery has completed; recovery itself never starts another upgrade.
+
+### Custom Asterisk builds
+
+This module installer does not reinstall Asterisk packages by default. Already
+available capabilities work with supported source-built Asterisk installations.
+If a required provider is missing, repair it through that PBX's normal Asterisk
+maintenance process. Keep its build options, module ABI and service management
+consistent; do not mix distribution modules into a custom build.
+
+For a distribution-managed PBX only, the separate explicit environment option
+`SLS_MASS_NOTIFY_REPAIR_ASTERISK_PACKAGES=1` permits the existing exact-version
+provider repair. It additionally requires matching installed binary/provider
+package versions, protected package checksums and matching installed and running
+Asterisk bytes. Package ownership alone is insufficient. The check repeats
+after repository refresh before any repair. Unverifiable or custom binaries
+are refused; the default is `0`.
 
 New installation snapshots also preserve the scoped native Manager database
 rows. Rollback restores their original identities and regenerates native

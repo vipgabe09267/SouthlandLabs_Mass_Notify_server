@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -34,7 +35,7 @@ def package(path, name, contents):
 class UpgradeTrustTests(unittest.TestCase):
     def test_previous_release_urls_preserve_legacy_and_current_tag_identities(self):
         self.assertEqual(self.upgrade.sls_release_url('0.1.8-beta','slsmassnotifyserver-0.1.8-beta.tgz'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.8-beta/slsmassnotifyserver-0.1.8-beta.tgz')
-        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/release-manifest.json')
+        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.9-beta/release-manifest.json')
         for version,name in (('../0.1.9','release-manifest.json'),('0.1.9-beta','slsmassnotifyserver-0.1.8-beta.tgz'),('0.1.9-beta','../key')):
             with self.subTest(version=version,name=name),self.assertRaises(self.upgrade.UpgradeError):
                 self.upgrade.sls_release_url(version,name)
@@ -210,6 +211,30 @@ class UpgradeTrustTests(unittest.TestCase):
         path.unlink()
         with self.assertRaisesRegex(self.upgrade.UpgradeError,'runner lacks'):
             self.original_root_approval(data,self.old,prefix=self.fs,cron=jobs)
+
+    def test_previous_root_approval_preserves_comments_and_backup_operands(self):
+        data={'version':'0.1.5-beta','source':{'archive_sha256':'a'*64}}
+        unrelated=(b'# verify /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh\n'
+                   b'0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh\n'
+                   b"0 2 * * * /usr/bin/echo ';' /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh\n")
+        approved=self.original_root_approval(data,self.old,prefix=self.fs,cron=self.cron+unrelated)
+        self.assertEqual(approved['root_jobs'],[line.decode() for line in self.cron.splitlines()[1:]])
+
+    def test_previous_root_approval_reads_under_the_native_account_lock(self):
+        recovery=self.upgrade.helper('sls_installer_recovery');active=[]
+        @contextmanager
+        def guard(accounts):
+            self.assertEqual(accounts,('root',));active.append(True)
+            try:yield
+            finally:active.pop()
+        def read(body=None,user='root'):
+            self.assertTrue(active,'Upgrade read root cron without native FreePBX coordination')
+            self.assertIsNone(body);self.assertEqual(user,'root');return self.cron
+        data={'version':'0.1.5-beta','source':{'archive_sha256':'a'*64}}
+        original_helper=self.upgrade.helper
+        with patch.object(self.upgrade,'helper',side_effect=lambda name:recovery if name=='sls_installer_recovery' else original_helper(name)),patch.object(recovery,'native_cron_lock',guard),patch.object(recovery.Recovery,'system_cron',read):
+            approved=self.original_root_approval(data,self.old,prefix=self.fs)
+        self.assertEqual(len(approved['root_jobs']),2)
 
     def release(self, directory, version, contents):
         root = self.root / directory; root.mkdir(mode=0o700)
@@ -883,7 +908,47 @@ class UpgradeTrustTests(unittest.TestCase):
         with patch.object(self.upgrade,'WEB',self.web),self.assertRaisesRegex(self.upgrade.UpgradeError,'absent'):
             self.upgrade.bootstrap_dashboard(self.root/'stock-bootstrap','17.0.5')
         self.assertEqual(path.read_bytes(),before)
+
+    def test_dashboard_metadata_failure_never_publishes_an_unreadable_module(self):
+        shutil.rmtree(self.web/'admin/modules/dashboard')
+        actual_chmod = self.upgrade.os.fchmod
+        def fail_metadata(descriptor, mode):
+            path = os.readlink('/proc/self/fd/' + str(descriptor))
+            if path.startswith(str(self.web/'admin/modules') + '/') and path.endswith('/module.xml') and mode == 0o644:
+                raise OSError('injected stock metadata failure')
+            return actual_chmod(descriptor, mode)
+        with patch.object(self.upgrade, 'WEB', self.web), patch.dict(os.environ, self.environment, clear=True), \
+                patch.object(self.upgrade.os, 'fchmod', side_effect=fail_metadata), \
+                self.assertRaisesRegex(OSError, 'stock metadata failure'):
+            self.upgrade.bootstrap_dashboard(self.root/'stock-bootstrap', '17.0.5')
+        self.assertFalse((self.web/'admin/modules/dashboard').exists(),
+                         'A failed metadata preparation exposed a half-installed Dashboard to native FreePBX.')
+        retained = list((self.web/'admin/modules').glob('.sls-stock-dashboard-*'))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].stat().st_mode & 0o777, 0o700)
+        self.assertTrue((self.root/'stock-bootstrap/stock-bootstrap.json').is_file())
         self.assert_preserved()
+
+    def test_dashboard_appearing_before_publication_is_preserved(self):
+        destination = self.web/'admin/modules/dashboard'
+        shutil.rmtree(destination)
+        actual_chmod = self.upgrade.os.fchmod
+        def add_existing_dashboard(descriptor, mode):
+            path = os.readlink('/proc/self/fd/' + str(descriptor))
+            if path.endswith('/tree') and mode == 0o755 and not destination.exists():
+                destination.mkdir()
+                (destination/'operator-file').write_bytes(b'existing local module')
+            return actual_chmod(descriptor, mode)
+        with patch.object(self.upgrade, 'WEB', self.web), patch.dict(os.environ, self.environment, clear=True), \
+                patch.object(self.upgrade.os, 'fchmod', side_effect=add_existing_dashboard), \
+                self.assertRaisesRegex(self.upgrade.UpgradeError, 'appeared'):
+            self.upgrade.bootstrap_dashboard(self.root/'stock-bootstrap', '17.0.5')
+        self.assertEqual((destination/'operator-file').read_bytes(), b'existing local module')
+        self.assertFalse((destination/'module.xml').exists())
+        retained = list((self.web/'admin/modules').glob('.sls-stock-dashboard-*'))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0].stat().st_mode & 0o777, 0o700)
+        self.assertTrue((retained[0]/'tree/module.xml').is_file())
 
 
 if __name__ == '__main__': unittest.main()

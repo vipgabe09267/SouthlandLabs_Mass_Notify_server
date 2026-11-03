@@ -178,7 +178,37 @@ namespace {
 	];
 	$configRaw = json_encode($settings, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
 	$validatedSettings = slsInvoke($module, 'validateNativeBackupConfig', [$configRaw]);
+	// Saved optional configuration is portable even when its devices/accounts do
+	// not yet exist on the replacement PBX. Native backup must validate these
+	// namespaces structurally rather than reject them as unknown top-level keys.
+	$featureSettings = $settings;
+	$featureSettings['operator_access'] = ['schema' => 1, 'enabled' => true, 'accounts' => [[
+		'id' => 'api_' . str_repeat('a', 24), 'username' => 'restored-admin', 'name' => 'Restored administrator',
+		'role' => 'administrator', 'enabled' => true, 'source' => 'database', 'identity' => str_repeat('b', 64),
+	]]];
+	$featureSettings['automations'] = ['schema' => 1, 'rules' => [], 'actions' => []];
+	$featureRaw = json_encode($featureSettings, JSON_THROW_ON_ERROR);
+	$featureValidated = slsInvoke($module, 'validateNativeBackupConfig', [$featureRaw]);
+	slsAssert($featureValidated['operator_access'] === $featureSettings['operator_access']
+		&& $featureValidated['automations'] === $featureSettings['automations'], 'Native backup discarded valid optional account/trigger settings.');
+	foreach ([['operator_access', ['schema' => 1, 'accounts' => [['enabled' => true]]]],
+		['automations', ['schema' => 1, 'rules' => [], 'actions' => [], 'unexpected' => true]],
+		['unrecognized_namespace', []]] as [$key, $value]) {
+		$invalidSettings = $featureSettings; $invalidSettings[$key] = $value; $rejected = false;
+		try { slsInvoke($module, 'validateNativeBackupConfig', [json_encode($invalidSettings, JSON_THROW_ON_ERROR)]); }
+		catch (\RuntimeException $error) { $rejected = true; }
+		slsAssert($rejected, 'Native backup accepted structurally invalid or unknown configuration: ' . $key);
+	}
 	$timezone = slsInvoke($module, 'getPbxDateTimeZone');
+	$featureRestored = slsInvoke($module, 'prepareNativeRestoredScheduleState', [[
+		'raw' => $featureRaw, 'settings' => $featureValidated,
+	], ['raw' => $ledgerRaw, 'data' => $ledger], $timezone->getName(), strtotime('2027-01-01T00:00:00Z')]);
+	$restoredFeatures = json_decode($featureRestored['config_raw'], true);
+	slsAssert($restoredFeatures['operator_access']['accounts'][0]['enabled'] === false,
+		'Native restore reactivated an operator account without administrator review.');
+	slsAssert($restoredFeatures['operator_access']['accounts'][0]['identity'] === str_repeat('b', 64)
+		&& $featureValidated['operator_access']['accounts'][0]['enabled'] === true,
+		'Native restore lost account identity evidence or mutated its original settings.');
 	$prepared = slsInvoke($module, 'prepareNativeRestoredScheduleState', [[
 		'raw' => $configRaw,
 		'settings' => $validatedSettings,

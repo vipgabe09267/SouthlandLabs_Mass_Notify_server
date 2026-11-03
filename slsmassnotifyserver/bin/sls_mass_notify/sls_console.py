@@ -3,7 +3,6 @@
 from contextlib import contextmanager
 import argparse
 import fcntl
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -43,11 +42,28 @@ def protected_file(path):
 
 
 def load(name):
+    if not isinstance(name, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,79}', name):
+        raise RuntimeError('Invalid fixed console helper name.')
     path = Path(__file__).absolute().with_name(name + '.py')
     protected_file(path)
-    spec = importlib.util.spec_from_file_location('_console_' + name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    identity = lambda value: tuple(getattr(value, key) for key in (
+        'st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+        'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+    with os.fdopen(descriptor, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022
+                or before.st_nlink != 1 or not 0 < before.st_size <= 262144
+                or identity(before) != identity(path.lstat())):
+            raise RuntimeError('Console helper source is unsafe or exceeds its size limit.')
+        body = stream.read(262145)
+        if (len(body) != before.st_size or identity(before) != identity(os.fstat(stream.fileno()))
+                or identity(before) != identity(path.lstat())):
+            raise RuntimeError('Console helper source changed during inspection.')
+    # Compile the checked descriptor bytes directly. Import machinery may use
+    # sibling bytecode or extension candidates which have not been admitted.
+    module = types.ModuleType('_console_' + name); module.__file__ = str(path)
+    exec(compile(body, str(path), 'exec'), module.__dict__)
     return module
 
 

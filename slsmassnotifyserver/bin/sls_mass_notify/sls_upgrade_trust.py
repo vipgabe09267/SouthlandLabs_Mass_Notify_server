@@ -118,14 +118,14 @@ def sls_release_url(version, name):
     if (not isinstance(version,str) or not SLS_VERSION.fullmatch(version)
             or name not in ('slsmassnotifyserver-'+version+'.tgz','release-manifest.json','release-manifest.sig')):
         raise UpgradeError('Unsupported signed SLL release asset identity')
-    prefix='slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.'))) < (0,1,9) else 'v'
+    prefix='V' if version=='0.1.9-beta' else ('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.'))) < (0,1,9) else 'v')
     return 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'+prefix+version+'/'+name
 
 
 def download(url, destination, limit):
     upstream = r'https://mirror\.freepbx\.org/modules/packages/(dashboard|framework)/\1-(17\.[0-9]+(?:\.[0-9]+){1,3})\.tgz\.gpg'
     sls = (r'https://github\.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'
-           r'(?:slsmassnotifyserver-|v)([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(?:slsmassnotifyserver-\1\.tgz|release-manifest\.(?:json|sig))')
+           r'(?:(?:slsmassnotifyserver-|v)([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(?:slsmassnotifyserver-\1\.tgz|release-manifest\.(?:json|sig))|V0\.1\.9-beta/(?:slsmassnotifyserver-0\.1\.9-beta\.tgz|release-manifest\.(?:json|sig)))')
     if not re.fullmatch(upstream, url) and not re.fullmatch(sls, url):
         raise UpgradeError('Unsupported upgrade package URL')
     request = urllib.request.Request(url, headers={'User-Agent': 'SLL-Upgrade-Inventory', 'Accept-Encoding': 'identity'})
@@ -292,10 +292,20 @@ def bootstrap_dashboard(workspace, version):
     if account.pw_uid == 0: raise UpgradeError('FreePBX service account must be unprivileged')
     parent = TRUST.directory(modules)
     temporary = '.sls-stock-dashboard-' + os.urandom(12).hex()
-    descriptor = -1
+    container = descriptor = -1
     try:
         os.mkdir(temporary, 0o700, dir_fd=parent)
-        descriptor = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        container = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        container_identity = os.fstat(container)
+        named = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(container_identity.st_mode) or container_identity.st_uid != 0
+                or stat.S_IMODE(container_identity.st_mode) != 0o700
+                or (named.st_dev, named.st_ino) != (container_identity.st_dev, container_identity.st_ino)):
+            raise UpgradeError('Stock bootstrap staging is not root-private; preserve the evidence and review')
+        # Prepare the final tree behind a root-private ancestor. Its metadata
+        # can become readable before publication without exposing partial files.
+        os.mkdir('tree', 0o700, dir_fd=container)
+        descriptor = os.open('tree', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=container)
         for relative, body in sorted(contents.items()):
             parts = TRUST.relative(relative).split('/')
             current = os.dup(descriptor)
@@ -319,10 +329,12 @@ def bootstrap_dashboard(workspace, version):
                     finally: os.close(child)
                 elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
                     child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
-                    try: os.fchown(child, account.pw_uid, account.pw_gid); os.fchmod(child, 0o644)
+                    try: os.fchown(child, account.pw_uid, account.pw_gid); os.fchmod(child, 0o644); os.fsync(child)
                     finally: os.close(child)
                 else: raise UpgradeError('Unexpected stock bootstrap file type')
             os.fchown(fd, account.pw_uid, account.pw_gid); os.fchmod(fd, 0o755); os.fsync(fd)
+        expose(descriptor)
+        os.fsync(container)
         try: os.stat('dashboard', dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError: pass
         else: raise UpgradeError('Dashboard appeared during bootstrap; preserve the authenticated source and review')
@@ -330,12 +342,18 @@ def bootstrap_dashboard(workspace, version):
         # being overwritten, even if the public parent is writable by FreePBX.
         import ctypes
         libc = ctypes.CDLL(None, use_errno=True)
-        if libc.renameat2(parent, temporary.encode(), parent, b'dashboard', 1):
+        if libc.renameat2(container, b'tree', parent, b'dashboard', 1):
             raise OSError(ctypes.get_errno(), 'Dashboard bootstrap destination changed')
+        os.fsync(container)
         os.fsync(parent)
-        expose(descriptor)
+        current = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (container_identity.st_dev, container_identity.st_ino):
+            raise UpgradeError('Stock bootstrap staging identity changed; preserve the evidence and review')
+        os.rmdir(temporary, dir_fd=parent)
+        os.fsync(parent)
     finally:
         if descriptor >= 0: os.close(descriptor)
+        if container >= 0: os.close(container)
         os.close(parent)
     print(json.dumps({'ok': True, 'stock_bootstrap': 'dashboard', 'version': version, 'evidence': str(workspace)}))
 
@@ -461,16 +479,20 @@ def previous_root_approval(data, contents, *, prefix=Path('/'), cron=None):
         if total > 16 * 1024 * 1024:
             raise UpgradeError('Previous Python caches exceed the 16 MiB recovery limit; review before upgrading')
         caches[RUNTIME + '/' + name] = TRUST.digest(body)
+    recovery = helper('sls_installer_recovery')
     if cron is None:
-        result = subprocess.run(['/usr/bin/crontab', '-u', 'root', '-l'], capture_output=True, timeout=15,
-                                env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C'})
-        if result.returncode and not (result.returncode == 1 and result.stderr.strip() == b'no crontab for root'):
-            raise UpgradeError('Unable to inspect previous root maintenance schedule')
-        cron = result.stdout
+        try:
+            with recovery.native_cron_lock(('root',)) as lease:
+                cron = recovery.Recovery.system_cron(user='root')
+                if lease is not None:lease.check()
+        except recovery.RecoveryError as error:
+            raise UpgradeError('Unable to inspect the coordinated previous root maintenance schedule: '+str(error)) from error
     if len(cron) > 1024 * 1024:
         raise UpgradeError('Root schedule exceeds its inspection limit')
-    recovery = helper('sls_installer_recovery')
-    jobs = [line for line in cron.splitlines() if any(marker.encode() in line for marker in recovery.CRON_MARKERS)]
+    try:
+        jobs = [line for line in cron.splitlines() if recovery.sls_cron_job(line,'root')]
+    except recovery.RecoveryError as error:
+        raise UpgradeError('Previous SLL root schedule needs independent review: '+str(error)) from error
     if any(not ROOT_JOB.fullmatch(line) for line in jobs) or len(jobs) != len(set(jobs)):
         raise UpgradeError('Previous SLL root schedule needs independent review; no maintenance was disabled')
     if any(b'/sls_cron_runner.py ' in line for line in jobs) and RUNTIME + '/sls_cron_runner.py' not in expected:

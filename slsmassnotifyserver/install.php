@@ -5,5 +5,5 @@ if (!defined('FREEPBX_IS_AUTH')) {
 	die('No direct script access allowed');
 }
 
-$freepbx = \FreePBX::Create();
-$freepbx->Slsmassnotifyserver->install();
+// FreePBX invokes the BMO install() method before this legacy hook. Keep all
+// integration in that method so native installation runs the phase once.

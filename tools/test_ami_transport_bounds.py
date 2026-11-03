@@ -1,7 +1,10 @@
 #!/usr/bin/python3
 """Actual private AMI reads and deterministic total-action deadlines."""
 import importlib.util
+import configparser
+import contextlib
 import io
+import json
 from pathlib import Path
 import socket
 import signal
@@ -18,6 +21,34 @@ spec.loader.exec_module(sender)
 class AmiBoundsTests(unittest.TestCase):
     def client(self, timeout=.15):
         return sender.AmiClient('127.0.0.1', 5038, 'fixture', 'fixture', timeout=timeout)
+
+    def test_health_cli_only_observes_authorized_actions_without_sending_notify(self):
+        required=('PJSIPNotify','MuteAudio','PlayDTMF','Setvar','Getvar')
+        commands={'Response':'Success',**{name:'Native synopsis (Priv: call,system)' for name in required}}
+        class HealthAmi:
+            def __init__(self): self.actions=[]
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def action(self,fields,complete_event=None):
+                self.actions.append(dict(fields))
+                if fields == {'Action':'Ping'}: return {'Response':'Success','Ping':'Pong'},[]
+                if fields == {'Action':'PJSIPShowContacts'}: return {'Response':'Error','Message':'No contacts found.'},[]
+                if fields == {'Action':'ListCommands'}: return commands,[]
+                raise AssertionError('Health probe attempted a mutating AMI action')
+        config=configparser.ConfigParser();config.read_dict({'ami':{'host':'127.0.0.1','port':'5038','username':'fixture','password':'fixture'},'logging':{}})
+        for permitted in (True,False):
+            with self.subTest(notify_authorized=permitted):
+                if not permitted: commands.pop('PJSIPNotify')
+                client=HealthAmi();output=io.StringIO()
+                expected_logs=self.assertLogs(level='ERROR') if not permitted else contextlib.nullcontext()
+                with patch.object(sender,'AmiClient',return_value=client),patch.object(sender,'load_config',return_value=config),patch.object(sender,'setup_logging'),patch('sys.argv',['sls_notify.py','--ami-health-json']),contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()),expected_logs:
+                    result=sender.main()
+                self.assertEqual(result,0 if permitted else 1,output.getvalue())
+                self.assertEqual(client.actions,[{'Action':'Ping'},{'Action':'PJSIPShowContacts'},{'Action':'ListCommands'}])
+                if permitted:
+                    payload=json.loads(output.getvalue())
+                    self.assertEqual(payload['pjsip_notify'],'authorized')
+                    self.assertEqual(payload['live_paging_actions'],{name:'authorized' for name in required[1:]})
 
     def test_paging_health_discovery_is_read_only_and_rejects_missing_or_ambiguous_actions(self):
         required = ("MuteAudio", "PlayDTMF", "Setvar", "Getvar")

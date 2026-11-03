@@ -8,7 +8,7 @@ bootstrap_download() {
   /usr/bin/timeout --signal=TERM --kill-after=3 75 /usr/bin/python3 -I - "$1" "$2" <<'PY'
 import os,re,sys,urllib.request,urllib.parse
 from pathlib import Path
-root=Path(sys.argv[1]);version=sys.argv[2];tag='v'+version
+root=Path(sys.argv[1]);version=sys.argv[2];tag='V0.1.9-beta' if version=='0.1.9-beta' else ('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.')))<(0,1,9) else 'v')+version
 class Redirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,request,fp,code,message,headers,url):
         target=urllib.parse.urlsplit(url)
@@ -74,7 +74,7 @@ try:
     raw=(root/'release-manifest.json').read_bytes()
     if len(raw)>16384 or (root/'release-manifest.sig').stat().st_size!=64:raise ValueError('Manifest bounds')
     manifest=json.loads(raw,object_pairs_hook=unique)
-    if set(manifest)!={'schema','version','tag','package','package_sha256','installer_sha256','signing'} or type(manifest['schema']) is not int or manifest['schema']!=1 or manifest['version']!=version or manifest['tag'] not in ('v'+version,'slsmassnotifyserver-'+version) or (expected_tag and manifest['tag']!=expected_tag) or manifest['package']!='slsmassnotifyserver-'+version+'.tgz':raise ValueError('Release identity')
+    if set(manifest)!={'schema','version','tag','package','package_sha256','installer_sha256','signing'} or type(manifest['schema']) is not int or manifest['schema']!=1 or manifest['version']!=version or manifest['tag'] not in (('v'+version,'slsmassnotifyserver-'+version)+(('V0.1.9-beta',) if version=='0.1.9-beta' else ())) or (expected_tag and manifest['tag']!=expected_tag) or manifest['package']!='slsmassnotifyserver-'+version+'.tgz':raise ValueError('Release identity')
     signing=manifest['signing'];now=int(time.time())
     if not isinstance(signing,dict) or set(signing)!={'key_id','issued_at','expires_at'} or signing['key_id']!=hashlib.sha256((root/'publisher.der').read_bytes()).hexdigest() or type(signing['issued_at']) is not int or type(signing['expires_at']) is not int or not 0<signing['issued_at']<=now+60 or not signing['issued_at']<signing['expires_at']<=signing['issued_at']+366*86400 or signing['expires_at']<=now:raise ValueError('Signing validity')
     for field in ('installer_sha256','package_sha256'):
@@ -106,17 +106,49 @@ PY
 
 bootstrap_main() (
   [ "$EUID" -eq 0 ] || { printf 'Run the verified bootstrap as root on the PBX.\n' >&2; exit 2; }
-  [ "$#" -ge 1 ] && [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]] || { printf 'Usage: bash install_bootstrap.sh VERSION [--upgrade] [--lite|--standard] [--inspect | --recover TRANSACTION [--history-evidence /root/pre-upgrade-phone-admission.json]]\n' >&2; exit 2; }
-  local version="$1" directory existing_mode=0; shift
+  [ "$#" -ge 1 ] && [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]] || { printf 'Usage: bash install_bootstrap.sh VERSION [--upgrade] [--lite|--standard] [--inspect | --recover TRANSACTION [--history-evidence FILE] [--review-history | --approve-history-loss SHA256 --history-loss-operator NAME --history-loss-reason TEXT]]\n' >&2; exit 2; }
+  local version="$1" directory release_tag existing_mode=0; shift
   if [ "${1:-}" = --upgrade ]; then existing_mode=1; shift; fi
   local -a installer_arguments=()
   if [ "${1:-}" = --lite ] || [ "${1:-}" = --standard ]; then installer_arguments+=("$1"); shift; fi
   if [ "$#" -eq 1 ] && [ "$1" = --inspect ]; then installer_arguments+=(--inspect)
-  elif { [ "$#" -eq 2 ] || [ "$#" -eq 4 ]; } && [ "$1" = --recover ] && [ "${#installer_arguments[@]}" -eq 0 ] && [[ "$2" =~ ^/var/lib/sls-mass-notify-installer/transaction-[a-f0-9]{24}$ ]]; then
+  elif [ "$#" -ge 2 ] && [ "$1" = --recover ] && [ "${#installer_arguments[@]}" -eq 0 ] && [[ "$2" =~ ^/var/lib/sls-mass-notify-installer/transaction-[a-f0-9]{24}$ ]]; then
     installer_arguments=(--recover "$2")
-    if [ "$#" -eq 4 ]; then
-      [ "$3" = --history-evidence ] && [[ "$4" = /* ]] && [ "$4" != / ] || { printf 'Recovery evidence requires --history-evidence and an absolute root-private ledger path. No installer was executed.\n' >&2; exit 2; }
-      installer_arguments+=(--history-evidence "$4")
+    shift 2
+    local history_review=0 history_approval=0 history_evidence=0 history_operator=0 history_reason=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --review-history)
+          [ "$history_review" -eq 0 ] || { printf 'Duplicate history review option. No installer was executed.\n' >&2; exit 2; }
+          history_review=1; installer_arguments+=("$1"); shift ;;
+        --history-evidence)
+          [ "$history_evidence" -eq 0 ] && [[ "${2:-}" = /* ]] && [ "$2" != / ] || {
+            printf 'Recovery evidence requires one absolute root-private ledger path. No installer was executed.\n' >&2; exit 2;
+          }
+          history_evidence=1; installer_arguments+=("$1" "$2"); shift 2 ;;
+        --approve-history-loss)
+          [ "$history_approval" -eq 0 ] && [[ "${2:-}" =~ ^[a-f0-9]{64}$ ]] || {
+            printf 'History-loss approval requires one exact SHA256 review challenge. No installer was executed.\n' >&2; exit 2;
+          }
+          history_approval=1; installer_arguments+=("$1" "$2"); shift 2 ;;
+        --history-loss-operator|--history-loss-reason)
+          [ -n "${2:-}" ] && [[ "$2" != *[$'\001'-$'\037'$'\177']* ]] && [ "${#2}" -le 2048 ] || {
+            printf 'History-loss operator and reason require bounded nonempty text. No installer was executed.\n' >&2; exit 2;
+          }
+          if [ "$1" = --history-loss-operator ]; then
+            [ "$history_operator" -eq 0 ] || { printf 'Duplicate history-loss operator. No installer was executed.\n' >&2; exit 2; }; history_operator=1
+          else
+            [ "$history_reason" -eq 0 ] || { printf 'Duplicate history-loss reason. No installer was executed.\n' >&2; exit 2; }; history_reason=1
+          fi
+          installer_arguments+=("$1" "$2"); shift 2 ;;
+        *) printf 'Unknown recovery option. No installer was executed.\n' >&2; exit 2 ;;
+      esac
+    done
+    [ "$history_review" -eq 0 ] || [ "$history_approval" -eq 0 ] || { printf 'History review and approval require separate commands. No installer was executed.\n' >&2; exit 2; }
+    if [ "$history_approval" -eq 1 ]; then
+      [ "$history_operator" -eq 1 ] && [ "$history_reason" -eq 1 ] || { printf 'History-loss approval requires an operator and reason. No installer was executed.\n' >&2; exit 2; }
+    else
+      [ "$history_operator" -eq 0 ] && [ "$history_reason" -eq 0 ] || { printf 'History-loss metadata requires an explicit approval challenge. No installer was executed.\n' >&2; exit 2; }
     fi
   elif [ "$#" -ne 0 ]; then printf 'Use an optional --lite or --standard profile, --inspect, or the exact --recover transaction path printed by the installer. No installer was executed.\n' >&2; exit 2; fi
   for command in /usr/bin/python3 /usr/bin/openssl /usr/bin/mktemp /usr/bin/timeout /bin/bash; do [ -x "$command" ] || { printf 'Missing bootstrap prerequisite: %s\n' "$command" >&2; exit 2; }; done
@@ -148,10 +180,13 @@ PY
 MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
 -----END PUBLIC KEY-----
 KEY
+  if [ "$version" = 0.1.9-beta ]; then release_tag=V0.1.9-beta
+  elif /usr/bin/python3 -I -c 'import sys; raise SystemExit(0 if tuple(map(int,sys.argv[1].removesuffix("-beta").split("."))) < (0,1,9) else 1)' "$version"; then release_tag="slsmassnotifyserver-$version"
+  else release_tag="v$version"; fi
   bootstrap_download "$directory" "$version"
-  bootstrap_verify "$directory" "$version" "v$version" "$existing_mode"
+  bootstrap_verify "$directory" "$version" "$release_tag" "$existing_mode"
   printf 'Publisher signature and installer hash verified for %s.\n' "$version"
-  SLS_MASS_NOTIFY_TGZ_URL="https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v$version/slsmassnotifyserver-$version.tgz" \
+  SLS_MASS_NOTIFY_TGZ_URL="https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/$release_tag/slsmassnotifyserver-$version.tgz" \
     /bin/bash "$directory/install_release.sh" "${installer_arguments[@]}"
 )
 

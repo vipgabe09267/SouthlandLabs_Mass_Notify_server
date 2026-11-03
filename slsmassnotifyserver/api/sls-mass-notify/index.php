@@ -19,7 +19,7 @@ if (($_GET['sls_installer_runtime'] ?? '') === '1'
     require_once __DIR__.'/runtime-security.php';
     if (!\SLS\MassNotify\PhpSecurityPolicy::evaluate(PHP_VERSION)['ok']) { $missing[] = 'php_security_floor'; }
     $functions = [];
-    foreach (['exec','proc_open','posix_geteuid','posix_getpwnam','openssl_encrypt','openssl_decrypt','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt','sodium_crypto_pwhash_str'] as $function) {
+    foreach (array_merge(['exec','proc_open','posix_geteuid','posix_getpwnam','openssl_encrypt','openssl_decrypt','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt','sodium_crypto_pwhash_str'], \SLS\MassNotify\PhpSecurityPolicy::NATIVE_CRON_FUNCTIONS) as $function) {
         $functions[$function] = function_exists($function);
         if (!$functions[$function]) { $missing[] = $function . '_enabled'; }
     }

@@ -40,6 +40,15 @@ APACHE_PATH = '/etc/apache2/conf-available/sls-mass-notify.conf'
 LOGROTATE_PATH = '/etc/logrotate.d/sls-mass-notify'
 SIGNER_PATH = '/usr/local/sbin/sign_sls_mass_notify_local_sig.sh'
 CONSOLE_PATH = '/usr/local/bin/slsconsole'
+# Exact historical implementations already recognized by both shell adapters.
+# This permits replacement during an authenticated upgrade, never execution or
+# trust in a locally modified wrapper. The new implementation comes from the
+# authenticated candidate voice-installer heredoc below.
+LEGACY_PIPER_WRAPPER_SHA256 = frozenset({
+    'a2f9671cb1f69acc055a88f58b9fb610578f5efea43a047938b16ed8634f4d56',
+    '97792a8e4ca9f3f48be0be0c24202921008807da030ac85438b58034f21130e4',
+    '4c6c0dfe69c1b59b8650c0c5a9d38adf5a9c6cbe311c283a929a7fc5580015c0',
+})
 CRON_LINES = (
     '* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1',
     '17 * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py update >/dev/null 2>&1',
@@ -628,7 +637,8 @@ def runner(arguments, *, timeout=30, input=None, allowed=(0,)):
             raise InstallError('unsafe protected installation workspace')
     process = subprocess.Popen(arguments, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
-                               env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'TMPDIR': temporary})
+                               env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'TMPDIR': temporary,
+                                    'ORT_DISABLE_TELEMETRY': '1'})
     output = {'stdout': bytearray(), 'stderr': bytearray()}
     deadline = time.monotonic() + timeout
     pending = memoryview(input or b'')
@@ -681,7 +691,7 @@ def runner(arguments, *, timeout=30, input=None, allowed=(0,)):
 
 
 class PrivilegedInstall:
-    def __init__(self, trust, trust_root, *, files=None, run=runner):
+    def __init__(self, trust, trust_root, *, files=None, run=runner, cron_lock=None):
         self.trust = trust; self.trust_root = Path(trust_root)
         self.files = files or Files(); self.run = run
         data, generation = trust.load(self.trust_root, 'slsmassnotifyserver')
@@ -698,7 +708,7 @@ class PrivilegedInstall:
                 raise InstallError('immutable publisher generation changed: ' + name)
             self.contents[name] = body
         required = ('bin/sls_mass_notify_maintenance.sh', 'bin/sls_mass_notify_update.sh',
-                    'bin/sls_mass_notify/sls_cron_runner.py',
+                    'bin/sls_mass_notify/sls_cron_runner.py', 'bin/sls_mass_notify/sls_installer_recovery.py',
                     'bin/slsconsole', 'bin/sls_mass_notify/sls_console.py', 'bin/sls_mass_notify/sls_runtime_state.php',
                     'bin/sls_mass_notify_install_piper_voices.sh', 'bin/sign_sls_mass_notify_local_sig.sh',
                     'bin/sls_mass_notify/sls_phone_events.py', 'bin/sls_mass_notify/sls_voicemail.py',
@@ -706,6 +716,19 @@ class PrivilegedInstall:
         missing = [name for name in required if name not in self.contents]
         if missing: raise InstallError('authenticated generation is incomplete: ' + ', '.join(missing))
         self._crypto = None
+        self._recovery = None
+        self.cron_lock = cron_lock
+
+    @property
+    def recovery(self):
+        """Compile the authenticated standalone coordinator, never a cache."""
+        if self._recovery is None:
+            name='bin/sls_mass_notify/sls_installer_recovery.py'
+            module=types.ModuleType('_sls_authenticated_installer_recovery')
+            module.__file__=str(self.source/name)
+            exec(compile(self.contents[name],module.__file__,'exec'),module.__dict__)
+            self._recovery=module
+        return self._recovery
 
     @property
     def crypto(self):
@@ -803,19 +826,35 @@ class PrivilegedInstall:
         return f'/var/log/sls_mass_notify.log {{\n    daily\n    maxsize 2M\n    rotate {days}\n    maxage {days}\n    missingok\n    notifempty\n    compress\n    delaycompress\n    copytruncate\n    su root asterisk\n}}\n'.encode()
 
     def root_cron(self, *, apply=False):
-        result = self.run(['/usr/bin/crontab', '-u', 'root', '-l'], allowed=(0, 1))
-        if result.returncode == 1 and (result.stdout or result.stderr.strip() != b'no crontab for root'):
-            raise InstallError('unable to read root crontab safely')
-        before = result.stdout.decode('utf-8')
-        kept = [line for line in before.splitlines() if not any(name in line for name in (
-            '/usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh',
-            '/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh',
-            '/usr/local/bin/sls_mass_notify/sls_cron_runner.py',
-            '/usr/local/bin/nwsalerts_ensure_menu_patch.sh', '/usr/local/bin/nws_weather_alert.sh'))]
-        after = ('\n'.join(kept + list(CRON_LINES)) + '\n').encode()
-        if apply and before.encode() != after:
-            self.run(['/usr/bin/crontab', '-u', 'root', '-'], input=after)
-        return before
+        recovery=self.recovery
+        try:
+            with (self.cron_lock or recovery.native_cron_lock)(('root',)) as lease:
+                def read():
+                    if lease is not None:lease.check()
+                    result=self.run(['/usr/bin/crontab','-u','root','-l'],allowed=(0,1))
+                    if lease is not None:lease.check()
+                    if (not isinstance(result.stdout,bytes) or not isinstance(result.stderr,bytes)
+                            or len(result.stdout)>1024*1024 or len(result.stderr)>65536
+                            or result.returncode not in (0,1)
+                            or result.returncode==0 and result.stderr
+                            or result.returncode==1 and (result.stdout or result.stderr.strip()!=b'no crontab for root')):
+                        raise InstallError('unable to read root crontab safely')
+                    return result.stdout
+                before=read()
+                kept=b''.join(line for line in before.splitlines(keepends=True)
+                              if not recovery.sls_cron_job(line.rstrip(b'\r\n'),'root'))
+                if kept and not kept.endswith(b'\n'):kept+=b'\n'
+                after=kept+b'\n'.join(line.encode() for line in CRON_LINES)+b'\n'
+                if len(after)>1024*1024:raise InstallError('root cron replacement exceeds its bounded inspection size')
+                if apply and before!=after:
+                    if lease is not None:lease.check()
+                    result=self.run(['/usr/bin/crontab','-u','root','-'],input=after)
+                    if result.returncode or result.stdout or result.stderr:
+                        raise InstallError('root cron replacement returned unexpected diagnostics')
+                    if read()!=after:raise InstallError('root cron replacement readback differs')
+                return before.decode('latin1')
+        except recovery.RecoveryError as error:
+            raise InstallError('unable to coordinate or classify root crontab: '+str(error)) from error
 
     def prepare(self):
         # Source authentication completes in __init__ before any mutation.
@@ -855,22 +894,29 @@ class PrivilegedInstall:
 
     def preflight(self):
         self.retention()
+        # Unknown actual SLL execution must be reviewed before replacing any
+        # static runtime or integration. This inspection never changes cron.
+        self.root_cron()
         self.files.piper_compatibility()
         try: wrapper = self.files.metadata('/usr/local/bin/piper')
         except FileNotFoundError: wrapper = None
         if wrapper is not None:
-            if stat.S_ISLNK(wrapper.st_mode) and wrapper.st_uid == 0 and wrapper.st_nlink == 1:
+            if stat.S_ISLNK(wrapper.st_mode) and wrapper.st_uid == 0 and wrapper.st_gid == 0 and wrapper.st_nlink == 1:
                 parent = self.files.directory('/usr/local/bin')
                 try: target = os.readlink('piper', dir_fd=parent)
                 finally: os.close(parent)
                 if target not in (RUNTIME + '/piper/venv/bin/piper', DATA + '/piper/venv/bin/piper'):
                     raise InstallError('Piper wrapper link is unrecognized; it was not followed or changed')
                 return True
-            if (not self.files.regular(wrapper) or wrapper.st_uid != 0 or wrapper.st_mode & 0o022):
+            if (not self.files.regular(wrapper) or wrapper.st_uid != 0 or wrapper.st_gid != 0 or wrapper.st_mode & 0o7022):
                 raise InstallError('Piper wrapper must be a root-owned regular SLL wrapper; no existing executable was followed')
             script = self.contents['bin/sls_mass_notify_install_piper_voices.sh']
             match = re.search(rb"expected=\"\$\(cat <<'EOF'\n(.*?)\nEOF\n\)\"", script, re.S)
-            if match is None or self.files.read('/usr/local/bin/piper', 16384) != match.group(1) + b'\n':
+            if match is None:
+                raise InstallError('Piper wrapper differs from its authenticated SLL implementation; preserve it and review before upgrading')
+            wrapper_body = self.files.read('/usr/local/bin/piper', 16384)
+            if (wrapper_body != match.group(1) + b'\n'
+                    and hashlib.sha256(wrapper_body).hexdigest() not in LEGACY_PIPER_WRAPPER_SHA256):
                 raise InstallError('Piper wrapper differs from its authenticated SLL implementation; preserve it and review before upgrading')
         return True
 
@@ -930,8 +976,9 @@ class PrivilegedInstall:
         if config is None or not self.files.regular(config) or config.st_uid != self.files.account.pw_uid or stat.S_IMODE(config.st_mode) != 0o640:
             raise InstallError('central configuration ownership/permissions are not protected')
         cron = self.root_cron().splitlines()
-        if any(cron.count(line) != 1 for line in CRON_LINES):
-            raise InstallError('root maintenance/update schedule is missing or duplicated')
+        owned=[line for line in cron if self.recovery.sls_cron_job(line.encode('latin1'),'root')]
+        if sorted(owned)!=sorted(CRON_LINES):
+            raise InstallError('root maintenance/update schedule is missing, duplicated, or contains an extra legacy job')
         for args in (['is-enabled', '--quiet', SERVICE], ['is-active', '--quiet', SERVICE]):
             self.run(['/usr/bin/systemctl', *args])
         self.run(['/usr/sbin/apache2ctl', 'configtest'])

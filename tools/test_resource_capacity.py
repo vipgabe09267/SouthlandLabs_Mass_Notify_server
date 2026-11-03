@@ -29,6 +29,108 @@ def hardware(cpu=2, memory=4, total=60, available=4):
 
 
 class ResourceCapacityTests(unittest.TestCase):
+    CPU_V2_FLAGS = 'sse sse2 pni ssse3 sse4_1 sse4_2 popcnt cx16 lahf_lm'
+
+    def cpuinfo(self, flags=None, processor=0):
+        return f'processor : {processor}\nflags : {self.CPU_V2_FLAGS if flags is None else flags}\n\n'
+
+    def test_exact_pinned_cpu_baseline_accepts_v2_without_avx(self):
+        report = RESOURCE.cpu_isa_report(self.cpuinfo(), {0})
+        self.assertEqual(report['baseline'], 'x86-64-v2')
+        self.assertEqual(report['checked_cpu_count'], 1)
+        self.assertEqual(report['numpy_version'], '2.4.6')
+
+    def test_each_pinned_baseline_feature_is_required_on_each_allowed_cpu(self):
+        flags = self.CPU_V2_FLAGS.split()
+        for missing in flags:
+            with self.subTest(missing=missing), self.assertRaises(RESOURCE.ResourceProbeError) as caught:
+                RESOURCE.cpu_isa_report(self.cpuinfo() + self.cpuinfo(' '.join(f for f in flags if f != missing), 3), {0, 3})
+            self.assertEqual(caught.exception.code, 'cpu_isa_unsupported')
+            self.assertIn(missing, str(caught.exception))
+            self.assertIn('hypervisor', str(caught.exception))
+        self.assertEqual(RESOURCE.cpu_isa_report(self.cpuinfo() + self.cpuinfo('', 3), {0})['checked_cpu_count'], 1)
+
+    def test_cpu_probe_refuses_incomplete_duplicate_and_unbounded_evidence(self):
+        for value, allowed in ((self.cpuinfo(), {0, 1}), (self.cpuinfo() * 2, {0}), ('', {0}),
+                               (self.cpuinfo(), set()), ('x' * (32 * RESOURCE.MIB + 1), {0})):
+            with self.subTest(length=len(value), allowed=allowed), self.assertRaises(RESOURCE.ResourceProbeError) as caught:
+                RESOURCE.cpu_isa_report(value, allowed)
+            self.assertEqual(caught.exception.code, 'cpu_isa_unavailable')
+
+    def test_native_cpu_probe_uses_actual_affinity_and_redacts_unavailable_evidence(self):
+        with patch.object(RESOURCE.platform, 'machine', return_value='x86_64'), \
+             patch.object(RESOURCE.os, 'sched_getaffinity', return_value={7}), \
+             patch('builtins.open', unittest.mock.mock_open(read_data=self.cpuinfo('', 0) + self.cpuinfo(processor=7))) as opened:
+            self.assertEqual(RESOURCE.probe_cpu_isa()['checked_cpu_count'], 1)
+        opened.assert_called_once_with('/proc/cpuinfo', 'r', encoding='ascii')
+        for failure in (PermissionError('private fixture'), UnicodeError('private fixture')):
+            with self.subTest(failure=type(failure).__name__), \
+                 patch.object(RESOURCE.os, 'sched_getaffinity', return_value={0}), \
+                 patch('builtins.open', side_effect=failure), self.assertRaises(RESOURCE.ResourceProbeError) as caught:
+                RESOURCE.probe_cpu_isa()
+            self.assertEqual(caught.exception.code, 'cpu_isa_unavailable')
+            self.assertNotIn('private fixture', str(caught.exception))
+
+    def test_cpu_only_admission_does_not_read_configuration_phone_or_storage(self):
+        expected = {'baseline': 'x86-64-v2', 'checked_cpu_count': 2, 'numpy_version': '2.4.6'}
+        with patch.object(RESOURCE, 'probe_cpu_isa', return_value=expected), \
+             patch.object(RESOURCE, 'configured_limits', side_effect=AssertionError('No config read')), \
+             patch.object(RESOURCE, 'detect_internal_phones', side_effect=AssertionError('No CLI')), \
+             patch.object(RESOURCE, 'probe_compute', side_effect=AssertionError('No later resources')), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(RESOURCE.main(['--cpu-isa-only']), 0)
+        self.assertEqual(json.loads(output.getvalue())['cpu_isa'], expected)
+
+    def test_unsupported_cpu_refuses_before_phone_or_configuration_reads(self):
+        failure = RESOURCE.ResourceProbeError('cpu_isa_unsupported', 'Missing ssse3; review hypervisor CPU configuration.')
+        for arguments in (['--cpu-isa-only'], ['--check', '--auto-phone-limit', '--config', '/fixture/private']):
+            with self.subTest(arguments=arguments), patch.object(RESOURCE, 'probe_cpu_isa', side_effect=failure), \
+                 patch.object(RESOURCE, 'configured_limits', side_effect=AssertionError('No config read')), \
+                 patch.object(RESOURCE, 'detect_internal_phones', side_effect=AssertionError('No CLI')), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(RESOURCE.main(arguments), 3)
+            self.assertEqual(json.loads(output.getvalue())['errors'][0]['code'], 'cpu_isa_unsupported')
+
+    def test_installer_cpu_failure_is_early_actionable_and_does_not_bootstrap_config(self):
+        script = '''source "$1"
+bootstrap_resource_capacity() {
+  [[ "$*" == --cpu-isa-only ]] || return 99
+  printf '%s\\n' '{"errors":[{"code":"cpu_isa_unsupported","message":"Missing ssse3; review hypervisor CPU configuration."}]}'
+  return 3
+}
+preflight_python
+'''
+        result = subprocess.run(['bash', '-c', script, 'fixture', str(ROOT / 'tools/install_release.sh')],
+                                capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing ssse3', result.stdout + result.stderr)
+        self.assertIn('hypervisor', result.stdout + result.stderr)
+
+    def test_phone_inventory_drops_root_identity_and_inherited_environment_and_fds(self):
+        account = SimpleNamespace(pw_uid=1001, pw_gid=1002, pw_dir='/var/lib/asterisk')
+        with patch.object(RESOURCE.pwd, 'getpwnam', return_value=account), \
+             patch.object(RESOURCE.os, 'geteuid', return_value=0), \
+             patch.object(RESOURCE.os, 'getgrouplist', return_value=[1002, 1003]), \
+             patch.dict(os.environ, {'GITHUB_TOKEN': 'private-fixture'}), \
+             patch.object(RESOURCE.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='0 results found.\n')) as run:
+            self.assertEqual(RESOURCE.detect_internal_phones()['detected_phone_contacts'], 0)
+        options = run.call_args.kwargs
+        self.assertEqual((options['user'], options['group'], options['extra_groups']), (1001, 1002, [1002, 1003]))
+        self.assertTrue(options['close_fds'])
+        self.assertEqual(options['stdin'], subprocess.DEVNULL)
+        self.assertNotIn('GITHUB_TOKEN', options['env'])
+        self.assertEqual(options['env']['LC_ALL'], 'C.UTF-8')
+        self.assertEqual(options['cwd'], '/')
+
+    def test_phone_inventory_refuses_root_account_or_an_unrelated_runtime_user(self):
+        for uid, runtime_uid in ((0, 0), (1001, 1002)):
+            with self.subTest(uid=uid, runtime_uid=runtime_uid), \
+                 patch.object(RESOURCE.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=uid, pw_gid=1001, pw_dir='/private')), \
+                 patch.object(RESOURCE.os, 'geteuid', return_value=runtime_uid), \
+                 patch.object(RESOURCE.subprocess, 'run') as run, self.assertRaises(RESOURCE.ResourceProbeError):
+                RESOURCE.detect_internal_phones()
+            run.assert_not_called()
+
     def test_runtime_speech_workspace_is_checked_separately_from_installer_fallback(self):
         probe={'path':'/tmp','available_bytes':48 * RESOURCE.MIB,'required_free_bytes':203 * RESOURCE.MIB,
                'read_only':False,'inodes_exhausted':False}
@@ -517,10 +619,59 @@ class ResourceCapacityTests(unittest.TestCase):
             self.assertEqual(RESOURCE.probe_compute(), (2.0, 8 * GIB))
 
     def test_cgroup_ancestor_limits_are_included(self):
-        with patch.object(RESOURCE.Path, 'read_text', return_value='0::/service/worker\n'), \
+        values = {'/proc/self/cgroup': '0::/service/worker\n',
+                  '/proc/self/mountinfo': '31 20 0:28 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n'}
+        with patch.object(RESOURCE.Path, 'read_text', lambda path, **kw: values[str(path)]), \
              patch.object(RESOURCE.Path, 'is_dir', return_value=True):
             paths = [str(path) for path, kind in RESOURCE.cgroup_directories()]
         self.assertEqual(paths, ['/sys/fs/cgroup/service/worker', '/sys/fs/cgroup/service', '/sys/fs/cgroup'])
+
+    def test_subtree_cgroup_mount_enforces_the_leaf_cpu_and_memory_limits(self):
+        # A container can expose /tenant/100 as the mount root. Appending the
+        # whole membership would miss the enforced service leaf completely.
+        values = {'/proc/self/cgroup': '0::/tenant/100/service\n',
+                  '/proc/self/mountinfo': '31 20 0:28 /tenant/100 /sys/fs/cgroup rw - cgroup2 cgroup rw\n',
+                  '/proc/meminfo': 'MemTotal:       8388608 kB\n',
+                  '/sys/fs/cgroup/service/memory.max': str(GIB),
+                  '/sys/fs/cgroup/service/cpu.max': '50000 100000',
+                  '/sys/fs/cgroup/memory.max': 'max',
+                  '/sys/fs/cgroup/cpu.max': 'max 100000'}
+        def read(path, **kw):
+            if str(path) not in values: raise FileNotFoundError(str(path))
+            return values[str(path)]
+        with patch.object(RESOURCE.Path, 'read_text', read), \
+             patch.object(RESOURCE.Path, 'is_dir', lambda path: str(path) in ('/sys/fs/cgroup', '/sys/fs/cgroup/service')), \
+             patch.object(RESOURCE.os, 'sched_getaffinity', return_value={0,1,2,3}):
+            self.assertEqual(RESOURCE.probe_compute(), (0.5, GIB))
+            self.assertEqual(RESOURCE.probe_memory_limit(), GIB)
+
+    def test_v1_controller_mounts_use_their_actual_mountpoints_and_roots(self):
+        values = {'/proc/self/cgroup': '4:cpu,cpuacct:/tenant/pbx\n5:memory:/tenant/pbx\n',
+                  '/proc/self/mountinfo': '31 20 0:28 /tenant /limits/processor rw - cgroup cgroup rw,cpu,cpuacct\n'
+                                          '32 20 0:29 /tenant /limits/memory rw - cgroup cgroup rw,memory\n'}
+        with patch.object(RESOURCE.Path, 'read_text', lambda path, **kw: values[str(path)]), \
+             patch.object(RESOURCE.Path, 'is_dir', return_value=True):
+            rows = [(str(path), kind) for path,kind in RESOURCE.cgroup_directories()]
+        self.assertEqual(rows, [('/limits/processor/pbx','cpu'),('/limits/processor','cpu'),
+                                ('/limits/memory/pbx','memory'),('/limits/memory','memory')])
+
+    def test_cgroup_mountpoint_kernel_escaping_is_decoded_before_limit_reads(self):
+        values = {'/proc/self/cgroup': '0::/pbx\n',
+                  '/proc/self/mountinfo': '31 20 0:28 / /limits/my\\040group rw - cgroup2 cgroup rw\n'}
+        with patch.object(RESOURCE.Path, 'read_text', lambda path, **kw: values[str(path)]), \
+             patch.object(RESOURCE.Path, 'is_dir', return_value=True):
+            rows = [str(path) for path,kind in RESOURCE.cgroup_directories()]
+        self.assertEqual(rows, ['/limits/my group/pbx','/limits/my group'])
+
+    def test_unmapped_or_missing_current_cgroup_never_falls_back_to_host_capacity(self):
+        for membership, root, present in [('/tenant/pbx','/other',True),('/tenant/pbx','/tenant',False)]:
+            values = {'/proc/self/cgroup': '0::'+membership+'\n',
+                      '/proc/self/mountinfo': '31 20 0:28 '+root+' /sys/fs/cgroup rw - cgroup2 cgroup rw\n'}
+            with self.subTest(root=root,present=present), \
+                 patch.object(RESOURCE.Path,'read_text',lambda path,**kw:values[str(path)]), \
+                 patch.object(RESOURCE.Path,'is_dir',return_value=present), \
+                 self.assertRaises(ValueError):
+                list(RESOURCE.cgroup_directories())
 
     def test_same_filesystem_is_not_double_counted(self):
         usage = SimpleNamespace(f_blocks=80, f_bavail=13, f_frsize=GIB)

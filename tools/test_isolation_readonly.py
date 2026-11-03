@@ -13,6 +13,11 @@ if os.environ.get('SLS_TEST_NAMESPACE') != 'entered' or any(
 
 
 class ReadOnlyIsolation(unittest.TestCase):
+    def test_ipc_objects_are_isolated_from_the_parent_host(self):
+        parent=os.environ.get('SLS_TEST_PARENT_IPC_NS')
+        self.assertTrue(parent,'The fixture runner must record its parent IPC namespace before creating any semaphore.')
+        self.assertNotEqual(parent,os.readlink('/proc/self/ns/ipc'))
+
     def test_network_fixtures_refuse_missing_empty_and_current_parent_markers(self):
         names = [
             'test_api_security.py', 'test_enterprise_control_http.py', 'test_017_portal_csp.py',

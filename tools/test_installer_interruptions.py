@@ -83,6 +83,44 @@ class Journal(unittest.TestCase):
     def setUpClass(cls):
         spec=importlib.util.spec_from_file_location('transaction_fixture',BIN/'sls_install_transaction.py')
         cls.module=importlib.util.module_from_spec(spec);spec.loader.exec_module(cls.module)
+
+    def test_valid_large_phone_history_baseline_is_durable_before_mutation(self):
+        with tempfile.TemporaryDirectory(dir='/run') as name:
+            root=Path(name)/'journal';transaction=self.module.begin(root)
+            recovery=transaction/'sls-mass-notify-recovery.ABC123';recovery.mkdir(mode=0o700)
+            history={'%064x'%number:'a'*64 for number in range(9000)}
+            baseline={'schema':1,'ok':True,'closed_phone_batches':9000,'phone_history':history,
+                      'phone_history_retention':{'schema':1,'seconds':604800,
+                                                'closed_at':{key:1 for key in history}}}
+            path=recovery/'idle-before.json';path.write_text(json.dumps(baseline));path.chmod(0o600)
+            registration=recovery/'module-registration.json';registration.write_text('{"schema":3}');registration.chmod(0o600)
+            self.assertGreater(path.stat().st_size,1048576)
+            self.assertLess(path.stat().st_size,4*1024*1024)
+            original=path.read_bytes();synced=[];actual_sync=self.module.os.fsync
+            def sync(fd):
+                synced.append(os.readlink('/proc/self/fd/'+str(fd)))
+                return actual_sync(fd)
+            with patch.object(self.module.os,'fsync',side_effect=sync):
+                self.module.sync_recovery_inputs(transaction,recovery)
+            self.assertIn(str(path),synced)
+            self.assertIn(str(registration),synced)
+            self.assertIn(str(recovery),synced)
+            self.assertIn(str(transaction),synced)
+            self.assertEqual(path.read_bytes(),original)
+            self.assertEqual(self.module.state(transaction)['phase'],'preparing')
+
+    def test_oversized_history_snapshot_refuses_without_advancing_the_transaction(self):
+        with tempfile.TemporaryDirectory(dir='/run') as name:
+            root=Path(name)/'journal';transaction=self.module.begin(root)
+            recovery=transaction/'sls-mass-notify-recovery.ABC123';recovery.mkdir(mode=0o700)
+            path=recovery/'idle-before.json';path.write_bytes(b'{"schema":1,"padding":"'+b'x'*(4*1024*1024)+b'"}');path.chmod(0o600)
+            registration=recovery/'module-registration.json';registration.write_text('{"schema":3}');registration.chmod(0o600)
+            before=(transaction/'transaction.json').read_bytes()
+            with self.assertRaises(self.module.TransactionError):
+                self.module.sync_recovery_inputs(transaction,recovery)
+            self.assertEqual((transaction/'transaction.json').read_bytes(),before)
+            self.assertTrue(path.exists())
+
     def test_busy_installer_does_not_abandon_another_preparation(self):
         with tempfile.TemporaryDirectory(dir='/root') as name:
             root=Path(name)/'journal';transaction=self.module.begin(root)

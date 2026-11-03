@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. Current release: **v0.1.9-beta**.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **The corrected 0.1.9-beta candidate is unpublished.** Its earlier installer was withdrawn; 0.1.8-beta remains the available published release. The candidate installation commands below are retained for review until qualified signed assets are published.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -19,8 +19,8 @@ For a fresh installation, run the following command as root:
 ```bash
 cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '5f4090223b0bdf9fb37ee05cfba73b165f0b6c597764130fb765122cc1818f91  sls-bootstrap.sh' | sha256sum --check &&
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/V0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
@@ -29,14 +29,14 @@ For an existing **0.1.8-beta or 0.1.9-beta installation**, use this one-time ver
 ```bash
 cd "$(mktemp -d /tmp/sls-upgrade.XXXXXXXX)" &&
 curl -fsSL -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '5f4090223b0bdf9fb37ee05cfba73b165f0b6c597764130fb765122cc1818f91  sls-bootstrap.sh' | sha256sum --check &&
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/V0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
 bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
 ```
 
 `--upgrade` authenticates the installer against the PBX's existing publisher authority before execution. It enforces an initialized key policy when present, or the protected signed approval on installations using the original factory authority. It preserves keys and revocations. Incomplete established policies are refused. The default fresh-install command refuses established installation records.
 
-The GitHub tag is now `v0.1.9-beta`; the software version remains `0.1.9-beta`. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
+The candidate software version remains `0.1.9-beta`; verify its final GitHub tag and signed assets when publication is announced. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
 
 The installer checks resources, verifies signatures and keeps recovery files. It preserves saved settings during an update. Back up your PBX before installing.
 
@@ -46,6 +46,8 @@ The installer checks resources, verifies signatures and keeps recovery files. It
 | --- | --- | --- |
 | Standard | 2 effective CPU cores, nominal 4 GiB RAM | Starts at 25 desktops and 25 phone contacts; higher capacity needs more resources. |
 | Lite | 2 effective CPU cores, nominal 2 GiB RAM | 25 desktops, 25 phone contacts; Enterprise Labs and enterprise SSO unavailable. |
+
+The locked speech runtime requires an x86-64-v2 CPU on every CPU available to the process. AVX is not required. Virtual machines must expose those features; the installer reports missing features before preparing SLL state.
 
 **Standard is the default.** If usable RAM falls below its baseline, the installer checks whether Lite can run, explains its limits and asks before installing it. Ordinary kernel reservations on a nominal 4 GiB system are allowed. Declining the Lite prompt cancels installation.
 

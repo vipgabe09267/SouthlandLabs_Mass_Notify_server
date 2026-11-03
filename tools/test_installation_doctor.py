@@ -9,6 +9,7 @@ from pathlib import Path
 import pwd
 import re
 import socket
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -33,6 +34,22 @@ VM=load('vm_fixture',ROOT/'tools/qualify_installer_vm.py')
 
 
 class Doctor(unittest.TestCase):
+    def test_service_writable_diagnostic_dependency_is_refused_before_parsing(self):
+        with tempfile.TemporaryDirectory(prefix='sls-doctor-source-',dir='/run') as temporary:
+            folder=Path(temporary)
+            runtime=ROOT/'slsmassnotifyserver/bin/sls_mass_notify'
+            for name in ('sls_install_doctor.py','sls_php_security.py','sls_web_readiness.py','php-security-policy.json'):
+                shutil.copyfile(runtime/name,folder/name)
+                (folder/name).chmod(0o600)
+            helper=folder/'sls_php_security.py'
+            helper.write_text('invalid Python input that must not be parsed\n');helper.chmod(0o666)
+            result=subprocess.run(['/usr/bin/python3','-I','-c',
+                'import runpy,sys; runpy.run_path(sys.argv[1],run_name="diagnostic_fixture")',str(folder/'sls_install_doctor.py')],
+                capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('Diagnostic helper source is unsafe',result.stderr)
+            self.assertNotIn('SyntaxError',result.stderr)
+
     def test_security_policy_has_matching_php_python_and_installer_floors(self):
         policy = load('php_security_fixture', ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_php_security.py')
         versions = ['8.2.34','8.2.35','8.2.35-1~deb12u1','8.3.36','8.4.26','8.5.12','8.2.35RC1','8.2.35-dev','8.6.0','invalid']
@@ -233,7 +250,15 @@ class Doctor(unittest.TestCase):
                 raise
             self.fail('A valid signed v-tag inventory was rejected: '+str(error))
 
-    def _check_real_publisher_inventory(self, release_tag):
+    def test_exact_uppercase_current_inventory_remains_authenticated_and_read_only(self):
+        self._check_real_publisher_inventory('V0.1.9-beta','0.1.9-beta')
+
+    def test_uppercase_other_inventory_is_not_enrolled(self):
+        with self.assertRaises(Exception) as failure:
+            self._check_real_publisher_inventory('V0.1.10-beta','0.1.10-beta')
+        self.assertEqual(type(failure.exception).__name__,'TrustError')
+
+    def _check_real_publisher_inventory(self, release_tag, version='0.1.6-beta'):
         with tempfile.TemporaryDirectory() as name:
             root=Path(name);runtime=root/'runtime';runtime.mkdir(mode=0o700);web=root/'web';web.mkdir(mode=0o700)
             key=root/'private-key'
@@ -245,13 +270,13 @@ class Doctor(unittest.TestCase):
             (runtime/'sls_release_trust.py').write_bytes((ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_release_trust.py').read_bytes())
             for path in runtime.iterdir():path.chmod(0o600)
             trust=load('doctor_signed_trust_fixture',runtime/'sls_module_trust.py');store=root/'trust'
-            body=b'<module><rawname>slsmassnotifyserver</rawname><version>0.1.6-beta</version></module>'
-            archive=root/'slsmassnotifyserver-0.1.6-beta.tgz'
+            body=('<module><rawname>slsmassnotifyserver</rawname><version>'+version+'</version></module>').encode()
+            archive=root/('slsmassnotifyserver-'+version+'.tgz')
             with tarfile.open(archive,'w:gz') as package:
                 member=tarfile.TarInfo('slsmassnotifyserver/module.xml');member.size=len(body);package.addfile(member,io.BytesIO(body))
             manifest=root/'release-manifest.json';signature=root/'release-manifest.sig'
             archive_sha=hashlib.sha256(archive.read_bytes()).hexdigest()
-            manifest.write_text(json.dumps({'schema':1,'version':'0.1.6-beta','tag':release_tag,
+            manifest.write_text(json.dumps({'schema':1,'version':version,'tag':release_tag,
                 'package':archive.name,'package_sha256':archive_sha,'installer_sha256':'a'*64}))
             subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(key),'-in',str(manifest),'-out',str(signature)],check=True,capture_output=True)
             generation=store/trust.enroll_sls(store,archive,manifest,signature)

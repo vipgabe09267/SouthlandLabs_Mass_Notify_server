@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "tools/install_release.sh").read_text()
@@ -17,16 +18,43 @@ PHP_LINT = 'lint_staged_module_php() {' + SOURCE.split('lint_staged_module_php()
 
 
 class InstallerModuleEnabled(unittest.TestCase):
-    def check(self, listing, stdin=""):
+    def test_registered_native_dependencies_meet_reviewed_vendor_floors_before_mutation(self):
+        floors={'framework':'17.0.33','dashboard':'17.0.5','backup':'17.0.13','recordings':'17.0.6'}
+        metadata=ET.parse(ROOT/'slsmassnotifyserver/module.xml')
+        declarations=[node.text for node in metadata.findall('./depends/module')]
+        for name,floor in floors.items():
+            self.assertIn(name+' ge '+floor,declarations)
+        self.assertIn('preflight_native_dependency_versions() {',SOURCE)
+        base={**os.environ,**{'FIXTURE_'+name.upper():'enabled\t'+floor for name,floor in floors.items()}}
+        harness='source "$1"; log() { printf "%s\\n" "$*"; }; module_registry_state() { local key="FIXTURE_${1^^}"; [ "${!key}" != __error__ ] || return 1; printf "%s\\n" "${!key}"; }; preflight_native_dependency_versions'
+        def check(overrides):
+            return subprocess.run(['/bin/bash','-c',harness,'fixture',str(ROOT/'tools/install_release.sh')],
+                capture_output=True,text=True,env={**base,**overrides},timeout=5)
+        self.assertEqual(check({}).returncode,0)
+        for name in floors:
+            for state in ('enabled\t17.0.0','disabled\t17.0.0','enabled\t17.0.999RC1','__error__'):
+                with self.subTest(module=name,state=state):
+                    result=check({'FIXTURE_'+name.upper():state})
+                    self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertEqual(check({'FIXTURE_'+name.upper():'enabled\t17.0.999'}).returncode,0)
+        self.assertNotEqual(check({'FIXTURE_FRAMEWORK':'absent'}).returncode,0)
+        for name in ('dashboard','backup','recordings'):
+            self.assertEqual(check({'FIXTURE_'+name.upper():'absent'}).returncode,0)
+        main=SOURCE[SOURCE.index('main() {'):]
+        self.assertLess(main.index('preflight_native_dependency_versions'),main.index('begin_install_transaction'))
+
+    def check(self, listing, stdin="", native_enabled=True):
         script = (
             "set -euo pipefail\n"
+            'MODULE=slsmassnotifyserver\n'
             'fwconsole() { printf "%s" "$SLS_FIXTURE_LIST"; }\n'
+            'module_enabled() { [ "$SLS_NATIVE_ENABLED" = 1 ]; }\n'
             'log() { printf "%s\\n" "$*"; }\n'
             + CHECK + '\nprintf "VERIFIED\\n"\n'
         )
         return subprocess.run(
             ["/bin/bash", "-c", script],
-            env={**os.environ, "SLS_FIXTURE_LIST": listing}, input=stdin,
+            env={**os.environ, "SLS_FIXTURE_LIST": listing, 'SLS_NATIVE_ENABLED': str(int(native_enabled))}, input=stdin,
             capture_output=True, text=True, timeout=3,
         )
 
@@ -40,7 +68,7 @@ class InstallerModuleEnabled(unittest.TestCase):
     def test_missing_disabled_and_unrelated_module_reject_forged_stdin(self):
         for module in ("", ENABLED.replace("Enabled", "Disabled"), ENABLED.replace("slsmassnotifyserver", "slsmassnotifyserver2")):
             with self.subTest(module=module):
-                result = self.check(ROWS + module, ENABLED)
+                result = self.check(ROWS + module, ENABLED, native_enabled=False)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn("VERIFIED", result.stdout)
 
@@ -54,6 +82,7 @@ class InstallerModuleEnabled(unittest.TestCase):
             script = r'''source "$1"
 fixture="$2"; inventory="$fixture/listing"; CONFIG_FILE="$fixture/config"
 fwconsole() { cat "$inventory"; }
+module_registry_state() { printf 'enabled\t0.1.7-beta\n'; }
 module_known slsmassnotifyserver || { printf 'KNOWN_CHECK_FAILED\n'; exit 90; }
 INSTALL_TEMP_ROOT="$fixture"; TGZ="$fixture/archive"; SLS_MASS_NOTIFY_INVENTORY_ONLY=0
 tar() { mkdir "$STAGING_DIR/slsmassnotifyserver"; printf '<module/>' >"$STAGING_DIR/slsmassnotifyserver/module.xml"; }
@@ -67,6 +96,7 @@ stage_module_directory
     def test_failed_inventory_does_not_authorize_a_matching_upgrade(self):
         script = r'''source "$1"
 fwconsole() { printf '| slsmassnotifyserver | 0.1.6-beta | Enabled |\n'; return 17; }
+module_registry_state() { printf 'enabled\t0.1.6-beta\n'; return 17; }
 if module_known slsmassnotifyserver; then exit 90; fi
 '''
         result = subprocess.run(['/bin/bash','-c',script,'fixture',str(ROOT/'tools/install_release.sh')],
@@ -78,6 +108,7 @@ if module_known slsmassnotifyserver; then exit 90; fi
 fixture="$2"; CONFIG_FILE="$fixture/config"; printf '{}' >"$CONFIG_FILE"
 INSTALL_TEMP_ROOT="$fixture"; TGZ="$fixture/archive"
 fwconsole() { printf '| slsmassnotifyserver | 0.1.6-beta | Enabled |\n'; return 17; }
+module_registry_state() { printf 'enabled\t0.1.6-beta\n'; return 17; }
 tar() { printf 'unexpected extraction' >"$fixture/mutated"; }
 stage_module_directory
 '''
@@ -93,7 +124,7 @@ stage_module_directory
             listing = Path(directory) / 'listing'
             listing.write_text(ROWS + ENABLED + '| backup | 17.0.1 | Enabled |\n| recordings | 17.0.1 | Enabled |\n'
                                + '| unused | 17.0.1 | Enabled |\n' * 10000)
-            script = 'set -euo pipefail\nmodule_list="$(cat "$1")"\nlog(){ printf "%s\\n" "$*"; }\n' + loop
+            script = 'set -euo pipefail\nmodule_list="$(cat "$1")"\nmodule_enabled(){ return 0; }\nlog(){ printf "%s\\n" "$*"; }\n' + loop
             result = subprocess.run(['/bin/bash','-c',script,'fixture',str(listing)], capture_output=True,text=True,timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -102,6 +133,16 @@ stage_module_directory
         result = self.check(listing)
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("VERIFIED", result.stdout)
+
+    def test_native_enabled_registration_survives_translated_cli_status(self):
+        result = self.check((ROWS + ENABLED).replace('Enabled', 'Aktiviert'))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('VERIFIED', result.stdout)
+
+    def test_cli_enabled_label_cannot_override_a_disabled_native_registration(self):
+        result = self.check(ROWS + ENABLED, native_enabled=False)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('VERIFIED', result.stdout)
 
 
 class StagedPhpCompatibility(unittest.TestCase):

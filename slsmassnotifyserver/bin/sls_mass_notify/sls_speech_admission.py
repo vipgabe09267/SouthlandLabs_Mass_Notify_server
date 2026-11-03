@@ -364,6 +364,7 @@ def launch(command, timeout, slot=0, output_fd=None, max_bytes=None):
         'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
         'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1',
         'MKL_NUM_THREADS': '1', 'NUMEXPR_NUM_THREADS': '1',
+        'ORT_DISABLE_TELEMETRY': '1',
     }
     # Pipe diagnostics through the unrestricted supervisor: the raw-audio file
     # limit must never cap an existing worker log or admission state write.
@@ -478,6 +479,7 @@ def main():
                 'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                 'LANG': 'C.UTF-8',
                 'LC_ALL': 'C.UTF-8',
+                'ORT_DISABLE_TELEMETRY': '1',
             }
             os.execve('/usr/sbin/runuser', ['runuser', '-u', 'asterisk', '--', '/usr/bin/python3', '-I',
                 str(Path(__file__).resolve()), *sys.argv[1:]], environment)

@@ -12,11 +12,11 @@ namespace {
     require dirname(__DIR__) . '/slsmassnotifyserver/Slsmassnotifyserver.class.php';
     $reflection = new ReflectionClass(FreePBX\modules\Slsmassnotifyserver::class);
     $source = file($reflection->getFileName()); $methods = '';
-    foreach (['install', 'installUnprivilegedPhase', 'requireRuntimeAccount', 'slsCronLine', 'hasCanonicalSlsUserCron', 'ensureCronJob', 'verifyUnprivilegedIntegration'] as $name) {
+    foreach (['install', 'installUnprivilegedPhase', 'requireRuntimeAccount', 'slsCronLine', 'hasCanonicalSlsUserCron', 'ensureCronJob', 'updateManagedUserCron', 'verifyUnprivilegedIntegration'] as $name) {
         $method = $reflection->getMethod($name);
         $methods .= implode('', array_slice($source, $method->getStartLine() - 1, $method->getEndLine() - $method->getStartLine() + 1));
     }
-    eval('namespace SlsInstallBoundaryFixture; class Module {
+    eval('namespace SlsInstallBoundaryFixture; use FreePBX\\modules\\SlsManagedCron; class Module {
         const SETTINGS_JSON = "/fixture/config";
         public $calls = []; public $FreePBX;
         private function configurationPathMetadata($path) { return $GLOBALS["fixture_config_exists"] ? ["mode" => 0100640] : null; }
@@ -29,6 +29,9 @@ namespace {
             $this->calls[] = $name;
             return $name === "ensureFreePbxBackupEnrollment" ? ["success" => true] : [];
         }
+        private function withNativeCronLock($operation,$account="asterisk") { return $operation(); }
+        private function readNativeUserCrontab() { return $this->FreePBX->cron->lines; }
+        private function installNativeUserCrontab($lines) { $this->FreePBX->cron->lines=$lines; }
         function verifyNativePostRestoreIntegration($rootChecks) {
             if ($rootChecks !== false) { throw new \\RuntimeException("Unprivileged verification requested root operations."); }
             $this->calls[] = "verify-runtime"; return true;

@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 SOURCE=(ROOT/'tools/install_release.sh').read_text()
@@ -30,6 +31,18 @@ mktemp() {
 ensure_installer_log_prerequisites() { :; }
 preflight_hardware_requirements() { :; }
 require_freepbx() { :; }
+# Model native registry rows at the reviewed floors. Keep the real dependency
+# version preflight active; only this fixture's database observation is inert.
+module_registry_state() {
+ case "$1" in
+  framework) printf 'enabled\t17.0.33\n' ;;
+  dashboard) printf 'enabled\t17.0.5\n' ;;
+  backup) printf 'enabled\t17.0.13\n' ;;
+  recordings) printf 'enabled\t17.0.6\n' ;;
+  slsmassnotifyserver) printf 'enabled\t0.1.8-beta\n' ;;
+  *) printf 'absent\n' ;;
+ esac
+}
 acquire_update_coordination() { trace update-lock; }
 acquire_maintenance_coordination() { trace maintenance-lock; }
 install_dependencies() { :; }
@@ -284,5 +297,115 @@ class TransactionTests(unittest.TestCase):
  def test_prepared_permission_and_collector_failures_record_completion(self):
   for scenario,code in [('chown-failed',35),('legacy-permissions-failed',36),('collector-failed',37)]:
    with self.subTest(scenario=scenario):self.run_case(scenario,code)
+
+@unittest.skipUnless(os.geteuid()==0, 'requires root for private ownership fixtures')
+class DurabilityOrderTests(unittest.TestCase):
+ def setUp(self):
+  self.temporary=tempfile.TemporaryDirectory(prefix='sls-install-durability-');self.addCleanup(self.temporary.cleanup)
+  self.base=Path(self.temporary.name)
+  self.events=[]
+ def inline(self, label):
+  return SOURCE.split("<<'"+label+"'",1)[1].split('\n',1)[1].split('\n'+label,1)[0]
+ def execute(self, code, arguments, fail=None):
+  real={name:getattr(os,name) for name in ('fsync','rename','fchown','fchmod','open')}
+  def path(fd):return os.readlink('/proc/self/fd/'+str(fd))
+  def sync(fd):
+   entry=('fsync',path(fd));self.events.append(entry)
+   if fail and fail(entry,self.events):raise OSError('inert durability fault')
+   return real['fsync'](fd)
+  def rename(source,destination,*args,**kwargs):
+   entry=('rename',path(kwargs['src_dir_fd'])+'/'+source,path(kwargs['dst_dir_fd'])+'/'+destination)
+   self.events.append(entry)
+   if fail and fail(entry,self.events):raise OSError('inert durability fault')
+   return real['rename'](source,destination,*args,**kwargs)
+  def metadata(name):
+   def change(fd,*values):
+    self.events.append((name,path(fd)));return real[name](fd,*values)
+   return change
+  def opened(name,*args,**kwargs):
+   result=real['open'](name,*args,**kwargs)
+   if str(name)=='module-swap-complete':self.events.append(('marker',path(result)))
+   return result
+  with patch('sys.argv',['private-inline',*map(str,arguments)]),patch.object(os,'fsync',sync), \
+       patch.object(os,'rename',rename),patch.object(os,'fchown',metadata('fchown')), \
+       patch.object(os,'fchmod',metadata('fchmod')),patch.object(os,'open',opened):
+   exec(compile(code,'private-durability-inline','exec'),{'__name__':'private_durability_fixture'})
+ def activation(self, fail=None):
+  stage=self.base/'stage';backup=self.base/'backup';web=self.base/'web'
+  for folder in (stage,backup,web):folder.mkdir(mode=0o700)
+  source=stage/'slsmassnotifyserver';source.mkdir();(source/'nested').mkdir()
+  (source/'module.xml').write_text('new');(source/'nested/asset.txt').write_text('new data')
+  old=web/'slsmassnotifyserver';old.mkdir();(old/'module.xml').write_text('old')
+  body=self.inline('PYACTIVATE');self.assertEqual(body.count("'/var/www/html/admin/modules'"),1)
+  body=body.replace("'/var/www/html/admin/modules'",repr(str(web)))
+  self.execute(body,[stage,backup],fail)
+  return backup,web
+ def test_activation_flushes_final_metadata_and_each_rename_before_completion_marker(self):
+  backup,web=self.activation()
+  moves=[index for index,event in enumerate(self.events) if event[0]=='rename']
+  self.assertEqual(len(moves),2)
+  for index,event in enumerate(self.events[:moves[0]]):
+   if event[0] in ('fchown','fchmod'):
+    self.assertIn(('fsync',event[1]),self.events[index+1:moves[0]])
+  for parent in (backup,web):
+   self.assertIn(('fsync',str(parent)),self.events[moves[0]+1:moves[1]])
+  intermediate=self.events[moves[0]+1:moves[1]]
+  self.assertLess(intermediate.index(('fsync',str(backup))),intermediate.index(('fsync',str(web))))
+  marker=next(index for index,event in enumerate(self.events) if event[0]=='marker')
+  for parent in (backup,web):self.assertIn(('fsync',str(parent)),self.events[moves[1]+1:marker])
+  self.assertEqual((backup/'slsmassnotifyserver/module.xml').read_text(),'old')
+  self.assertEqual((web/'slsmassnotifyserver/module.xml').read_text(),'new')
+ def test_metadata_sync_fault_cannot_replace_the_live_module(self):
+  def failure(event,events):
+   return event[0]=='fsync' and '/candidate/module.xml' in event[1] and ('fchown',event[1]) in events
+  with self.assertRaisesRegex(OSError,'durability fault'):self.activation(failure)
+  self.assertFalse(any(event[0]=='rename' for event in self.events))
+  self.assertEqual((self.base/'web/slsmassnotifyserver/module.xml').read_text(),'old')
+ def test_old_module_rename_barrier_fault_never_attempts_candidate_activation(self):
+  def failure(event,events):return event[0]=='fsync' and sum(item[0]=='rename' for item in events)==1
+  with self.assertRaisesRegex(OSError,'durability fault'):self.activation(failure)
+  self.assertEqual(sum(event[0]=='rename' for event in self.events),1)
+  self.assertFalse((self.base/'backup/module-swap-complete').exists())
+  self.assertEqual((self.base/'backup/slsmassnotifyserver/module.xml').read_text(),'old')
+ def test_failed_candidate_rename_restores_and_flushes_both_parents(self):
+  def failure(event,_events):return event[0]=='rename' and event[1].endswith('/candidate')
+  with self.assertRaisesRegex(OSError,'durability fault'):self.activation(failure)
+  restored=max(index for index,event in enumerate(self.events) if event[0]=='rename')
+  for parent in ('web','backup'):self.assertIn(('fsync',str(self.base/parent)),self.events[restored+1:])
+  self.assertEqual((self.base/'web/slsmassnotifyserver/module.xml').read_text(),'old')
+ def test_candidate_parent_sync_fault_preserves_both_payloads_without_completion_marker(self):
+  def failure(event,events):return event[0]=='fsync' and sum(item[0]=='rename' for item in events)==2
+  with self.assertRaisesRegex(OSError,'durability fault'):self.activation(failure)
+  self.assertFalse((self.base/'backup/module-swap-complete').exists())
+  self.assertEqual((self.base/'backup/slsmassnotifyserver/module.xml').read_text(),'old')
+  self.assertEqual((self.base/'web/slsmassnotifyserver/module.xml').read_text(),'new')
+ def test_private_evidence_files_are_flushed_before_their_directory_links(self):
+  tree=self.base/'evidence';tree.mkdir(mode=0o700);nested=tree/'approval';nested.mkdir(mode=0o700)
+  helper=tree/'helper.py';helper.write_text('inert helper');helper.chmod(0o700)
+  approval=nested/'approval.json';approval.write_text('{}');approval.chmod(0o600)
+  self.execute(self.inline('PYSYNCPRIVATETREE'),[tree])
+  for item,parent in ((helper,tree),(approval,nested),(nested,tree),(tree,self.base)):
+   self.assertLess(self.events.index(('fsync',str(item))),self.events.index(('fsync',str(parent))))
+ def test_private_evidence_sync_fault_is_not_reported_as_success(self):
+  tree=self.base/'evidence';tree.mkdir(mode=0o700);helper=tree/'helper.py';helper.write_text('inert');helper.chmod(0o700)
+  with self.assertRaisesRegex(OSError,'durability fault'):
+   self.execute(self.inline('PYSYNCPRIVATETREE'),[tree],lambda event,_events:event==('fsync',str(helper)))
+  self.assertEqual(helper.read_text(),'inert')
+ def test_evidence_sync_failure_blocks_actual_prepared_journal_publication(self):
+  bootstrap=self.base/'bootstrap';bootstrap.mkdir(mode=0o700)
+  (bootstrap/'sls_install_transaction.py').write_text('import pathlib,sys\np=pathlib.Path(sys.argv[2])/"transaction-fixture"\np.mkdir(parents=True,mode=0o700)\nprint(p)\n')
+  approval=self.base/'approval';approval.mkdir(mode=0o700);(approval/'approved.json').write_text('{}')
+  script='''source "$1"
+INSTALL_BOOTSTRAP_DIR="$2/bootstrap"; UPGRADE_TRUST_DIR="$2/approval"; INSTALL_TRANSACTION_ROOT="$2/journal"
+copy_private_release_asset() { :; }
+retain_configuration_snapshots() { :; }
+persist_install_transaction() { touch "$INSTALL_TRANSACTION_ROOT/forbidden-prepared"; }
+sync_private_installer_tree() { return 43; }
+begin_install_transaction
+'''
+  result=subprocess.run(['bash','-c',script,'fixture',str(ROOT/'tools/install_release.sh'),str(self.base)],capture_output=True,text=True,timeout=10)
+  self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+  self.assertFalse((self.base/'journal/forbidden-prepared').exists())
+  self.assertTrue((self.base/'journal/transaction-fixture/bootstrap/sls_install_transaction.py').exists())
 
 if __name__=='__main__':unittest.main()

@@ -3,6 +3,18 @@ declare(strict_types=1);
 set_error_handler(static function ($code,$message,$file,$line) { if (error_reporting() & $code) { throw new ErrorException($message,0,$code,$file,$line); } return false; });
 require dirname(__DIR__).'/slsmassnotifyserver/api/sls-mass-notify/sms/Service.php';
 eval('namespace SLS\\MassNotify\\Sms; function fopen($path,$mode,...$arguments){if(($GLOBALS["sls_sms_backup_probe"]??"")===$path){$GLOBALS["sls_sms_backup_mode"]=$mode;}return \\fopen($path,$mode,...$arguments);}');
+// Capture real zero-link metadata after unlink, matching a native lstat racing
+// SQLite's DELETE-journal cleanup. No file-safety result is fabricated.
+eval('namespace SLS\\MassNotify\\Sms; function lstat($path) {
+    if (($GLOBALS["sls_sms_unlinked_stat"]??null)!==$path) {return \\lstat($path);}
+    unset($GLOBALS["sls_sms_unlinked_stat"]);
+    $handle=\\fopen($path,"rb");
+    if (!$handle || !\\unlink($path)) {throw new \\RuntimeException("Unable to detach metadata fixture");}
+    $metadata=\\fstat($handle);\\fclose($handle);
+    $GLOBALS["sls_sms_unlinked_nlink"]=$metadata["nlink"];
+    if (isset($GLOBALS["sls_sms_unlinked_replacement"])) {($GLOBALS["sls_sms_unlinked_replacement"])($path);}
+    return $metadata;
+}');
 use SLS\MassNotify\Sms\{Config,Store,Provider,Service};
 function check($ok,string $message): void { if (!$ok) { throw new RuntimeException($message); } }
 function rejects(callable $call,string $code): void {
@@ -56,6 +68,38 @@ try {
     check($markerStore->stats($now)===['periods'=>[],'opt_outs'=>[]],'Valid marker recovery lost SMS state');
     unset($markerStore);
     $store=new Store($directory.'/ledger'); $provider=new FixtureProvider(); $service=new Service($store,$provider);
+    $beforeSidecars=$store->stats($now);
+    foreach (['-journal','-wal','-shm'] as $suffix) {
+        $sidecar=$directory.'/ledger/deliveries.sqlite'.$suffix;
+        file_put_contents($sidecar,str_repeat("\0",512));chmod($sidecar,0600);
+        $GLOBALS['sls_sms_unlinked_stat']=$sidecar;
+        check($store->stats($now)===$beforeSidecars,'Disappearing SQLite sidecar changed ledger evidence');
+        check(($GLOBALS['sls_sms_unlinked_nlink']??null)===0 && !file_exists($sidecar),'Unlinked SQLite metadata was not characterized');
+        file_put_contents($sidecar,'unsafe');chmod($sidecar,0644);
+        rejects(fn()=>$store->stats($now),'sms_storage_file_unsafe');unlink($sidecar);
+        file_put_contents($sidecar,'unsafe before unlink');chmod($sidecar,0644);$GLOBALS['sls_sms_unlinked_stat']=$sidecar;
+        rejects(fn()=>$store->stats($now),'sms_storage_file_unsafe');
+        check(!file_exists($sidecar),'Unsafe unlinked sidecar was not characterized');
+        $linked=$directory.'/sidecar-hardlink';file_put_contents($linked,'preserve');chmod($linked,0600);link($linked,$sidecar);
+        rejects(fn()=>$store->stats($now),'sms_storage_file_unsafe');unlink($sidecar);unlink($linked);
+        file_put_contents($linked,'preserve');chmod($linked,0600);symlink($linked,$sidecar);
+        rejects(fn()=>$store->stats($now),'sms_storage_file_unsafe');
+        check(file_get_contents($linked)==='preserve','Unsafe sidecar symlink changed its target');unlink($sidecar);unlink($linked);
+        $GLOBALS['sls_sms_unlinked_replacement']=static function($path):void {file_put_contents($path,'unsafe replacement');chmod($path,0644);};
+        file_put_contents($sidecar,str_repeat("\0",512));chmod($sidecar,0600);$GLOBALS['sls_sms_unlinked_stat']=$sidecar;
+        rejects(fn()=>$store->stats($now),'sms_storage_file_unsafe');
+        unset($GLOBALS['sls_sms_unlinked_replacement']);unlink($sidecar);
+    }
+    foreach (['deliveries.sqlite','initialized','storage.lock'] as $permanent) {
+        $permanentDirectory=$directory.'/zero-link-'.str_replace('.','-',$permanent);
+        $permanentStore=new Store($permanentDirectory);
+        $GLOBALS['sls_sms_unlinked_stat']=$permanentDirectory.'/'.$permanent;
+        if ($permanent==='storage.lock') {
+            unset($permanentStore);
+            rejects(fn()=>new Store($permanentDirectory),'sms_storage_file_unsafe');
+        } else {rejects(fn()=>$permanentStore->stats($now),'sms_storage_file_unsafe');unset($permanentStore);}
+        check(($GLOBALS['sls_sms_unlinked_nlink']??null)===0,'Permanent-file zero-link guard was not characterized');
+    }
     $frozen=Service::snapshot($settings,[$recipient],'Notice','Go to the meeting point.',false)[$recipient];
     $malformedFrozen=$frozen;$malformedFrozen['fingerprint']=[];
     rejects(fn()=>$service->send($settings,$malformedFrozen,'announcement-'.str_repeat('0',32),'job_'.str_repeat('0',32),$now+900,$now),'sms_snapshot_invalid');

@@ -372,6 +372,7 @@ piper_venv_usable() {
 }
 
 ensure_piper_runtime() {
+  export ORT_DISABLE_TELEMETRY=1
   validate_piper_runtime_tree || { log "Piper executable tree failed ownership/link validation; no existing interpreter was executed"; return 1; }
   if ! /usr/bin/python3 --version >/dev/null 2>&1; then
     log "Piper install failed: python3 is installed but not executable or broken"
@@ -411,6 +412,7 @@ install_piper_wrapper() {
   local expected expected_hash current wrapper_hash wrapper_mode wrapper_permissions wrapper_tmp
   expected="$(cat <<'EOF'
 #!/bin/sh
+export ORT_DISABLE_TELEMETRY=1
 PIPER_BIN="/usr/local/bin/sls_mass_notify/piper/venv/bin/piper"
 PIPER_PY="/usr/local/bin/sls_mass_notify/piper/venv/bin/python"
 if [ -x "$PIPER_BIN" ]; then
@@ -452,7 +454,7 @@ EOF
       wrapper_hash="$(/usr/bin/sha256sum /usr/local/bin/piper 2>/dev/null || true)"
       wrapper_hash="${wrapper_hash%% *}"
       case "$wrapper_hash" in
-        "$expected_hash"|97792a8e4ca9f3f48be0be0c24202921008807da030ac85438b58034f21130e4|4c6c0dfe69c1b59b8650c0c5a9d38adf5a9c6cbe311c283a929a7fc5580015c0) ;;
+        "$expected_hash"|a2f9671cb1f69acc055a88f58b9fb610578f5efea43a047938b16ed8634f4d56|97792a8e4ca9f3f48be0be0c24202921008807da030ac85438b58034f21130e4|4c6c0dfe69c1b59b8650c0c5a9d38adf5a9c6cbe311c283a929a7fc5580015c0) ;;
         *) printf '%s\n' '/usr/local/bin/piper is not a recognized SLL wrapper; refusing to overwrite it.' >&2; return 1 ;;
       esac
     fi

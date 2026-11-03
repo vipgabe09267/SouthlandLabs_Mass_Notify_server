@@ -1,8 +1,26 @@
 # Changelog
 
-## 0.1.9-beta — 2026-11-01
+## 0.1.9-beta — 2026-11-02
 
-The original October 31 installer was withdrawn after a history-retention conflict caused installation and rollback verification to fail. This corrected release keeps version `0.1.9-beta` and includes the fixes below. Use its new signed artifacts; do not reuse the withdrawn installer.
+The published installers are withdrawn. The current correction is an unpublished `0.1.9-beta` candidate undergoing qualification; `0.1.8-beta` remains the available published release. Do not reuse the withdrawn downloads. Earlier local and owner acceptance did not cover the legacy hash-only baseline with already-missing history.
+
+- Require native Module Admin installation to return strict success and read back the actual enabled version. Refusals cannot be hidden by a zero CLI exit or by stamping the database version. Return explicit PHP success only after native validation, including hosts whose FreePBX bootstrap leaves a nonzero implicit exit status.
+- Validate the running Asterisk configuration, account, startup policy and actual required providers before mutation. Discover module directories, preserve complete custom builds and keep package repair explicit. Health inspection discovers AMI commands without sending SIP NOTIFY.
+- Handle a SQLite journal disappearing during concurrent SMS reads/writes. Retry only otherwise-safe zero-link metadata for exact optional sidecars; permanent database and lock evidence, links, ownership and permissions remain strict.
+- Preserve exact unrelated cron bytes under the native FreePBX account semaphore, including comments, file operands and escaped trailing spaces. Failed reads and ambiguous SLL execution stop replacement.
+- Give protected PHP startup a separate bounded allowance from native cron lock contention. Slow startup must not be mislabeled as missing extensions; timed-out probes stop their owned child processes, use a safe working directory and preserve schedules with a specific diagnostic.
+- Admit the exact speech CPU baseline and enforce cgroup CPU/RAM limits through the actual mount topology. Run media and PBX probes with the service identity, bounded execution and closed installer coordination descriptors. Disable speech-runtime telemetry before native imports.
+- Admit exact recognized historical Piper wrapper implementations during protected upgrade preflight, then migrate them through the authenticated installer. Modified wrappers and unsafe filesystem metadata still stop repair.
+- Flush recovery helper contents, approvals, activation metadata and directory transitions before granting durable journal authority. Publish a completely prepared Dashboard directory atomically.
+- Accept current operator/automation backup fields and disable restored operator accounts. Require reviewed native dependency versions before starting an SLL transaction.
+- Bind the exact candidate release tag `V0.1.9-beta`, canonical publisher repository, signed manifest and release event. Historical authenticated recovery identities remain supported.
+
+- Check an interrupted transaction's history before repeating static restoration. Produce a protected, transaction-bound report for unknown historical loss. A separate exact-challenge administrator decision records accepted loss without calling it verified retention expiry; normal recovery still refuses it.
+- Preserve the administrator receipt and all original signed recovery evidence after completion and across future installs. Later evidence may prove expiry for a subset of the accepted records without changing the original receipt. Revocation still blocks active recovery; passive archives remain preserved.
+- Capture and sync complete closed history as private evidence before new installation mutations. Hash-only legacy history is never reconstructed, reset or restored over the live ledger.
+- Run native FreePBX install and uninstall phases once, removing duplicate BMO calls from the legacy hooks.
+- Disable Asterisk package repair by default. The explicit distribution-only repair checks installed and running binary identity as well as matching provider package versions; stale dpkg ownership cannot authorize mixing packaged modules into a source build.
+- Reject a dangling established publisher-policy marker when the installed verifier is missing; factory authority cannot bypass an incomplete established policy.
 
 - Check runtime audio space in /tmp separately from installer scratch fallback. Refuse an undersized, inaccessible, read-only or inode-exhausted runtime workspace before mutation, preserving the configured speech reserve and concurrency.
 
@@ -27,13 +45,13 @@ The original October 31 installer was withdrawn after a history-retention confli
 - Restore scoped native AMI database registrations as well as Manager configuration during rollback. Preserve unrelated accounts and refuse independent edits; refresh Dashboard hooks even when no backup jobs are enrolled.
 - Preserve administrator changes made after an interrupted installation. Record durable hashes before installer profile/branding writes, and retain fresh configuration snapshots before module hooks.
 - Flush retained configuration, history and native registration snapshots before advancing the installation journal. Preserve original temporary snapshots until retained file contents and directory entries are durable, including copies across filesystems.
-- Require a fresh collector heartbeat and existing ledger before completing rollback, with a bounded startup wait. Recover recognized interrupted retention-lock metadata without replacing its inode.
+- Require a fresh collector heartbeat and existing ledger when rollback restores an installed collector, with a bounded startup wait. Genuine pre-collector fresh interruptions preserve verified prior absence. Recover recognized interrupted retention-lock metadata without replacing its inode.
 - Do not report a failed speech installation when only unselected optional voice packs are absent. Required or selected missing voices still show a repair warning.
 - Retry one complete settings read after a validated atomic file replacement. Concurrent OTP submissions still allow one success and reject reuse; unsafe files, in-place changes, repeated replacement and encryption-key changes continue to fail safely.
 
-Native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. See docs/QUALIFICATION_MATRIX.md for evidence and limits. The corrected release passed owner manual acceptance.
+Prior native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. Those historical results and earlier owner acceptance do not qualify the current correction. See docs/QUALIFICATION_MATRIX.md for evidence and remaining checks.
 
-The GitHub release tag is `v0.1.9-beta`; the module version is unchanged. The withdrawn immutable tag cannot be reused. A checksum-pinned `--upgrade` bootstrap provides a one-time manual update for older installations, enforcing their existing publisher policy before executing the installer. Updated clients recognize both tag formats.
+The GitHub release tag is `V0.1.9-beta`; the module version is unchanged. The withdrawn immutable tag cannot be reused. A checksum-pinned `--upgrade` bootstrap provides a one-time manual update for older installations, enforcing their existing publisher policy before executing the installer. Updated clients recognize both tag formats.
 
 ### Southland Labs rebrand
 

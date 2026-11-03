@@ -43,6 +43,25 @@ class PublicApiSchemas(unittest.TestCase):
             ],
         )
 
+    def test_generated_release_metadata_follows_validated_documentation_state(self):
+        record=json.loads((ROOT/'docs/release-status.json').read_text())
+        version=self.api['info']['version']
+        expected=(f"Unpublished {version} candidate. Available published release: {record['published_version']}. "
+                  if record['candidate_status']=='unpublished' else f'Published {version} release. ')
+        self.assertTrue(self.api['info']['description'].startswith(expected))
+        self.assertEqual(generator.release_note(record,version),expected)
+        candidate={'schema':1,'candidate_version':'0.1.9-beta','published_version':'0.1.8-beta',
+                   'candidate_status':'unpublished','purpose':'Documentation fixture only.'}
+        self.assertEqual(generator.release_note(candidate,'0.1.9-beta'),
+                         'Unpublished 0.1.9-beta candidate. Available published release: 0.1.8-beta. ')
+        published={**candidate,'published_version':'0.1.9-beta','candidate_status':'published'}
+        self.assertEqual(generator.release_note(published,'0.1.9-beta'),'Published 0.1.9-beta release. ')
+        for invalid in ({**candidate,'candidate_version':'0.0.1-beta'},
+                        {**candidate,'candidate_status':'published'},
+                        {**candidate,'candidate_status':'unknown'}):
+            with self.subTest(record=invalid),self.assertRaises(ValueError):
+                generator.release_note(invalid,'0.1.9-beta')
+
     def test_local_references_resolve_and_actions_have_scopes(self):
         def walk(value):
             if isinstance(value, dict):

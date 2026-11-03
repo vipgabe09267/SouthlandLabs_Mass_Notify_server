@@ -15,9 +15,9 @@ if [[ -r /etc/freepbx.conf ]]; then
     printf 'Building on a PBX requires tools/run_isolated_tests.sh --build; direct builds cannot use production state as a fixture.\n' >&2
     exit 2
   }
-  for kind in MOUNT NET PID; do
+  for kind in MOUNT NET PID IPC; do
     variable="SLS_TEST_PARENT_${kind}_NS"
-    case "$kind" in MOUNT) path=mnt ;; NET) path=net ;; PID) path=pid ;; esac
+    case "$kind" in MOUNT) path=mnt ;; NET) path=net ;; PID) path=pid ;; IPC) path=ipc ;; esac
     if [[ -z "${!variable:-}" || "${!variable}" == "$(readlink "/proc/self/ns/$path")" ]]; then
       printf 'Build isolation verification failed for %s namespace; no tests were started.\n' "$kind" >&2
       exit 2
@@ -213,6 +213,8 @@ php "${ROOT_DIR}/tools/test_announcement_worker_health.php"
 python3 "${ROOT_DIR}/tools/test_enterprise_browser_ui.py"
 python3 "${ROOT_DIR}/tools/test_schedule_recording_browser_ui.py"
 python3 "${ROOT_DIR}/tools/test_installer_interruptions.py"
+python3 "${ROOT_DIR}/tools/test_installer_history_review.py"
+python3 "${ROOT_DIR}/tools/test_installer_history_cli.py"
 python3 "${ROOT_DIR}/tools/test_lite_installer.py"
 python3 "${ROOT_DIR}/tools/test_installer_profile_selection.py"
 python3 "${ROOT_DIR}/tools/test_legacy_runtime_permissions.py"
@@ -339,6 +341,9 @@ php "${ROOT_DIR}/tools/test_hero_view.php"
 php "${ROOT_DIR}/tools/test_dashboard_section.php"
 python3 "${ROOT_DIR}/tools/test_runtime_tree_safety.py"
 php "${ROOT_DIR}/tools/test_native_cron_read.php"
+php "${ROOT_DIR}/tools/test_managed_cron.php"
+php "${ROOT_DIR}/tools/test_native_cron_lock.php"
+python3 "${ROOT_DIR}/tools/test_native_installer_registration.py"
 python3 "${ROOT_DIR}/tools/test_schedule_journal_memory.py"
 php "${ROOT_DIR}/tools/test_update_contract.php"
 python3 "${ROOT_DIR}/tools/test_maintenance_failure_propagation.py"
@@ -396,6 +401,7 @@ python3 "${ROOT_DIR}/tools/test_incident_integration.py"
 python3 "${ROOT_DIR}/tools/test_module_trust.py"
 python3 "${ROOT_DIR}/tools/test_privileged_signer_boundaries.py"
 php "${ROOT_DIR}/tools/test_unprivileged_integration.php"
+php "${ROOT_DIR}/tools/test_native_module_lifecycle.php"
 php "${ROOT_DIR}/tools/test_schedule_runner_lock.php"
 php "${ROOT_DIR}/tools/test_schedule_lateness.php"
 php "${ROOT_DIR}/tools/test_schedule_form_lateness.php"

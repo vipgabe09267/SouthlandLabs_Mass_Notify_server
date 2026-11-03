@@ -1,6 +1,15 @@
 # Qualification boundaries
 
-`0.1.9-beta` is the corrected published release. The original withdrawn installer must not be reused. These entries distinguish native disposable-PBX qualification from isolated fixtures and external acceptance. They do not certify every deployment or delivery provider.
+`0.1.9-beta` is an unpublished correction candidate. Its earlier installer was withdrawn; `0.1.8-beta` remains the available published release. The historical entries below do not qualify the current correction. Qualification results are recorded separately against the exact package SHA-256; component checks alone do not qualify an installation. No entry certifies every FreePBX layout or delivery provider.
+
+## Current correction — 2026-11-02
+
+Focused isolated fixtures cover strict native installation results and enabled/version readback, dependency and hook refusals, translated Module Admin output, absent/disabled prerequisite handling, exactly-once native hooks, complete Dashboard publication, saved operator/automation backup fields and disabled restored operator accounts. Cron fixtures preserve unrelated comments and file operands, reject unknown SLL execution and failed reads, and coordinate with the native FreePBX semaphore in a disposable IPC namespace. These checks do not establish a successful current full installer lifecycle on a target PBX.
+
+The history review additionally covers a legacy hash-only baseline of 22 closed records with 6 unchanged and 16 missing, an explicit administrator history-loss decision and complete pre-install history evidence. Already-missing history is not restored or treated as verified expiry.
+
+FreePBX Module Admin disable is not a verified notification pause control. Workers use the protected runtime admission state; use `sudo slsconsole stop` to pause new notifications and verify that state before maintenance. Framework can ignore disable-hook failures, so this candidate does not claim that native disable fences all worker activity. The cron semaphore coordinates participating native writers; direct administrators may bypass it. A fresh comparison detects changes before replacement, but crontab provides no atomic compare-and-swap against nonparticipating writers.
+
 
 ## Native installer incident qualification — 2026-11-01
 

@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import sys
 import wave
 
@@ -48,7 +49,11 @@ def main():
         or not args.output_file[14:].isdigit()
     ):
         parser.error("Use the SLL speech supervisor with a private output descriptor.")
+    # ONNX1.30 can initialize its uploader while importing the native module.
+    # Set the lifetime opt-out before that import, including direct worker use.
+    os.environ['ORT_DISABLE_TELEMETRY'] = '1'
     import onnxruntime
+    onnxruntime.disable_telemetry_events()
     from piper import PiperVoice, SynthesisConfig
     from piper.config import PiperConfig
 

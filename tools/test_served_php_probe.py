@@ -36,7 +36,7 @@ class ServedPhp(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
         command=['php']
-        if disabled: command.extend(['-d','disable_functions=exec,proc_open'])
+        if disabled: command.extend(['-d','disable_functions='+(disabled if isinstance(disabled,str) else 'exec,proc_open')])
         command.extend(['-S',f'127.0.0.1:{port}','-t',str(self.web)])
         if disabled: command=['/usr/sbin/runuser','-u','asterisk','--']+command
         process=subprocess.Popen(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -51,7 +51,8 @@ class ServedPhp(unittest.TestCase):
                 except OSError: time.sleep(.05)
             else: self.fail('Isolated PHP prerequisite handler did not start')
             self.assertEqual(body['probe'],'sls_served_php_v1');self.assertFalse(body['ok'])
-            if disabled: self.assertTrue({'exec_enabled','proc_open_enabled'}<=set(body['missing']))
+            if isinstance(disabled,str): self.assertIn(disabled+'_enabled',body['missing'])
+            elif disabled: self.assertTrue({'exec_enabled','proc_open_enabled'}<=set(body['missing']))
             else: self.assertIn('web_runtime_must_run_as_asterisk',body['missing'])
             self.assertNotIn('uid',body);self.assertNotIn('username',body)
         finally:
@@ -61,6 +62,21 @@ class ServedPhp(unittest.TestCase):
 
     def test_root_php_runtime_is_rejected(self): self.prerequisite_failure()
     def test_disabled_process_functions_are_rejected(self): self.prerequisite_failure(True)
+
+    def test_disabled_native_cron_functions_are_rejected_by_served_runtime(self):
+        for function in ('sem_get','sem_acquire','sem_remove'):
+            with self.subTest(function=function):self.prerequisite_failure(function)
+
+    def test_cli_cron_capability_is_checked_before_bootstrap_or_activation(self):
+        source=(ROOT/'tools/install_release.sh').read_text()
+        gate=source[source.index('verify_php_security_versions_before_mutation() {'):source.index('\nverify_freepbx_web_response()')]
+        for function in ('sem_get','sem_acquire','sem_remove'):
+            definition=gate.replace('/usr/bin/php -r','/usr/bin/php -d disable_functions='+function+' -r',1)
+            script='set -euo pipefail\nlog(){ printf "%s\n" "$*"; }\n'+definition+'\nSTAGING_DIR="$1";MODULE=slsmassnotifyserver;SERVED_PHP_PROFILES="";verify_php_security_versions_before_mutation\nprintf MUTATION-REACHED\n'
+            result=subprocess.run(['/bin/bash','-c',script,'fixture',str(ROOT)],capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
+            self.assertNotIn('MUTATION-REACHED',result.stdout)
+            self.assertIn(function,result.stdout+result.stderr)
 
     def test_probe_is_read_only_get_and_rejects_forwarded_requests(self):
         with socket.socket() as sock:

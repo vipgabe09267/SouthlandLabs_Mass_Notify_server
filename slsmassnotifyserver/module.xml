@@ -32,10 +32,10 @@
 	</supported>
 	<depends>
 		<version>17.0</version>
-		<module>framework ge 17.0.0</module>
-		<module>dashboard ge 17.0.0</module>
-		<module>backup ge 17.0.0</module>
-		<module>recordings ge 17.0.0</module>
+		<module>framework ge 17.0.33</module>
+		<module>dashboard ge 17.0.5</module>
+		<module>backup ge 17.0.13</module>
+		<module>recordings ge 17.0.6</module>
 	</depends>
 	<hooks>
 		<framework class="Reload" namespace="FreePBX">

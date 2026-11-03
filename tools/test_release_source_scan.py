@@ -36,7 +36,8 @@ class SourceScan(unittest.TestCase):
             result = subprocess.run(['bash', str(fixture / 'tools/build_tgz.sh'), '--unsigned'], text=True,
                                     capture_output=True, env={**CLEAN_ENV, 'SLS_TEST_NAMESPACE': 'entered',
                                     'SLS_TEST_PARENT_MOUNT_NS': 'fixture', 'SLS_TEST_PARENT_NET_NS': 'fixture',
-                                    'SLS_TEST_PARENT_PID_NS': 'fixture'}, timeout=10)
+                                    'SLS_TEST_PARENT_PID_NS': 'fixture',
+                                    'SLS_TEST_PARENT_IPC_NS': 'fixture'}, timeout=10)
             self.assertEqual(result.returncode, 2)
             self.assertIn('invalid release version', result.stderr)
 

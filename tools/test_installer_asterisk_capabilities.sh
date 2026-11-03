@@ -49,47 +49,26 @@ PYCLI
   done
 )
 
-# Prefer the documented action-first --autoenable syntax. Retry the legacy
-# global-option ordering only when fwconsole explicitly reports a syntax error;
-# a real module installation failure must not be hidden by a second attempt.
+# Native registration is attempted exactly once. A false/failed native result
+# cannot be hidden by a second CLI invocation or syntactic fallback.
 (
   fixture="$(mktemp -d /tmp/sls-fwconsole-autoenable.XXXXXX)"
   trap 'find "$fixture" -depth -delete' EXIT
   LOG_FILE="$fixture/install.log"
   calls="$fixture/calls"
-  mock_mode="success"
-  fwconsole() {
+  mock_native_status=0
+  install_native_module() {
     printf '%s\n' "$*" >>"$calls"
-    call_count="$(wc -l <"$calls")"
-    if [ "$mock_mode" = "syntax" ] && [ "$call_count" -eq 1 ]; then
-      printf '%s\n' 'The --autoenable option does not exist.'
-      return 2
-    fi
-    if [ "$mock_mode" = "failure" ]; then
-      printf '%s\n' 'Module installation failed.'
-      return 1
-    fi
-    return 0
+    return "$mock_native_status"
   }
-
-  install_module_with_autoenable
-  [ "$(sed -n '1p' "$calls")" = "ma install --autoenable slsmassnotifyserver" ]
-  [ "$(wc -l <"$calls")" -eq 1 ]
-
-  : >"$calls"
-  mock_mode="syntax"
-  install_module_with_autoenable
-  [ "$(sed -n '1p' "$calls")" = "ma install --autoenable slsmassnotifyserver" ]
-  [ "$(sed -n '2p' "$calls")" = "ma --autoenable install slsmassnotifyserver" ]
-  [ "$(wc -l <"$calls")" -eq 2 ]
-
-  : >"$calls"
-  mock_mode="failure"
-  if install_module_with_autoenable; then
-    printf 'A genuine FreePBX module failure incorrectly entered the syntax fallback.\n' >&2
-    exit 1
-  fi
-  [ "$(wc -l <"$calls")" -eq 1 ]
+  fwconsole() { printf 'Unexpected CLI fallback\n' >&2; return 91; }
+  for mock_native_status in 0 1 23; do
+    : >"$calls"
+    if install_module_with_autoenable; then fixture_status=0; else fixture_status=$?; fi
+    [ "$fixture_status" -eq "$mock_native_status" ]
+    [ "$(wc -l <"$calls")" -eq 1 ]
+    [ "$(cat "$calls")" = slsmassnotifyserver ]
+  done
 )
 
 LOG_FILE="/dev/null"
@@ -141,6 +120,7 @@ log() {
 (
   mock_modules="$(mktemp /tmp/sls-modules-conf.XXXXXX)"
   trap 'rm -f "$mock_modules"' EXIT
+  chmod 0644 "$mock_modules"
   printf '%s\n' '[modules]' 'autoload=yes' >"$mock_modules"
   asterisk_module_starts_persistently res_pjsip_header_funcs.so "$mock_modules"
   printf '%s\n' '[modules]' 'autoload=yes' 'noload = res_pjsip_header_funcs.so' >"$mock_modules"
@@ -167,12 +147,12 @@ log() {
     exit 1
   fi
   printf '%s\n' '[modules]' 'autoload=yes' '[modules]' 'autoload=no' >"$mock_modules"
+  asterisk_module_starts_persistently res_pjsip_header_funcs.so "$mock_modules"
+  printf '%s\n' '[modules]' 'autoload=no' '[modules]' 'autoload=yes' >"$mock_modules"
   if asterisk_module_starts_persistently res_pjsip_header_funcs.so "$mock_modules"; then
-    printf 'An earlier autoload assignment overrode the effective final assignment.\n' >&2
+    printf 'A later modules category incorrectly overrode the native first category.\n' >&2
     exit 1
   fi
-  printf '%s\n' '[modules]' 'autoload=no' '[modules]' 'autoload=yes' >"$mock_modules"
-  asterisk_module_starts_persistently res_pjsip_header_funcs.so "$mock_modules"
 )
 
 # The compatibility Piper path is managed only when absent or already SLS-owned.
@@ -328,6 +308,20 @@ PY
     return 0
   }
   function /usr/bin/systemctl() { [ "$*" = 'is-active --quiet freepbx.service' ]; }
+  # Package ownership can survive a source installation over the same paths.
+  # Reject that binary before apt refresh/reinstall even when the provider's
+  # old package record still exists. The filesystem/image proof has separate
+  # real-file coverage below; this boundary isolates package side effects.
+  mock_binary_is_packaged=0
+  verify_asterisk_packaged_binary() { [ "$mock_binary_is_packaged" -eq 1 ]; }
+  if repair_asterisk_provider_package res_pjsip_header_funcs.so; then
+    printf 'Stale dpkg ownership allowed repair over a custom Asterisk binary.\n' >&2
+    exit 1
+  fi
+  [ "${#mock_apt_args[@]}" -eq 0 ]
+  [ "$APT_METADATA_REFRESHED" -eq 0 ]
+  ASTERISK_PACKAGE_REPAIR_ATTEMPTS=""
+  mock_binary_is_packaged=1
   repair_asterisk_provider_package res_pjsip_header_funcs.so
   [ -f "$mock_provider_file" ]
   [ "${#mock_apt_args[@]}" -eq 6 ]
@@ -432,8 +426,159 @@ PY
   [ "$(asterisk_provider_package "$mock_provider_file")" = "asterisk22-core:amd64" ]
 )
 
-# Repair is opt-out and must stop before querying or changing packages.
+# Exercise the actual checksum/process-image verifier with protected files.
+# Old dpkg ownership, matching version strings, or a CLI client alone cannot
+# authorize a package reinstall over a different running Asterisk build.
+/usr/bin/python3 -I - "$ROOT_DIR/tools/install_release.sh" <<'PYPACKAGEIMAGEFIXTURE'
+import hashlib, os, pathlib, subprocess, sys, tempfile
+source = pathlib.Path(sys.argv[1]).read_text()
+program = source.split("<<'PYPACKAGEDASTERISK'\n", 1)[1].split('\nPYPACKAGEDASTERISK', 1)[0]
+with tempfile.TemporaryDirectory(prefix='sls-asterisk-image-', dir='/run') as name:
+    root = pathlib.Path(name)
+    binary = root / 'usr/sbin/asterisk'
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b'unchanged installed packaged Asterisk image\n')
+    binary.chmod(0o755)
+    metadata = root / 'package.md5sums'
+    original = binary.read_bytes()
+    checksum = hashlib.md5(original, usedforsecurity=False).hexdigest()
+    row = checksum + '  ' + str(binary).lstrip('/') + '\n'
+    metadata.write_text(row)
+    metadata.chmod(0o644)
+    processes = root / 'proc'; processes.mkdir()
+    daemon = processes / '42'; daemon.mkdir()
+    (daemon / 'exe').symlink_to(binary)
+    command = str(binary).encode() + b'\0-f\0'
+    (daemon / 'cmdline').write_bytes(command)
+    def check(expected, label):
+        result = subprocess.run(['/usr/bin/python3', '-I', '-', str(binary), str(metadata), str(processes)],
+            input=program, text=True, capture_output=True, timeout=10)
+        if (result.returncode == 0) != expected:
+            raise AssertionError(label + ': ' + result.stdout + result.stderr)
+    check(True, 'Matching packaged binary and actual running image')
+    binary.write_bytes(b'custom source-build overlay with stale package ownership\n')
+    check(False, 'Custom binary overlay')
+    binary.write_bytes(original)
+    for body in ('', 'malformed metadata\n', checksum + '  usr/sbin/unrelated\n', row + row):
+        metadata.write_text(body); check(False, 'Missing, malformed, unrelated or ambiguous binary checksum')
+    metadata.write_text(row)
+    metadata.chmod(0o664); check(False, 'Writable package checksum metadata'); metadata.chmod(0o644)
+    binary.chmod(0o775); check(False, 'Writable installed binary'); binary.chmod(0o755)
+    binary.rename(binary.with_name('real-binary'))
+    binary.symlink_to(binary.with_name('real-binary'))
+    check(False, 'Custom binary symlink')
+    binary.unlink(); binary.with_name('real-binary').rename(binary)
+    metadata.rename(metadata.with_suffix('.real'))
+    metadata.symlink_to(metadata.with_suffix('.real'))
+    check(False, 'Checksum metadata symlink')
+    metadata.unlink(); metadata.with_suffix('.real').rename(metadata)
+    (daemon / 'cmdline').write_bytes(str(binary).encode() + b'\0-rx\0core show version\0')
+    check(False, 'CLI process without the daemon')
+    (daemon / 'cmdline').write_bytes(command)
+    (daemon / 'exe').unlink(); (daemon / 'exe').symlink_to(str(binary) + ' (deleted)')
+    check(False, 'Deleted active image after binary replacement')
+    custom = root / 'custom/asterisk'; custom.parent.mkdir(); custom.write_bytes(original)
+    (daemon / 'exe').unlink(); (daemon / 'exe').symlink_to(custom)
+    check(False, 'Different running daemon path')
+    (daemon / 'exe').unlink(); (daemon / 'exe').symlink_to(binary)
+    other = processes / '43'; other.mkdir(); (other / 'exe').symlink_to(binary)
+    (other / 'cmdline').write_bytes(command)
+    check(False, 'Multiple daemons')
+    (other / 'cmdline').write_bytes(str(binary).encode() + b'\0-rx\0core show version\0')
+    check(True, 'Concurrent remote CLI does not replace daemon proof')
+print('Packaged Asterisk checksum, custom overlays/symlinks and running-image evidence passed.')
+PYPACKAGEIMAGEFIXTURE
+
+# Stock FreePBX loads independently versioned vendor add-ons alongside Asterisk.
+# Existing peers must match their own protected package and mapped inode; only
+# the package supplying the new provider must share the proven binary version.
+/usr/bin/python3 -I - "$ROOT_DIR/tools/install_release.sh" <<'PYPACKAGEPEERFIXTURE'
+import hashlib, json, os, pathlib, subprocess, sys, tempfile
+source = pathlib.Path(sys.argv[1]).read_text()
+program = source.split("<<'PYASTERISKMODULESET'\n", 1)[1].split('\nPYASTERISKMODULESET', 1)[0]
+with tempfile.TemporaryDirectory(prefix='sls-asterisk-peer-versions-', dir='/run') as name:
+    root = pathlib.Path(name); modules = root / 'modules'; modules.mkdir()
+    target = modules / 'app_page.so'; addon = modules / 'app_flite.so'
+    original = {target: b'exact package Page provider', addon: b'exact separately versioned vendor add-on'}
+    for path, body in original.items(): path.write_bytes(body); path.chmod(0o755)
+    target_owner = 'asterisk22-core:amd64'; addon_owner = 'asterisk22-flite:amd64'
+    states = {}
+    for owner, path, version in ((target_owner, target, '22.11.0-1.sng12'),
+                                 (addon_owner, addon, '2.4-44.2505af1.sng12')):
+        metadata = root / (owner.replace(':', '-') + '.md5sums')
+        metadata.write_text(hashlib.md5(original[path], usedforsecurity=False).hexdigest()
+                            + '  ' + str(path).lstrip('/') + '\n')
+        states[owner] = {'status': 'ii ', 'version': version, 'metadata': str(metadata)}
+    addon_metadata = pathlib.Path(states[addon_owner]['metadata'])
+    processes = root / 'proc'; processes.mkdir(); daemon = processes / '42'; daemon.mkdir()
+    binary = root / 'asterisk'; binary.write_bytes(b'packaged running binary verified separately')
+    (daemon / 'exe').symlink_to(binary); (daemon / 'cmdline').write_bytes(str(binary).encode() + b'\0-f\0')
+    owners = target_owner + ': ' + str(target) + '\n' + addon_owner + ': ' + str(addon) + '\n'
+    def maps(inode_offset=0, deleted=False):
+        info = addon.stat(); device = f'{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}'
+        (daemon / 'maps').write_text(f'1000-2000 r-xp 00000000 {device} {info.st_ino + inode_offset} {addon}'
+                                    + (' (deleted)' if deleted else '') + '\n')
+    preamble = '''import json, subprocess, sys, types
+fixture_states=json.loads(sys.argv[1]); fixture_owners=sys.argv[2]
+def native_query(args, **kwargs):
+    if args[0]!='/usr/bin/dpkg-query': raise AssertionError('Only native package reads are authorized')
+    if args[1]=='-S': body=fixture_owners
+    elif args[1]=='-W':
+        item=fixture_states[args[-1]]; body=item['status']+'\\t'+item['version']
+    elif args[1]=='--control-path': body=fixture_states[args[2]]['metadata']+'\\n'
+    else: raise AssertionError('Unexpected native package query')
+    return types.SimpleNamespace(returncode=0, stdout=body, stderr='')
+subprocess.run=native_query
+sys.argv=sys.argv[2:]
+'''
+    def check(expected, label, ownership=None):
+        result = subprocess.run(['/usr/bin/python3', '-I', '-', json.dumps(states), owners if ownership is None else ownership,
+                                 str(modules), 'asterisk22-core', '22.11.0-1.sng12', target.name, str(processes), str(binary)],
+                                input=preamble + program, text=True, capture_output=True, timeout=5)
+        if (result.returncode == 0) != expected:
+            raise AssertionError(label + ': ' + result.stdout + result.stderr)
+    maps()
+    check(True, 'Unchanged already-loaded add-on with its independent package release')
+    states[target_owner]['version'] = '22.8.2-1.sng12'
+    check(False, 'Targeted provider package differs from the proven running build')
+    states[target_owner]['version'] = '22.11.0-1.sng12'
+    states[addon_owner]['status'] = 'rc '
+    check(False, 'Independent add-on package is not installed')
+    states[addon_owner]['status'] = 'ii '; states[addon_owner]['version'] = ''
+    check(False, 'Independent add-on lacks an installed package version')
+    states[addon_owner]['version'] = '2.4-44.2505af1.sng12'
+    addon.write_bytes(b'modified independently versioned add-on'); maps()
+    check(False, 'Modified add-on under valid package ownership')
+    addon.write_bytes(original[addon]); maps(inode_offset=1)
+    check(False, 'Mapped add-on has a stale installed inode')
+    maps(deleted=True); check(False, 'Deleted mapped add-on'); maps()
+    check(False, 'Mapped add-on has no package owner', ownership=target_owner + ': ' + str(target) + '\n')
+    check(False, 'Mapped add-on has ambiguous package ownership', ownership=owners + target_owner + ': ' + str(addon) + '\n')
+    addon.chmod(0o775); check(False, 'Group-writable add-on'); addon.chmod(0o755)
+    os.chown(addon, 65534, -1); check(False, 'Daemon-owned add-on'); os.chown(addon, 0, -1)
+    alias = root / 'addon-alias'; os.link(addon, alias)
+    check(False, 'Hard-linked add-on'); alias.unlink()
+    saved = root / 'saved-addon'; addon.rename(saved); addon.symlink_to(saved)
+    check(False, 'Symlinked add-on'); addon.unlink(); saved.rename(addon); maps()
+    addon_metadata.chmod(0o664); check(False, 'Writable add-on checksum authority'); addon_metadata.chmod(0o644)
+    os.chown(addon_metadata, 65534, -1)
+    check(False, 'Daemon-owned checksum authority'); os.chown(addon_metadata, 0, -1)
+    check(True, 'Independent version remains admitted after every refusal is restored')
+print('Independent add-on package releases and protected mapped-peer boundaries passed.')
+PYPACKAGEPEERFIXTURE
 (
+  asterisk_provider_package() { printf '%s\n' asterisk-binary; }
+  dpkg-query() { [ "$1" = -W ] || return 1; printf '%s\n' '20.7.0-1'; }
+  if verify_asterisk_packaged_binary asterisk-modules '22.8.2-1'; then
+    printf 'Different binary/provider package versions passed ABI admission.\n' >&2
+    exit 1
+  fi
+)
+
+# Package repair needs explicit administrator opt-in and must stop before
+# querying or changing packages otherwise.
+(
+  [ "$REPAIR_ASTERISK_PACKAGES" -eq 0 ]
   REPAIR_ASTERISK_PACKAGES=0
   if repair_asterisk_provider_package res_pjsip_header_funcs.so; then
     printf 'Disabled Asterisk package repair was incorrectly attempted.\n' >&2
@@ -484,6 +629,15 @@ repair_asterisk_provider_package() {
     return 0
   fi
   return 1
+}
+
+# These unit branches isolate capability submission after admission. The real
+# restart-policy/package/image admission has private-file coverage separately.
+mock_provider_requires_repair=0
+verify_asterisk_provider_admission() {
+  if [ "$mock_provider_requires_repair" -eq 1 ]; then
+    repair_asterisk_provider_package "$1"
+  fi
 }
 
 asterisk() {
@@ -754,22 +908,24 @@ if ensure_asterisk_capability function PJSIP_HEADER res_pjsip_header_funcs.so; t
   exit 1
 fi
 [ "$mock_load_calls" -eq 1 ]
-[ "$mock_reload_calls" -eq 1 ]
-[ "$mock_package_repair_calls" -eq 1 ]
+[ "$mock_reload_calls" -eq 0 ]
+[ "$mock_package_repair_calls" -eq 0 ]
 
-# A failed initial load must retry successfully after exact package repair.
+# A missing approved stock file is repaired during admission, then loaded once.
 mock_available=0
 mock_load_success=0
 mock_load_calls=0
 mock_reload_calls=0
 mock_package_repair_success=1
 mock_package_repair_calls=0
+mock_provider_requires_repair=1
 ensure_asterisk_capability function PJSIP_HEADER res_pjsip_header_funcs.so
 [ "$mock_available" -eq 1 ]
-[ "$mock_load_calls" -eq 2 ]
-[ "$mock_reload_calls" -eq 1 ]
+[ "$mock_load_calls" -eq 1 ]
+[ "$mock_reload_calls" -eq 0 ]
 [ "$mock_package_repair_calls" -eq 1 ]
 mock_package_repair_success=0
+mock_provider_requires_repair=0
 
 # Required modules use the same deceptive-status-resistant load, repair, and
 # post-repair verification behavior as individual dialplan capabilities.
@@ -803,9 +959,10 @@ mock_package_repair_success=0
     mock_module_repair_calls=$((mock_module_repair_calls + 1))
     mock_module_load_success=1
   }
+  verify_asterisk_provider_admission() { repair_asterisk_provider_package "$1"; }
   ensure_asterisk_module_loaded res_pjsip_notify.so
   [ "$mock_module_running" -eq 1 ]
-  [ "$mock_module_load_calls" -eq 2 ]
+  [ "$mock_module_load_calls" -eq 1 ]
   [ "$mock_module_repair_calls" -eq 1 ]
 )
 
@@ -846,12 +1003,14 @@ mock_heading_case="title"
   mock_spool="/var/spool/asterisk"
   mock_varlib="/var/lib/asterisk"
   mock_data="/var/lib/asterisk"
+  verify_asterisk_runtime_identity() { [ "$1" = /etc/asterisk ]; }
   asterisk() {
     if [ "${2:-}" = "core show settings" ]; then
       printf '\033[1;35m  module DIRECTORY:\033[0m /lib/asterisk/modules\n'
       printf '  spool DIRECTORY: %s\n' "$mock_spool"
       printf '  VARLIB directory: %s\n' "$mock_varlib"
       printf '  data directory: %s\n' "$mock_data"
+      printf '  Configuration directory: /etc/asterisk\n'
       return 0
     fi
     return 1
@@ -1064,7 +1223,7 @@ fi
 installer_source="${ROOT_DIR}/tools/install_release.sh"
 class_dependency_source="${ROOT_DIR}/slsmassnotifyserver/Slsmassnotifyserver.class.php"
 module_xml_source="${ROOT_DIR}/slsmassnotifyserver/module.xml"
-grep -Fq '<module>backup ge 17.0.0</module>' "$module_xml_source"
+grep -Fq '<module>backup ge 17.0.13</module>' "$module_xml_source"
 grep -Fq 'for prerequisite in framework dashboard backup recordings; do' "$installer_source"
 grep -Fq 'for required_module in framework dashboard backup recordings; do' "$installer_source"
 grep -Fq 'FreePBX did not discover the Mass Notify native backup adapter.' "$installer_source"
@@ -1173,7 +1332,7 @@ for producer in \
   fi
 done
 
-expected_mapping=$'function|PJSIP_HEADER|res_pjsip_header_funcs.so\nfunction|PJSIP_CONTACT|func_pjsip_contact.so\nfunction|PJSIP_AOR|func_pjsip_aor.so\nfunction|PJSIP_DIAL_CONTACTS|chan_pjsip.so\nfunction|TOLOWER|func_strings.so\nfunction|CUT|func_strings.so\nfunction|FILTER|func_strings.so\nfunction|CHANNEL|func_channel.so\nfunction|IF|func_logic.so\nfunction|DB|func_db.so\nfunction|CALLERID|func_callerid.so\nfunction|TIMEOUT|func_timeout.so\nfunction|MUTEAUDIO|res_mutestream.so\nfunction|CONFBRIDGE|app_confbridge.so\nmanager|MuteAudio|res_mutestream.so\nmanager|PlayDTMF|app_senddtmf.so\nrequired|manager|Setvar\nrequired|manager|Getvar\napplication|ConfBridge|app_confbridge.so\napplication|Page|app_page.so\napplication|AGI|res_agi.so\napplication|Playback|app_playback.so\napplication|PlayTones|app_playtones.so\napplication|StopPlayTones|app_playtones.so\napplication|Read|app_read.so\napplication|ExecIf|app_exec.so\napplication|Gosub|app_stack.so\napplication|Return|app_stack.so\napplication|Log|app_verbose.so\napplication|Verbose|app_verbose.so\nrequired|application|Wait'
+expected_mapping=$'function|PJSIP_HEADER|res_pjsip_header_funcs.so\nfunction|PJSIP_CONTACT|func_pjsip_contact.so\nfunction|PJSIP_AOR|func_pjsip_aor.so\nfunction|PJSIP_DIAL_CONTACTS|chan_pjsip.so\nfunction|TOLOWER|func_strings.so\nfunction|CUT|func_cut.so\nfunction|FILTER|func_strings.so\nfunction|CHANNEL|func_channel.so\nfunction|IF|func_logic.so\nfunction|DB|func_db.so\nfunction|CALLERID|func_callerid.so\nfunction|TIMEOUT|func_timeout.so\nfunction|MUTEAUDIO|res_mutestream.so\nfunction|CONFBRIDGE|app_confbridge.so\nmanager|MuteAudio|res_mutestream.so\nmanager|PlayDTMF|app_senddtmf.so\nrequired|manager|Setvar\nrequired|manager|Getvar\napplication|ConfBridge|app_confbridge.so\napplication|Page|app_page.so\napplication|AGI|res_agi.so\napplication|Playback|app_playback.so\napplication|PlayTones|app_playtones.so\napplication|StopPlayTones|app_playtones.so\napplication|Read|app_read.so\napplication|ExecIf|app_exec.so\napplication|Gosub|app_stack.so\napplication|Return|app_stack.so\napplication|Log|app_verbose.so\napplication|Verbose|app_verbose.so\nrequired|application|Wait'
 actual_mapping="$(
   ensure_asterisk_capability() {
     printf '%s|%s|%s\n' "$1" "$2" "$3"

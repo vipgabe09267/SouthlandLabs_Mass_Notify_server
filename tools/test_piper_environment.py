@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import io
+from contextlib import redirect_stdout
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -20,6 +22,26 @@ module = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(module)
 
 @unittest.skipUnless(os.geteuid() == 0, 'Root-owned environment fixture required')
 class Replacement(unittest.TestCase):
+    def test_checked_import_process_gets_opt_out_before_execution(self):
+        marker=self.root/'native-import-environment'
+        for previous in ('0','1',''):
+            with self.subTest(previous=previous),mock.patch.dict(os.environ,{'ORT_DISABLE_TELEMETRY':previous}):
+                module.checked(['/usr/bin/python3','-I','-c','import os,pathlib,sys;pathlib.Path(sys.argv[1]).write_text(os.environ.get("ORT_DISABLE_TELEMETRY","missing"))',str(marker)])
+            self.assertEqual(marker.read_text(),'1')
+
+    def test_locked_private_builder_receives_telemetry_opt_out(self):
+        process=mock.Mock(returncode=0)
+        def replacement(root,builder,_validator,_paused):
+            builder(root/'.replacement-fixture',123)
+            return {'ok':True}
+        with mock.patch.object(module,'replace_environment',side_effect=replacement), \
+             mock.patch.object(module.subprocess,'Popen',return_value=process) as launch, \
+             mock.patch.dict(os.environ,{'ORT_DISABLE_TELEMETRY':'0'}), \
+             mock.patch.object(sys,'argv',['environment','--workers-paused']),redirect_stdout(io.StringIO()):
+            self.assertEqual(module.main(),0)
+        self.assertEqual(launch.call_args.kwargs['env']['ORT_DISABLE_TELEMETRY'],'1')
+        self.assertEqual(launch.call_args.kwargs['pass_fds'],(123,))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='sls-piper-environment-')
         self.addCleanup(self.temp.cleanup)

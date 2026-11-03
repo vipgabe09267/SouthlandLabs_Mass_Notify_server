@@ -1,0 +1,212 @@
+[
+  {
+    "account": "root",
+    "line": "* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1",
+    "classification": "owned"
+  },
+  {
+    "account": "root",
+    "line": "17 * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py update >/dev/null 2>&1",
+    "classification": "owned"
+  },
+  {
+    "account": "root",
+    "line": "17 */6 * * * /usr/bin/timeout 1800 /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "owned"
+  },
+  {
+    "account": "asterisk",
+    "line": "* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py weather >/dev/null 2>&1",
+    "classification": "owned"
+  },
+  {
+    "account": "asterisk",
+    "line": "* * * * * /usr/bin/php /usr/local/bin/sls_mass_notify/sls_mass_notify_schedule_worker.php",
+    "classification": "owned"
+  },
+  {
+    "account": "asterisk",
+    "line": "* * * * * /bin/bash /usr/local/bin/sls_mass_notify/sls_mass_notify_nws_poll.sh",
+    "classification": "owned"
+  },
+  {
+    "account": "asterisk",
+    "line": "@hourly /usr/local/bin/nws_weather_alert.sh",
+    "classification": "owned"
+  },
+  {
+    "account": "asterisk",
+    "line": "* * * * * /usr/local/bin/nwsalerts_ensure_menu_patch.sh",
+    "classification": "owned"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/local/bin/nwsalerts_ensure_menu_patch.sh",
+    "classification": "unrelated"
+  },
+  {
+    "account": "asterisk",
+    "line": "17 * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "owned"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/bin/env LANG=C /bin/bash /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh",
+    "classification": "owned"
+  },
+  {
+    "account": "root",
+    "line": "# checksum /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "unrelated"
+  },
+  {
+    "account": "asterisk",
+    "line": "# retain sls_mass_notify_weather_poll.sh instructions",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "unrelated"
+  },
+  {
+    "account": "asterisk",
+    "line": "0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_nws_poll.sh",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/cp /etc/asterisk/extensions_custom.conf /root/SLS_Mass_Notifications_Plugin.backup",
+    "classification": "unrelated"
+  },
+  {
+    "account": "asterisk",
+    "line": "0 2 * * * /usr/bin/tar -cf /root/backup.tar /usr/local/bin/sls_mass_notify/",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/printf '%s' '/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh'",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "SLS_BACKUP=/usr/local/bin/sls_mass_notify/",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh && /usr/bin/true",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/local/bin/sls_mass_notify/unreviewed.php",
+    "classification": "review"
+  },
+  {
+    "account": "asterisk",
+    "line": "* * * * * /usr/local/bin/sls_mass_notify/unreviewed.php",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /var/lib/asterisk/SLS_Mass_Notifications_Plugin/custom-worker.sh",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py weather",
+    "classification": "review"
+  },
+  {
+    "account": "asterisk",
+    "line": "* * * * * /custom/bin/sls_mass_notify_weather_poll.sh",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh && /usr/bin/true",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/bin/true; /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /bin/bash -c '/usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh'",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/bin/nice /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/echo ';' '/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh'",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/echo \\; /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/echo '>' '/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh'",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/echo '$(/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh)'",
+    "classification": "unrelated"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/echo \"$(/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh)\"",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * '/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh' >/dev/null 2>&1",
+    "classification": "owned"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh 2 >&1",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh '2'>&1",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * /usr/bin/echo \"$(/usr/bin/echo $(date); /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh)\"",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * /usr/bin/nohup /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * SCRIPT=/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh \"$SCRIPT\"",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "* * * * * eval /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh",
+    "classification": "review"
+  },
+  {
+    "account": "root",
+    "line": "0 2 * * * SCRIPT=/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh /usr/bin/sha256sum \"$SCRIPT\"",
+    "classification": "unrelated"
+  }
+]

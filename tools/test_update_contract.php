@@ -63,12 +63,21 @@ $expectedUpdateCron = '17 * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_no
 if (!preg_match('/\tprivate function slsCronLine\(string \$job\): string\n\t\{.*?\n\t\}/s', $moduleSource, $cronMethod)) {
 	update_contract_fail('Canonical fixed cron generator could not be inspected.');
 }
-eval('class UpdateCronFixture { public function line(string $job): string { return $this->slsCronLine($job); } ' . $cronMethod[0] . '}');
+if (!preg_match('/\tprivate function ensureRootUpdateCron\(\)\n\t\{.*?\n\t\}/s', $moduleSource, $rootCronMethod)) {
+    update_contract_fail('Root cron adapter could not be inspected.');
+}
+eval('class UpdateCronFixture {
+    public $rootCalls=[];
+    public function line(string $job): string { return $this->slsCronLine($job); }
+    public function root() { $this->ensureRootUpdateCron(); }
+    private function updateManagedUserCron($jobs,$account="asterisk") { $this->rootCalls[]=[$jobs,$account]; }
+    ' . $cronMethod[0] . $rootCronMethod[0] . '}');
+$cronFixture=new UpdateCronFixture();$cronFixture->root();
 $rootHelper = file_get_contents($root . '/slsmassnotifyserver/bin/sls_mass_notify/sls_privileged_install.py');
 $cronRunner = file_get_contents($root . '/slsmassnotifyserver/bin/sls_mass_notify/sls_cron_runner.py');
 if ((new UpdateCronFixture())->line('update') !== $expectedUpdateCron
 	|| substr_count($rootHelper, $expectedUpdateCron) !== 1
-	|| strpos($moduleSource, "\$filtered[] = \$this->slsCronLine('update');") === false
+	|| $cronFixture->rootCalls !== [[['maintenance','update'],'root']]
 	|| strpos($cronRunner, "'update': (True, 1800, ['/bin/bash', RUNTIME + '/sls_mass_notify_update.sh'])") === false) {
 	update_contract_fail('Automatic updates must retain exactly one hourly silent cron command, fixed root account and 1800-second worker deadline.');
 }

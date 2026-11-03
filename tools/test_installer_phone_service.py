@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -103,13 +104,18 @@ esac
                 self.assertEqual(completed.returncode == 0, expected, completed.stderr)
 
     def startup_probe(self, active_after=1, disabled=False, healthy=True):
+        health={'ok':healthy,'connected':healthy,'heartbeat_age_seconds':1,'active_batches':0,'reserved_contacts':0}
         probe=self.root/'startup-probe'
-        probe.write_text('''#!/bin/bash
-printf '%s\\n' "${@: -1}" >>"$SLS_PHONE_TEST_ROOT/probe-calls"
+        # The actual privilege boundary deliberately clears caller variables.
+        # Keep the inert child's private inputs in its protected fixture source.
+        probe.write_text('#!/bin/bash\nfixture_root='+shlex.quote(str(self.root))+
+            '\nfixture_health='+shlex.quote(json.dumps(health))+r'''
+[[ -z "${SLS_PHONE_TEST_ROOT+x}" && -z "${FIXTURE_HEALTH+x}" ]] || exit 95
+printf '%s\n' "${@: -1}" >>"$fixture_root/probe-calls"
 if [ "${@: -1}" = --probe-ami ]; then
- printf '%s\\n' '{"ok":true,"ping":true,"show_dialplan":true}'
+ printf '%s\n' '{"ok":true,"ping":true,"show_dialplan":true}'
 else
- printf '%s\\n' "$FIXTURE_HEALTH"
+ printf '%s\n' "$fixture_health"
 fi
 ''');probe.chmod(0o755)
         source=self.root/'startup-installer.sh'
@@ -132,10 +138,9 @@ systemctl(){
 }
 verify_phone_collector
 '''
-        health={'ok':healthy,'connected':healthy,'heartbeat_age_seconds':1,'active_batches':0,'reserved_contacts':0}
         return subprocess.run(['bash','-c',harness,'_',str(source)],env={**self.env,
             'FIXTURE_DISABLED':'1' if disabled else '0','FIXTURE_ACTIVE_AFTER':str(active_after),
-            'FIXTURE_HEALTH':json.dumps(health)},capture_output=True,text=True,timeout=10)
+            'FIXTURE_HEALTH':'caller-value-must-be-cleared'},capture_output=True,text=True,timeout=10)
 
     def test_collector_startup_waits_through_systemd_restart_before_authentication(self):
         result=self.startup_probe(active_after=3)
@@ -160,6 +165,8 @@ verify_phone_collector
         result=self.startup_probe(healthy=False)
         self.assertNotEqual(result.returncode,0)
         self.assertIn('fresh authenticated heartbeat',result.stdout)
+        self.assertEqual((self.root/'probe-calls').read_text().splitlines(),
+                         ['--probe-ami','--health','--health','--health'])
 
     def test_main_checks_collector_readiness_after_freepbx_reload_before_static_verification(self):
         main=SOURCE.split('main() {',1)[1]

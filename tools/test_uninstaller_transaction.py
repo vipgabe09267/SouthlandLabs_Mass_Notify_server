@@ -15,6 +15,9 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+import io
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +34,40 @@ TRUST, CRYPTO = load('sls_module_trust'), load('sls_config_crypto')
 
 
 class OfflineUninstaller(unittest.TestCase):
+    def test_workspace_creation_flushes_new_directory_and_each_parent_before_publication(self):
+        source=self.script.read_text().split("<<'PYUNINSTALLSPACE'\n",1)[1].split('\nPYUNINSTALLSPACE',1)[0]
+        events=[];real_sync=os.fsync
+        def sync(fd):events.append(os.readlink('/proc/self/fd/'+str(fd)));return real_sync(fd)
+        with patch('sys.argv',['private-inline','sls-uninstall-transaction']),patch.object(os,'fsync',sync),redirect_stdout(io.StringIO()) as output:
+            exec(compile(source,'private-uninstall-workspace','exec'),{'__name__':'private_fixture'})
+        workspace=Path(output.getvalue().strip())
+        self.assertIn(str(workspace),events)
+        self.assertLess(events.index(str(workspace)),len(events)-1)
+        self.assertEqual(events[-1],str(workspace.parent))
+        self.assertIn(str(workspace.parent.parent),events)
+
+    def test_prepared_record_is_not_published_after_evidence_flush_failure(self):
+        folder=self.base/'transaction';folder.mkdir(mode=0o700)
+        result=self.shell('UNINSTALL_TRANSACTION_DIR='+shlex.quote(str(folder))+'''\nseal_uninstall_recovery_inputs() { return 43; }
+record_uninstall_stage prepared
+''')
+        self.assertEqual(result.returncode,43,result.stdout+result.stderr)
+        self.assertFalse((folder/'transaction.json').exists())
+
+    def test_signer_decoder_and_transaction_entries_are_durable_before_prepared(self):
+        directories=[self.base/name for name in ('transaction','signer','decoder')]
+        for folder in directories:
+            folder.mkdir(mode=0o700);(folder/'private-evidence').write_text('inert recovery evidence')
+            (folder/'private-evidence').chmod(0o600)
+        source=self.script.read_text().split("<<'PYSYNCUNINSTALL'\n",1)[1].split('\nPYSYNCUNINSTALL',1)[0]
+        events=[];real_sync=os.fsync
+        def sync(fd):events.append(os.readlink('/proc/self/fd/'+str(fd)));return real_sync(fd)
+        with patch('sys.argv',['private-inline',*map(str,directories)]),patch.object(os,'fsync',sync):
+            exec(compile(source,'private-uninstall-seal','exec'),{'__name__':'private_fixture'})
+        for folder in directories:
+            self.assertLess(events.index(str(folder/'private-evidence')),events.index(str(folder)))
+            self.assertIn(str(folder.parent),events[events.index(str(folder))+1:])
+
     def setUp(self):
         self.workspace = tempfile.TemporaryDirectory(prefix='sls-uninstall-offline-', dir='/run')
         self.addCleanup(self.workspace.cleanup)
@@ -53,12 +90,12 @@ class OfflineUninstaller(unittest.TestCase):
             'PhoneEventService.php': ROOT / 'slsmassnotifyserver/PhoneEventService.php',
             'AmiUserOwnership.php': ROOT / 'slsmassnotifyserver/AmiUserOwnership.php',
         }
-        for name in ('sls_install_guard', 'sls_install_idle', 'sls_audio_state', 'sls_config_crypto', 'sls_legacy_permissions'):
+        for name in ('sls_install_guard', 'sls_install_idle', 'sls_audio_state', 'sls_config_crypto', 'sls_legacy_permissions', 'sls_installer_recovery'):
             self.names['bin/sls_mass_notify/' + name + '.py'] = RUNTIME / (name + '.py')
         files = {name: path.read_bytes() for name, path in self.names.items()}
         # Only private channel/spool/module locations are adapted. The actual
         # authenticated idle checker, guard and all safety branches run intact.
-        self.channels = self.base / 'channels.txt'; self.channels.write_text('')
+        self.channels = self.base / 'channels.txt'; self.channels.write_text(''); self.channels.chmod(0o644)
         self.outgoing = self.base / 'outgoing'; self.outgoing.mkdir()
         self.spool_tmp = self.base / 'spool-tmp'; self.spool_tmp.mkdir()
         self.proc = self.base / 'stopped-proc'; self.proc.mkdir()
@@ -95,7 +132,7 @@ class OfflineUninstaller(unittest.TestCase):
             'bin/sls_mass_notify/sls_module_trust.py': '/usr/local/bin/sls_mass_notify/sls_module_trust.py',
             'bin/sls_mass_notify/sls_config_crypto.php': '/usr/local/bin/sls_mass_notify/sls_config_crypto.php',
             **{'bin/sls_mass_notify/' + name + '.py': '/usr/local/bin/sls_mass_notify/' + name + '.py'
-               for name in ('sls_install_guard', 'sls_install_idle', 'sls_audio_state', 'sls_config_crypto', 'sls_legacy_permissions')},
+               for name in ('sls_install_guard', 'sls_install_idle', 'sls_audio_state', 'sls_config_crypto', 'sls_legacy_permissions', 'sls_installer_recovery')},
         }.items():
             body = body.replace(path, str(self.installed / Path(name).name))
         body = body.replace(' /usr/local/bin/sls_mass_notify \\\n', ' ' + str(self.installed) + ' \\\n')
@@ -436,26 +473,59 @@ remove_runtime_files
                     self.assertEqual(path.read_bytes(), content)
                     self.assertEqual((path.stat().st_ino, path.stat().st_mode), (before.st_ino, before.st_mode))
 
+    def cron_backend(self, tables, mode='normal'):
+        """Only the crontab executable is private; native IPC locks stay real."""
+        fixture=self.base/'cron-backend';fixture.mkdir(mode=0o700)
+        for account,body in tables.items():(fixture/account).write_bytes(body)
+        (fixture/'mode').write_text(mode)
+        executable=fixture/'crontab'
+        executable.write_text('''#!/usr/bin/python3
+import json,sys
+from pathlib import Path
+folder=Path(__file__).parent
+user=sys.argv[2]; operation=sys.argv[3]
+assert sys.argv[1]=='-u' and user in ('root','asterisk') and operation in ('-l','-')
+mode=(folder/'mode').read_text(); table=folder/user
+with (folder/'calls').open('a') as stream:stream.write(json.dumps([user,operation])+'\\n')
+if operation=='-l':
+    if mode=='read-failure' and user=='asterisk':
+        print('temporary spool failure',file=sys.stderr);sys.exit(2)
+    if not table.exists():
+        print('no crontab for '+user,file=sys.stderr);sys.exit(1)
+    sys.stdout.buffer.write(table.read_bytes());sys.exit(0)
+body=sys.stdin.buffer.read()
+counter=folder/'writes';count=int(counter.read_text())+1 if counter.exists() else 1;counter.write_text(str(count))
+if mode=='second-write-failure' and user=='asterisk' or mode=='rollback-failure' and count>1:
+    print('fixture write failure',file=sys.stderr);sys.exit(2)
+table.write_bytes(body)
+''')
+        executable.chmod(0o700)
+        retained=self.base/'cron-helper';retained.mkdir(mode=0o700)
+        helper=retained/'sls_installer_recovery.py'
+        helper.write_text((RUNTIME/'sls_installer_recovery.py').read_text().replace("['/usr/bin/crontab',",'['+repr(str(executable))+','))
+        helper.chmod(0o700)
+        evidence=self.base/'cron-transaction';evidence.mkdir(mode=0o700)
+        return fixture,retained,evidence
+
+    def cron_shell(self,fixture,action='remove_cron'):
+        state,retained,evidence=fixture
+        return self.shell('RECOVERY_SIGNER_DIR='+shlex.quote(str(retained))+'\n'
+                          'UNINSTALL_TRANSACTION_DIR='+shlex.quote(str(evidence))+'\n'+action+'\n')
+
     def test_new_and_legacy_cron_jobs_removed_without_touching_other_jobs(self):
-        fixture = self.base / 'cron'; fixture.mkdir()
-        jobs = ['* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1',
-                '* * * * * /bin/bash /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh',
-                '* * * * * /usr/bin/php /usr/local/bin/sls_mass_notify/sls_mass_notify_schedule_worker.php',
-                '* * * * * /usr/bin/php /usr/local/bin/sls_mass_notify/sls_mass_notify_announcement_worker.php --reconcile',
-                '17 * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py update >/dev/null 2>&1',
-                '* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py weather >/dev/null 2>&1',
-                '* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py scheduling >/dev/null 2>&1',
-                '* * * * * /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_cron_runner.py announcement_reconcile >/dev/null 2>&1',
-                '0 4 * * * /usr/local/bin/independent-backup']
-        for user in ['root', 'asterisk']: (fixture / user).write_text('\n'.join(jobs) + '\n')
-        result = self.shell('''crontab() {
-  if [ "$3" = '-l' ]; then cat "$SLS_TEST_CRON/$2"; else cp -- "$3" "$SLS_TEST_CRON/$2"; fi
-}
-remove_cron
-''', env={'SLS_TEST_CRON': str(fixture)})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for user in ['root', 'asterisk']:
-            self.assertEqual((fixture / user).read_text(), '0 4 * * * /usr/local/bin/independent-backup\n')
+        vectors=json.loads((ROOT/'tools/fixtures/installer_cron_ownership.json').read_text())
+        tables={};expected={}
+        for account in ('root','asterisk'):
+            cases=[row for row in vectors if row['account']==account and row['classification']!='review']
+            tables[account]=('\n'.join(row['line'] for row in cases)+'\n').encode()
+            expected[account]=('\n'.join(row['line'] for row in cases if row['classification']=='unrelated')+'\n').encode()
+        fixture=self.cron_backend(tables)
+        result=self.cron_shell(fixture)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        for account in ('root','asterisk'):
+            self.assertEqual((fixture[0]/account).read_bytes(),expected[account])
+            self.assertEqual(next(fixture[2].glob('cron-removal.*')).joinpath(account+'.original').read_bytes(),tables[account])
+        self.assertEqual(self.cron_shell(fixture,'verify_removed_cron').returncode,0)
 
     def test_database_errors_do_not_look_like_absent_module_registration(self):
         result = self.shell('''module_registry_exists() { return 2; }
@@ -467,70 +537,44 @@ remove_module_registration
         self.assertNotIn('UNSAFE DELETE', result.stdout)
 
     def test_cron_read_failures_never_authorize_any_replacement(self):
-        result = self.shell('''crontab() {
-  if [ "$3" = '-l' ]; then
-    if [ "$2" = root ]; then printf '* * * * * /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1\\n'; return 0; fi
-    printf 'temporary spool failure\\n' >&2; return 2
-  fi
-  printf 'UNSAFE CRON REPLACEMENT\\n'
-}
-remove_cron
-''')
+        fixture=self.cron_backend({'root':b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh\n'},'read-failure')
+        result=self.cron_shell(fixture)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('could not be read', result.stdout)
-        self.assertNotIn('UNSAFE CRON REPLACEMENT', result.stdout)
+        self.assertIn('crontab operation failed',result.stderr)
+        self.assertFalse((fixture[0]/'writes').exists())
 
     def test_exact_absent_crontab_does_not_need_an_empty_replacement(self):
-        result = self.shell('''crontab() {
-  if [ "$3" = '-l' ]; then printf 'no crontab for %s\\n' "$2" >&2; return 1; fi
-  printf 'UNEXPECTED CRON REPLACEMENT\\n'; return 9
-}
-remove_cron
-verify_removed_cron
-''')
+        fixture=self.cron_backend({})
+        result=self.cron_shell(fixture,'remove_cron\nverify_removed_cron')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn('UNEXPECTED CRON REPLACEMENT', result.stdout)
+        self.assertFalse((fixture[0]/'writes').exists())
 
     def test_second_cron_write_failure_rolls_back_first_replacement(self):
-        fixture = self.base / 'cron-rollback'; fixture.mkdir()
-        original = '* * * * * /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1\n'
-        for user in ['root', 'asterisk']:
-            (fixture / user).write_text(original)
-        result = self.shell('''crontab() {
-  if [ "$3" = '-l' ]; then cat "$SLS_TEST_CRON/$2"; return 0; fi
-  if [ "$2" = asterisk ]; then return 2; fi
-  cp -- "$3" "$SLS_TEST_CRON/$2"
-}
-remove_cron
-''', env={'SLS_TEST_CRON': str(fixture)})
+        tables={'root':b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh\n',
+                'asterisk':b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_nws_poll.sh\n'}
+        fixture=self.cron_backend(tables,'second-write-failure')
+        result=self.cron_shell(fixture)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Earlier replacements were rolled back', result.stdout)
-        self.assertEqual((fixture / 'root').read_text(), original)
-        self.assertEqual((fixture / 'asterisk').read_text(), original)
+        self.assertIn('Earlier replacements were rolled back',result.stderr)
+        for user,body in tables.items():self.assertEqual((fixture[0]/user).read_bytes(),body)
 
     def test_cron_rollback_failure_preserves_recovery_workspace(self):
-        result = self.shell('''write_count=0
-crontab() {
-  if [ "$3" = '-l' ]; then printf '* * * * * /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1\\n'; return 0; fi
-  write_count=$((write_count + 1))
-  [ "$write_count" = 1 ] && return 0
-  return 2
-}
-remove_cron
-''')
+        tables={'root':b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh\n',
+                'asterisk':b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_nws_poll.sh\n'}
+        fixture=self.cron_backend(tables,'rollback-failure')
+        result=self.cron_shell(fixture)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('cron rollback was incomplete', result.stdout)
-        self.assertRegex(result.stdout, r'/tmp/slsmassnotifyserver-cron\.[A-Za-z0-9]+')
+        self.assertIn('Cron rollback was incomplete',result.stderr)
+        archive=next(fixture[2].glob('cron-removal.*'))
+        self.assertIn(str(archive),result.stderr)
+        for account,body in tables.items():self.assertEqual((archive/(account+'.original')).read_bytes(),body)
 
     def test_cron_verification_reads_long_output_without_sigpipe_false_negative(self):
-        result = self.shell('''crontab() {
-  printf '* * * * * /usr/local/bin/sls_mass_notify/sls_cron_runner.py maintenance >/dev/null 2>&1\\n'
-  for ((i=0; i<10000; i++)); do printf '0 4 * * * /usr/local/bin/unrelated-job-%d\\n' "$i"; done
-}
-verify_removed_cron
-''')
+        body=b'* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh\n'+b''.join(('0 4 * * * /usr/local/bin/unrelated-job-'+str(i)+'\n').encode() for i in range(10000))
+        fixture=self.cron_backend({'root':body})
+        result=self.cron_shell(fixture,'verify_removed_cron')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('scheduled job remains', result.stdout)
+        self.assertIn('scheduled job remains',result.stderr)
 
     def prepare_web_inventories(self):
         module = self.web / 'admin/modules/slsmassnotifyserver'

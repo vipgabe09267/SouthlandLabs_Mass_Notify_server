@@ -5,6 +5,8 @@ namespace SLS\MassNotify;
 if (!class_exists(PhpSecurityPolicy::class, false)) {
 final class PhpSecurityPolicy
 {
+    // FreePBX Cron's SemaphoreStore acquires and removes this native semaphore.
+    public const NATIVE_CRON_FUNCTIONS = ['sem_get', 'sem_acquire', 'sem_remove'];
     public static function evaluate(string $version, ?array $policy = null): array
     {
         if ($policy === null) {

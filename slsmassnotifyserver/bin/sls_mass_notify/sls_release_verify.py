@@ -24,7 +24,7 @@ def digest(path):
     return result.hexdigest()
 
 
-def verify(manifest, signature, installer, package, version, public_key=PUBLIC_KEY, *, trust_directory=trust.DIRECTORY, now=None):
+def verify(manifest, signature, installer, package, version, public_key=PUBLIC_KEY, *, trust_directory=trust.DIRECTORY, now=None, expected_tag=None):
     if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', version):
         raise ValueError('Invalid release version')
     if Path(manifest).stat().st_size > 16384 or Path(signature).stat().st_size != 64:
@@ -34,8 +34,10 @@ def verify(manifest, signature, installer, package, version, public_key=PUBLIC_K
     data = trust.authenticate_manifest(trust.bounded_read(manifest), trust.bounded_read(signature),
         Path(public_key).read_bytes(), trust_directory, now)
     expected_name = f'slsmassnotifyserver-{version}.tgz'
+    allowed_tags = (f'v{version}', f'slsmassnotifyserver-{version}') + (('V0.1.9-beta',) if version == '0.1.9-beta' else ())
     if not isinstance(data, dict) or data.get('schema') != 1 or data.get('version') != version \
-            or data.get('tag') not in (f'v{version}', f'slsmassnotifyserver-{version}') or data.get('package') != expected_name:
+            or data.get('tag') not in allowed_tags or (expected_tag is not None and data.get('tag') != expected_tag) \
+            or data.get('package') != expected_name:
         raise ValueError('Signed release identity does not match the requested version')
     for key, path in [('installer_sha256', installer), ('package_sha256', package)]:
         expected = data.get(key)
@@ -48,9 +50,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('manifest', 'signature', 'installer', 'package', 'version'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--tag', help='Require this exact event/download tag in the signed manifest')
     args = parser.parse_args()
     try:
-        verify(args.manifest, args.signature, args.installer, args.package, args.version)
+        verify(args.manifest, args.signature, args.installer, args.package, args.version, expected_tag=args.tag)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         parser.exit(1, 'Release verification failed: ' + str(error) + '\n')
     print('Publisher signature and installer/package hashes verified.')

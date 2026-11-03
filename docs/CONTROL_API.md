@@ -1,7 +1,8 @@
 # SLL Mass Notify Server Control API
 
-This document describes the published `0.1.9-beta` API. Its changes are additive
-to the existing routes and authentication. Notification payload schema **1** and
+This document describes the unpublished `0.1.9-beta` candidate API. The latest
+available published release is `0.1.8-beta`; candidate changes remain under
+qualification. Its changes are additive to the existing routes and authentication. Notification payload schema **1** and
 desktop SSE protocol **2** are retained. Features marked **Labs** in the module
 need acceptance with the actual devices, providers and desktop client before
 operational use.
@@ -581,7 +582,7 @@ Peer traffic is a separate disabled interface requiring explicitly provisioned m
 
 ## Runtime admission and one-way delivery
 
-An administrator can pause new SLL notification admission with `sudo slsconsole stop`. An announcement submitted while paused returns `success: false`, `error_code: runtime_stopped` and `delivery_started: false`; resume with `sudo slsconsole start`. Receipt ingestion, status and administrative recovery remain available. Pausing never extends a queued event's original expiry.
+An administrator can pause new SLL notification admission with `sudo slsconsole stop`. FreePBX Module Admin disable changes module registration and is not a verified runtime pause control. An announcement submitted while paused returns `success: false`, `error_code: runtime_stopped` and `delivery_started: false`; resume with `sudo slsconsole start`. Receipt ingestion, status and administrative recovery remain available. Pausing never extends a queued event's original expiry.
 
 Webhook receipts retain `http_status` and a safe `failure_code` when available. `accepted` means the webhook service accepted the HTTP request, not that a person read it. `uncertain` with `needs_attention: false` means response confirmation is unavailable for this one-way submission. It must not be replayed automatically. A definite transmission failure or HTTP rejection remains a failure; uncertainty in other channels retains its existing meaning. Historical receipts are preserved, with display-only projections clearing obsolete webhook dashboard faults.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Private lock/quota/process tests; no installed Piper, PBX or notifications."""
 import json
+import builtins
 import fcntl
 import os
 from pathlib import Path
@@ -11,7 +12,8 @@ import sys
 import tempfile
 import unittest
 import threading
-from contextlib import redirect_stderr
+from types import SimpleNamespace
+from contextlib import redirect_stderr, redirect_stdout
 import io
 from unittest import mock
 
@@ -22,6 +24,57 @@ import sls_piper_worker as worker
 
 
 class SpeechTests(unittest.TestCase):
+    def test_root_transition_retains_telemetry_opt_out_without_parent_secrets(self):
+        class Relayed(Exception): pass
+        with mock.patch.object(speech.os, 'geteuid', return_value=0), \
+             mock.patch.object(speech.pwd, 'getpwnam', return_value=SimpleNamespace(pw_uid=1001)), \
+             mock.patch.object(speech.os, 'execve', side_effect=Relayed) as relay, \
+             mock.patch.dict(os.environ, {'ORT_DISABLE_TELEMETRY': '1', 'GITHUB_TOKEN': 'private-fixture'}), \
+             mock.patch.object(sys, 'argv', ['admission', '--reserve-media-bytes', '1']), self.assertRaises(Relayed):
+            speech.main()
+        self.assertEqual(relay.call_args.args[2]['ORT_DISABLE_TELEMETRY'], '1')
+        self.assertNotIn('GITHUB_TOKEN', relay.call_args.args[2])
+
+    def test_admitted_child_always_receives_telemetry_opt_out_in_clean_environment(self):
+        code = 'import json,os;print(json.dumps({"telemetry":os.environ.get("ORT_DISABLE_TELEMETRY"),"secret":os.environ.get("GITHUB_TOKEN")}))'
+        for initial in ('1', '0', ''):
+            with self.subTest(initial=initial), mock.patch.dict(os.environ, {'ORT_DISABLE_TELEMETRY': initial, 'GITHUB_TOKEN': 'private-fixture'}), \
+                 redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(speech.launch([sys.executable, '-c', code], 3), 0)
+            self.assertEqual(json.loads(output.getvalue()), {'telemetry': '1', 'secret': None})
+
+    def test_worker_disables_telemetry_before_native_import_and_session_creation(self):
+        events = []
+        class Options:
+            def add_session_config_entry(self, *_args): pass
+        def session(*_args, **_kwargs):
+            events.append('session')
+            self.assertEqual(events, ['import', 'disable', 'session'])
+            return object()
+        runtime = SimpleNamespace(SessionOptions=Options, ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=1),
+                                  disable_telemetry_events=lambda: events.append('disable'), InferenceSession=session)
+        piper = SimpleNamespace(PiperVoice=lambda **_kwargs: SimpleNamespace(synthesize=lambda *_args: []),
+                                SynthesisConfig=lambda **_kwargs: object())
+        config = SimpleNamespace(PiperConfig=SimpleNamespace(from_dict=lambda _value: SimpleNamespace(num_speakers=1, sample_rate=16000)))
+        original_import = builtins.__import__
+        def native_import(name, *args, **kwargs):
+            if name == 'onnxruntime':
+                self.assertEqual(os.environ.get('ORT_DISABLE_TELEMETRY'), '1', 'Opt-out must precede native module initialization')
+                events.append('import')
+                return runtime
+            if name == 'piper': return piper
+            if name == 'piper.config': return config
+            return original_import(name, *args, **kwargs)
+        model = self.root / 'private-voice.onnx'
+        Path(str(model) + '.json').write_text('{}')
+        with (self.root / 'private.wav').open('w+b') as output, \
+             mock.patch.dict(os.environ, {'ORT_DISABLE_TELEMETRY': '0'}), \
+             mock.patch.object(builtins, '__import__', side_effect=native_import), \
+             mock.patch.object(sys, 'stdin', io.StringIO('Private fixture.\n')), \
+             mock.patch.object(sys, 'argv', ['worker', '--model', str(model), '--output-file', '/proc/self/fd/' + str(output.fileno())]):
+            self.assertEqual(worker.main(), 0)
+        self.assertEqual(events, ['import', 'disable', 'session'])
+
     def test_native_session_has_explicit_bounded_threads_without_spinning(self):
         class Options:
             def __init__(self): self.entries = {}

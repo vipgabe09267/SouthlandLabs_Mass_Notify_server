@@ -133,8 +133,15 @@ def validate_tree(path, synchronize=False):
     finally: os.close(parent)
 
 
+def runtime_environment():
+    # ONNX1.30 reads this at native initialization, before the Python API can
+    # suppress events. Apply it to validation and the private builder alike.
+    return {**os.environ, 'ORT_DISABLE_TELEMETRY': '1'}
+
+
 def checked(command, timeout=30):
-    result = subprocess.run(command, stdin=subprocess.DEVNULL, timeout=timeout, check=False)
+    result = subprocess.run(command, stdin=subprocess.DEVNULL, timeout=timeout, check=False,
+                            env=runtime_environment())
     if result.returncode:
         raise EnvironmentError('Piper replacement command failed (exit %d): %s. Review the preceding installer output.'
                                % (result.returncode, Path(command[0]).name))
@@ -279,7 +286,8 @@ def main():
                 command = ['/usr/bin/unshare', '--mount', '--propagation', 'private', '/usr/bin/python3', '-I',
                            str(Path(__file__).resolve()), '--build-private', str(stage)]
                 if args.wheelhouse is not None: command += ['--wheelhouse', str(args.wheelhouse)]
-                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, pass_fds=(lock,), start_new_session=True)
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, pass_fds=(lock,), start_new_session=True,
+                                           env=runtime_environment())
                 try:
                     process.wait(timeout=600)
                 except BaseException:

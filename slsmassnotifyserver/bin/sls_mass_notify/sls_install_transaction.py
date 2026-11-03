@@ -35,6 +35,11 @@ STAGES = {'initialization', 'hardware admission', 'platform validation', 'releas
           'post-install verification', 'interrupted installation recovery'}
 NAME = re.compile(r'transaction-[0-9a-f]{24}\Z')
 LIMIT = 65536
+HISTORY_LIMIT = 4 * 1024 * 1024
+HISTORY_CLASSIFICATION = 'administrator_accepted_unverified_history_loss'
+HISTORY_REVIEW = 'history-loss-review.json'
+HISTORY_APPROVAL = 'history-loss-approval.json'
+SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 BOOTSTRAP_FILES = {
     'sls_module_trust.py', 'sls_release_trust.py', 'sls_privileged_install.py',
     'sls_installer_recovery.py', 'sls_install_transaction.py',
@@ -115,9 +120,9 @@ def read(path, bound=LIMIT, *, private=True):
     finally: os.close(parent)
 
 
-def atomic(path, value):
+def atomic(path, value, bound=LIMIT):
     body = (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode()
-    if len(body) > LIMIT: raise TransactionError('Installer transaction metadata exceeds its bound')
+    if len(body) > bound: raise TransactionError('Installer transaction metadata exceeds its bound')
     parent = directory(path.parent)
     temporary = '.new-' + os.urandom(12).hex()
     try:
@@ -154,7 +159,17 @@ def sync_recovery_inputs(transaction, recovery, config_snapshot='', pending_snap
             recovery_fd = directory(recovery)
             if stat.S_IMODE(os.fstat(recovery_fd).st_mode) != 0o700:
                 raise TransactionError('Operational recovery input directory must remain root-private')
-            inputs.extend((recovery_fd, name, 1048576, True) for name in ('idle-before.json', 'module-registration.json'))
+            # A complete allowed phone baseline can contain 10,000 record
+            # hashes plus closure times. Match the idle reader's 4 MiB bound;
+            # scoped native registration retains its separate 1 MiB limit.
+            inputs.append((recovery_fd, 'idle-before.json', HISTORY_LIMIT, True))
+            inputs.append((recovery_fd, 'module-registration.json', 1048576, True))
+            try:
+                os.stat('history-evidence.json', dir_fd=recovery_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass  # Older transactions can legitimately have hash-only evidence.
+            else:
+                inputs.append((recovery_fd, 'history-evidence.json', 16 * 1024 * 1024, True))
         def identity(meta):
             return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
                     meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
@@ -321,6 +336,8 @@ def clean_completed_evidence(value):
     # A durable terminal state already permits removal. A kill between commit
     # and normal shell cleanup must not accumulate complete package snapshots.
     # Never follow saved settings paths outside this protected generation.
+    if preserve_completed_evidence(value):
+        return
     path = Path(value['directory'])
     handle = directory(path)
     try:
@@ -332,7 +349,7 @@ def clean_completed_evidence(value):
             names = ['transaction.json']
         fixed = {'transaction.json', 'installer.sh', 'package.tgz', 'release-manifest.json',
                  'release-manifest.sig', 'bootstrap', 'approval', 'config.snapshot', 'pending.snapshot',
-                 'history-evidence.json'}
+                 'history-evidence.json', HISTORY_REVIEW}
         if any(name not in fixed and not re.fullmatch(r'(?:sls-mass-notify-recovery|recovery-carrier)\.[A-Za-z0-9]{6,12}', name) for name in names):
             raise TransactionError('A completed installer generation has unknown evidence; preserve it for administrator review: ' + str(path))
         for name in names:
@@ -353,7 +370,8 @@ def begin(root):
         completed = sorted((state(path) for path in root.iterdir() if NAME.fullmatch(path.name)), key=lambda row: row['updated_at'])
         for value in completed:
             clean_completed_evidence(value)
-        for value in completed[:-20]:
+        ordinary = [value for value in completed if not preserve_completed_evidence(value)]
+        for value in ordinary[:-20]:
             # Every entry was validated by pending(); a terminal record is a
             # completion marker, never a rollback authority. Root-only parents
             # keep the cleanup separate from public FreePBX module paths.
@@ -372,7 +390,9 @@ def begin(root):
     return path
 
 
-def update(path, phase, settings, stage=None):
+def update(path, phase, settings, stage=None, *, preserve_recovery_evidence=False):
+    if type(preserve_recovery_evidence) is not bool or preserve_recovery_evidence and phase != 'rolled_back':
+        raise TransactionError('Original recovery evidence retention applies only to verified rollback completion')
     value = state(path)
     if value['phase'] in TERMINAL and phase != value['phase'] and not (value['phase']=='committed' and phase=='recovery_failed'):
         raise TransactionError('A finished transaction cannot return to an unfinished state')
@@ -391,6 +411,14 @@ def update(path, phase, settings, stage=None):
                 raise TransactionError('Prepared evidence directory does not belong to this transaction')
             checked_directory = directory(path / name)
             os.close(checked_directory)
+    if preserve_recovery_evidence and not _recovery_retention(value):
+        if value['phase'] in TERMINAL:
+            raise TransactionError('Atomic manual recovery completion requires an unfinished transaction')
+        authenticate(path)
+        value['recovery_evidence'] = {
+            'schema': 1, 'reason': 'Manual authenticated interrupted installation recovery',
+            'retained_at': max(0, int(time.time())),
+            'original_artifacts': _original_artifact_binding(path), 'original_evidence_preserved': True}
     value['settings'] = dict(settings)
     value['phase'] = phase; value['updated_at'] = max(int(time.time()),value['created_at'],value['updated_at'])
     if stage is not None:
@@ -451,15 +479,369 @@ def authenticate(path):
     return value
 
 
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+
+
+def _history_context(path, *, unfinished=False, authenticate_original=True):
+    """Bind decisions to retained signed originals, never a new live baseline."""
+    path = Path(path)
+    value = authenticate(path) if authenticate_original else state(path)
+    if unfinished and value['phase'] not in ('prepared', 'mutating', 'recovering', 'recovery_failed'):
+        raise TransactionError('History review requires an unfinished authenticated transaction')
+    recovery = Path(value['settings'].get('RECOVERY_DIR', ''))
+    if recovery.parent != path or not re.fullmatch(r'sls-mass-notify-recovery\.[A-Za-z0-9]{6}', recovery.name):
+        raise TransactionError('Original phone-history baseline is outside this transaction')
+    baseline = recovery / 'idle-before.json'
+    raw = read(baseline, HISTORY_LIMIT)
+    before = decode_json(raw)
+    known = before.get('phone_history') if isinstance(before, dict) else None
+    if (type(before) is not dict or type(before.get('schema')) is not int or before['schema'] != 1 or before.get('ok') is not True
+            or not isinstance(known, dict) or len(known) > 10000
+            or type(before.get('closed_phone_batches')) is not int
+            or before['closed_phone_batches'] != len(known)
+            or any(not isinstance(key, str) or not SHA256.fullmatch(key)
+                   or not isinstance(digest, str) or not SHA256.fullmatch(digest)
+                   for key, digest in known.items())):
+        raise TransactionError('Original phone-history baseline is invalid')
+    manifest_raw = read(path / 'release-manifest.json', 16384)
+    manifest = decode_json(manifest_raw)
+    if not authenticate_original:
+        # Retention of a completed forensic archive grants no execution or
+        # history-loss authority. Key retirement/metadata expiry must neither
+        # delete this evidence nor prevent installation of a newer release.
+        # Still require unchanged private originals bound by its prior receipt.
+        if not isinstance(manifest, dict):
+            raise TransactionError('Retained original release manifest is invalid')
+        for name, field, bound in (('installer.sh', 'installer_sha256', 2097152),
+                                   ('package.tgz', 'package_sha256', 54525952)):
+            if hashlib.sha256(read(path / name, bound)).hexdigest() != manifest.get(field):
+                raise TransactionError('Retained original recovery artifact changed: ' + name)
+    identity = {
+        'manifest_sha256': hashlib.sha256(manifest_raw).hexdigest(),
+        'signature_sha256': hashlib.sha256(read(path / 'release-manifest.sig', 64)).hexdigest(),
+        'installer_sha256': manifest['installer_sha256'],
+        'package_sha256': manifest['package_sha256'],
+        'version': manifest.get('version'), 'package': manifest.get('package'),
+        'tag': manifest.get('tag'),
+    }
+    binding = {'transaction': str(path), 'baseline_path': str(baseline),
+               'baseline_sha256': hashlib.sha256(raw).hexdigest(), 'original_release': identity}
+    return value, before, known, binding
+
+
+def _hash_map(value):
+    return (isinstance(value, dict) and len(value) <= 10000
+            and all(isinstance(key, str) and SHA256.fullmatch(key)
+                    and isinstance(digest, str) and SHA256.fullmatch(digest)
+                    for key, digest in value.items()))
+
+
+def _history_report(path, report, *, unfinished=False, recovery_review=False):
+    value, before, known, binding = _history_context(path, unfinished=unfinished)
+    names = ('unchanged_phone_history', 'verified_expired_phone_history',
+             'missing_unexpired_phone_history', 'missing_unknown_phone_history',
+             'voicemail_dependency_phone_history')
+    if (type(report) is not dict or type(report.get('schema')) is not int or report['schema'] != 1
+            or report.get('baseline_sha256') != binding['baseline_sha256']
+            or type(report.get('baseline_phone_batches')) is not int
+            or report['baseline_phone_batches'] != len(known)
+            or type(report.get('live_closed_phone_batches')) is not int
+            or not _hash_map(report.get('live_phone_history'))
+            or report['live_closed_phone_batches'] != len(report['live_phone_history'])
+            or type(report.get('missing_phone_ledger')) is not bool
+            or type(report.get('safe_to_approve_unknown_loss')) is not bool
+            or any(not _hash_map(report.get(name)) for name in names)
+            or not isinstance(report.get('modified_phone_history'), dict)
+            or not isinstance(report.get('pending_phone_reconciliation'), list)
+            or len(report['pending_phone_reconciliation']) > 10000
+            or any(not isinstance(key, str) or not SHA256.fullmatch(key)
+                   for key in report['pending_phone_reconciliation'])):
+        raise TransactionError('History-review report is malformed or belongs to another baseline')
+    live = report['live_phone_history']
+    classified = set()
+    for name in (*names, 'modified_phone_history'):
+        for key, digest in report[name].items():
+            if key not in known or key in classified:
+                raise TransactionError('History-review classifications overlap or name unrelated records')
+            classified.add(key)
+            if name == 'modified_phone_history':
+                if (not isinstance(digest, dict) or set(digest) != {'expected_sha256', 'observed_sha256'}
+                        or digest['expected_sha256'] != known[key]
+                        or digest['observed_sha256'] != live.get(key)
+                        or digest['observed_sha256'] == known[key]):
+                    raise TransactionError('History-review modification facts are invalid')
+            elif digest != known[key] or (name == 'unchanged_phone_history' and live.get(key) != digest) \
+                    or (name != 'unchanged_phone_history' and key in live):
+                raise TransactionError('History-review facts do not match the original record hashes')
+    if classified != set(known):
+        raise TransactionError('History review must classify every original record')
+    original_pending = before.get('pending_phone_reconciliation', [])
+    if (not isinstance(original_pending, list) or len(original_pending) > 10000
+            or any(not isinstance(key, str) or not SHA256.fullmatch(key) for key in original_pending)
+            or set(original_pending) - set(live) - set(report['pending_phone_reconciliation'])):
+        raise TransactionError('Original collector reconciliation cannot be omitted from history review')
+    reconciliation_pending = bool(report['pending_phone_reconciliation'] or report['missing_phone_ledger'])
+    if (report['modified_phone_history'] or report['missing_unexpired_phone_history']
+            or report['voicemail_dependency_phone_history']
+            or reconciliation_pending and (not recovery_review or report['missing_unknown_phone_history'])):
+        raise TransactionError('History-loss approval cannot waive changed, unexpired, voicemail-dependent, pending or missing-ledger safety checks')
+    safe = bool(report['missing_unknown_phone_history'])
+    if report['safe_to_approve_unknown_loss'] != safe:
+        raise TransactionError('History-review approval eligibility does not match its facts')
+    stable = {'schema': 1, 'kind': 'sll-installer-history-loss-review', **binding,
+              'baseline_phone_batches': len(known),
+              'unchanged_phone_history': report['unchanged_phone_history'],
+              'verified_expired_phone_history': report['verified_expired_phone_history'],
+              'missing_unknown_phone_history': report['missing_unknown_phone_history'],
+              'missing_history_verified_expired': False}
+    return value, stable
+
+
+def history_review(path, report):
+    """Prepare a root-private review; this grants no permission to lose history."""
+    _, stable = _history_report(path, report, unfinished=True, recovery_review=True)
+    summary = {'baseline_phone_batches': stable['baseline_phone_batches'],
+               'unchanged_baseline_phone_batches': len(stable['unchanged_phone_history']),
+               'verified_expired_phone_batches': len(stable['verified_expired_phone_history']),
+               'unknown_missing_phone_batches': len(stable['missing_unknown_phone_history'])}
+    if not stable['missing_unknown_phone_history']:
+        # A no-loss preflight may precede collector reconciliation or restoration
+        # of a fresh install's original absence. This grants no loss exception;
+        # actual approval and final strict inspection still reject these states.
+        return {'ok': True, 'review_required': False, 'summary': summary,
+                'recovery_verification_deferred': bool(report['pending_phone_reconciliation'] or report['missing_phone_ledger']),
+                'pending_phone_reconciliation': report['pending_phone_reconciliation'],
+                'missing_phone_ledger': report['missing_phone_ledger']}
+    challenge = hashlib.sha256(_canonical(stable)).hexdigest()
+    target = Path(path) / HISTORY_REVIEW
+    document = {**stable, 'review_sha256': challenge}
+    try:
+        previous = decode_json(read(target, HISTORY_LIMIT))
+    except FileNotFoundError:
+        previous = None
+    if previous != document:
+        # An accepted review is immutable. A changed live set needs a separate
+        # administrator investigation, never replacement of its approved facts.
+        if (Path(path) / HISTORY_APPROVAL).exists() or (Path(path) / HISTORY_APPROVAL).is_symlink():
+            raise TransactionError('An approved history review cannot be replaced; preserve it for administrator review')
+        atomic(target, document, HISTORY_LIMIT)
+    return {'ok': True, 'review_required': True, 'review_sha256': challenge,
+            'review_path': str(target), 'summary': summary}
+
+
+def _review_document(path, *, authenticate_original=True):
+    _, _, known, binding = _history_context(path, authenticate_original=authenticate_original)
+    review = decode_json(read(Path(path) / HISTORY_REVIEW, HISTORY_LIMIT))
+    fields = {'schema', 'kind', *binding, 'baseline_phone_batches', 'unchanged_phone_history',
+              'verified_expired_phone_history', 'missing_unknown_phone_history',
+              'missing_history_verified_expired', 'review_sha256'}
+    if (type(review) is not dict or set(review) != fields or type(review.get('schema')) is not int
+            or review['schema'] != 1 or review.get('kind') != 'sll-installer-history-loss-review'
+            or any(review.get(key) != item for key, item in binding.items())
+            or type(review.get('baseline_phone_batches')) is not int
+            or review['baseline_phone_batches'] != len(known)
+            or review.get('missing_history_verified_expired') is not False
+            or not isinstance(review.get('review_sha256'), str) or not SHA256.fullmatch(review['review_sha256'])):
+        raise TransactionError('Protected history review does not match this authenticated transaction')
+    classified = set()
+    for name in ('unchanged_phone_history', 'verified_expired_phone_history', 'missing_unknown_phone_history'):
+        if not _hash_map(review[name]):
+            raise TransactionError('Protected history review has invalid record hashes')
+        for key, digest in review[name].items():
+            if key not in known or known[key] != digest or key in classified:
+                raise TransactionError('Protected history review includes unrelated or duplicate records')
+            classified.add(key)
+    if classified != set(known) or not review['missing_unknown_phone_history']:
+        raise TransactionError('Protected history review does not account for its original missing records')
+    stable = {key: item for key, item in review.items() if key != 'review_sha256'}
+    if hashlib.sha256(_canonical(stable)).hexdigest() != review['review_sha256']:
+        raise TransactionError('Protected history review challenge has changed')
+    return review
+
+
+def _approval_document(path, *, authenticate_original=True):
+    value = state(Path(path))
+    review = _review_document(path, authenticate_original=authenticate_original)
+    receipt_raw = read(Path(path) / HISTORY_APPROVAL, HISTORY_LIMIT)
+    receipt = decode_json(receipt_raw)
+    fields = {'schema', 'kind', 'classification', 'transaction', 'baseline_path', 'baseline_sha256',
+              'original_release', 'review_sha256', 'approved_unknown_phone_history', 'approved_at',
+              'operator', 'reason', 'missing_history_verified_expired'}
+    if (type(receipt) is not dict or set(receipt) != fields or type(receipt.get('schema')) is not int
+            or receipt['schema'] != 1 or receipt.get('kind') != 'sll-installer-history-loss-approval'
+            or receipt.get('classification') != HISTORY_CLASSIFICATION
+            or receipt.get('missing_history_verified_expired') is not False
+            or type(receipt.get('approved_at')) is not int or not 0 <= receipt['approved_at'] <= 2 ** 63 - 1
+            or any(receipt.get(key) != review.get(key) for key in (
+                'transaction', 'baseline_path', 'baseline_sha256', 'original_release', 'review_sha256'))
+            or receipt.get('approved_unknown_phone_history') != review['missing_unknown_phone_history']):
+        raise TransactionError('Protected history-loss approval differs from its exact original review')
+    _approval_text(receipt.get('operator'), 'operator', 256)
+    _approval_text(receipt.get('reason'), 'reason', 2048)
+    summary = value.get('history_loss')
+    expected = {'classification': HISTORY_CLASSIFICATION,
+                'accepted_missing_phone_batches': len(receipt['approved_unknown_phone_history']),
+                'approval_sha256': hashlib.sha256(receipt_raw).hexdigest(),
+                'review_sha256': review['review_sha256'], 'original_evidence_preserved': True}
+    if summary is not None and summary != expected:
+        raise TransactionError('History-loss receipt differs from its durable transaction summary')
+    return receipt, expected
+
+
+def _approval_text(value, name, bound):
+    try:
+        valid = (isinstance(value, str) and bool(value.strip()) and value == value.strip()
+                 and len(value.encode('utf-8')) <= bound
+                 and not any(ord(character) < 32 or ord(character) == 127 for character in value))
+    except UnicodeError:
+        valid = False
+    if not valid:
+        raise TransactionError('History-loss approval requires a bounded, single-line administrator ' + name)
+    return value
+
+
+def approve_history_loss(path, report, confirmation, operator, reason):
+    """Separate, explicit acceptance of unknown loss; never call it expiry."""
+    value, stable = _history_report(path, report, unfinished=True)
+    review = _review_document(path)
+    if (not isinstance(confirmation, str) or not SHA256.fullmatch(confirmation)
+            or confirmation != review['review_sha256']
+            or stable != {key: item for key, item in review.items() if key != 'review_sha256'}):
+        raise TransactionError('Explicit approval must match the saved review and the current exact missing history set')
+    operator = _approval_text(operator, 'operator', 256)
+    reason = _approval_text(reason, 'reason', 2048)
+    target = Path(path) / HISTORY_APPROVAL
+    if target.exists() or target.is_symlink():
+        receipt, summary = _approval_document(path)
+        if receipt['operator'] != operator or receipt['reason'] != reason:
+            raise TransactionError('Existing administrator history-loss approval cannot be replaced')
+    else:
+        receipt = {'schema': 1, 'kind': 'sll-installer-history-loss-approval',
+                   'classification': HISTORY_CLASSIFICATION,
+                   **{key: review[key] for key in ('transaction', 'baseline_path', 'baseline_sha256', 'original_release', 'review_sha256')},
+                   'approved_unknown_phone_history': review['missing_unknown_phone_history'],
+                   'approved_at': max(0, int(time.time())), 'operator': operator, 'reason': reason,
+                   'missing_history_verified_expired': False}
+        atomic(target, receipt, HISTORY_LIMIT)
+        receipt, summary = _approval_document(path)
+    # The receipt is fsynced first. Its mere presence forbids ordinary cleanup
+    # even if a crash occurs before this small journal annotation is durable.
+    value['history_loss'] = summary
+    atomic(Path(path) / 'transaction.json', value)
+    return receipt
+
+
+def load_history_loss_approval(receipt_path, baseline_path, current_report):
+    """Return only unknown missing hashes covered by this explicit decision."""
+    receipt_path = Path(receipt_path)
+    if receipt_path.name != HISTORY_APPROVAL:
+        raise TransactionError('Use the protected approval retained in the exact installer transaction')
+    path = receipt_path.parent
+    receipt, _ = _approval_document(path)
+    if Path(baseline_path) != Path(receipt['baseline_path']):
+        raise TransactionError('History-loss approval names another original baseline')
+    _, stable = _history_report(path, current_report)
+    unknown = stable['missing_unknown_phone_history']
+    accepted = receipt['approved_unknown_phone_history']
+    expired = stable['verified_expired_phone_history']
+    if (stable['baseline_sha256'] != receipt['baseline_sha256']
+            or any(accepted.get(key) != digest for key, digest in unknown.items())
+            or any(key not in unknown and expired.get(key) != digest for key, digest in accepted.items())):
+        raise TransactionError('History-loss approval does not cover the current exact unknown missing records')
+    # A subsequently found genuine backup can prove some originally unknown
+    # rows expired. It can only narrow the loss exception. New missing rows,
+    # reappearing rows, changed rows and known unexpired loss still fail.
+    return dict(unknown)
+
+
+def _original_artifact_binding(path):
+    """Passive integrity only; never authorizes executing a retained program."""
+    path = Path(path)
+    raw = read(path / 'release-manifest.json', 16384)
+    manifest = decode_json(raw)
+    if not isinstance(manifest, dict):
+        raise TransactionError('Retained recovery manifest is invalid')
+    signature = read(path / 'release-manifest.sig', 64)
+    if len(signature) != 64:
+        raise TransactionError('Retained recovery signature is incomplete')
+    binding = {'manifest_sha256': hashlib.sha256(raw).hexdigest(),
+               'signature_sha256': hashlib.sha256(signature).hexdigest()}
+    for name, field, bound in (('installer.sh', 'installer_sha256', 2097152),
+                               ('package.tgz', 'package_sha256', 54525952)):
+        digest = hashlib.sha256(read(path / name, bound)).hexdigest()
+        if digest != manifest.get(field):
+            raise TransactionError('Retained original recovery artifact changed: ' + name)
+        binding[field] = digest
+    return binding
+
+
+def _recovery_retention(value):
+    marker = value.get('recovery_evidence')
+    if marker is None:
+        return False
+    if (type(marker) is not dict or set(marker) != {
+            'schema', 'reason', 'retained_at', 'original_artifacts', 'original_evidence_preserved'}
+            or type(marker.get('schema')) is not int or marker['schema'] != 1
+            or type(marker.get('retained_at')) is not int or not 0 <= marker['retained_at'] <= 2 ** 63 - 1
+            or marker.get('original_evidence_preserved') is not True
+            or marker.get('original_artifacts') != _original_artifact_binding(Path(value['directory']))):
+        raise TransactionError('Manual recovery evidence-retention marker or original artifacts changed')
+    _approval_text(marker.get('reason'), 'retention reason', 256)
+    return True
+
+
+def retain_recovery_evidence(path, reason='Manual authenticated interrupted installation recovery'):
+    """Keep a manual recovery's originals; this marker grants no execution."""
+    path = Path(path)
+    value = state(path)
+    if value['phase'] != 'rolled_back':
+        raise TransactionError('Manual recovery evidence can be retained only after durable verified rollback')
+    reason = _approval_text(reason, 'retention reason', 256)
+    if _recovery_retention(value):
+        if value['recovery_evidence']['reason'] != reason:
+            raise TransactionError('Existing manual recovery retention facts cannot be replaced')
+        return value['recovery_evidence']
+    authenticate(path)
+    marker = {'schema': 1, 'reason': reason, 'retained_at': max(0, int(time.time())),
+              'original_artifacts': _original_artifact_binding(path), 'original_evidence_preserved': True}
+    value['recovery_evidence'] = marker
+    value['updated_at'] = max(value['updated_at'], marker['retained_at'])
+    atomic(path / 'transaction.json', value)
+    return marker
+
+
+def preserve_completed_evidence(value):
+    """Manual recoveries and accepted historical losses keep every original."""
+    path = Path(value['directory'])
+    manual_recovery = _recovery_retention(value)
+    target = path / HISTORY_APPROVAL
+    if not target.exists() and not target.is_symlink():
+        if value.get('history_loss') is not None:
+            raise TransactionError('History-loss transaction lost its receipt; preserve all remaining evidence')
+        return manual_recovery
+    # Any unreadable/tampered receipt is an error, never permission to delete.
+    _approval_document(path, authenticate_original=False)
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--transaction', type=Path)
     parser.add_argument('--phase', choices=sorted(PHASES))
     parser.add_argument('--stage', choices=sorted(STAGES))
-    parser.add_argument('action', choices=('pending', 'begin', 'update', 'stage', 'authenticate', 'values'))
+    parser.add_argument('--confirmation')
+    parser.add_argument('--operator')
+    parser.add_argument('--reason')
+    parser.add_argument('--preserve-recovery-evidence', action='store_true')
+    parser.add_argument('action', choices=('pending', 'begin', 'update', 'stage', 'authenticate', 'values',
+                                         'history-review', 'approve-history-loss', 'history-approval', 'preserve-evidence',
+                                         'retain-recovery-evidence'))
     args = parser.parse_args()
     if os.geteuid() != 0: raise TransactionError('Installer transaction inspection requires root')
+    if args.preserve_recovery_evidence and (args.action != 'update' or args.phase != 'rolled_back'):
+        raise TransactionError('Recovery evidence retention requires a rolled_back update')
     if args.action == 'pending':
         records = pending(args.root)
         print(json.dumps({'ok': not records, 'unfinished': records}))
@@ -467,12 +849,37 @@ def main():
     if args.action == 'begin': print(begin(args.root)); return 0
     if args.transaction is None: parser.error('--transaction is required')
     if args.transaction.parent != args.root: raise TransactionError('Transaction must belong to its protected evidence root')
-    if args.action == 'update':
+    if args.action in ('history-review', 'approve-history-loss', 'history-approval'):
+        raw = sys.stdin.buffer.read(HISTORY_LIMIT + 1)
+        if len(raw) > HISTORY_LIMIT:
+            raise TransactionError('History-review report exceeds its bounded size')
+        report = decode_json(raw)
+        if args.action == 'history-review':
+            result = history_review(args.transaction, report)
+        elif args.action == 'approve-history-loss':
+            if args.confirmation is None or args.operator is None or args.reason is None:
+                parser.error('Approval requires --confirmation, --operator and --reason')
+            result = approve_history_loss(args.transaction, report, args.confirmation, args.operator, args.reason)
+        else:
+            baseline = _history_context(args.transaction)[3]['baseline_path']
+            approved = load_history_loss_approval(args.transaction / HISTORY_APPROVAL, baseline, report)
+            result = {'ok': True, 'classification': HISTORY_CLASSIFICATION,
+                      'accepted_missing_phone_batches': len(approved), 'missing_history_verified_expired': False}
+        print(json.dumps(result, sort_keys=True))
+    elif args.action == 'retain-recovery-evidence':
+        options = {'reason': args.reason} if args.reason is not None else {}
+        print(json.dumps(retain_recovery_evidence(args.transaction, **options), sort_keys=True))
+    elif args.action == 'preserve-evidence':
+        preserved = preserve_completed_evidence(state(args.transaction))
+        print(json.dumps({'ok': True, 'original_evidence_preserved': preserved}))
+        return 0 if preserved else 3
+    elif args.action == 'update':
         raw = sys.stdin.buffer.read(LIMIT + 1)
         if len(raw) > LIMIT: raise TransactionError('Transition input exceeds its size limit')
         settings = decode_json(raw)
         if type(settings) is not dict or args.phase is None: raise TransactionError('Transition requires a phase and settings object')
-        update(args.transaction, args.phase, settings, args.stage)
+        update(args.transaction, args.phase, settings, args.stage,
+               preserve_recovery_evidence=args.preserve_recovery_evidence)
     elif args.action == 'stage':
         value=state(args.transaction)
         if value['phase'] in TERMINAL or args.stage is None:raise TransactionError('A current stage requires an unfinished transaction')

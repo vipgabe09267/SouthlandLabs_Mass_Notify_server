@@ -51,6 +51,7 @@ require_once __DIR__ . '/EnterpriseOperations.php';
 require_once __DIR__ . '/EnterpriseCluster.php';
 require_once __DIR__ . '/EnterpriseIdentityManagement.php';
 require_once __DIR__ . '/EnterpriseIntegrations.php';
+require_once __DIR__ . '/ManagedCron.php';
 
 /** Only controlled operator-safe messages from protected configuration writes. */
 final class SlsConfigurationWriteException extends \RuntimeException
@@ -13027,89 +13028,96 @@ PY;
 	private function hasCanonicalSlsUserCron(array $lines): bool
 	{
 		$actual = [];
-		foreach ($lines as $line) {
-			$line = (string)$line;
-			if (preg_match('/^\s*#/', $line)) { continue; }
-			if (preg_match('~(?:/usr/local/bin/sls_mass_notify/|sls_mass_notify_[A-Za-z_]+\.(?:sh|php)|sls_cron_runner\.py|nws_weather_alert\.sh|nwsalerts_ensure_menu_patch\.sh)~', $line)) {
-				$actual[] = $line;
+		try {
+			foreach ($lines as $line) {
+				if (SlsManagedCron::owns((string)$line, 'asterisk')) { $actual[] = (string)$line; }
 			}
-		}
+		} catch (\RuntimeException $error) { return false; }
 		$expected = array_map(function ($job) { return $this->slsCronLine($job); }, ['weather', 'scheduling', 'announcement_reconcile']);
-		sort($actual, SORT_STRING);
-		sort($expected, SORT_STRING);
+		sort($actual, SORT_STRING); sort($expected, SORT_STRING);
 		return $actual === $expected;
 	}
 
 	private function ensureCronJob()
 	{
-		$this->removeLegacyNwsCronJob();
-		$cron = $this->FreePBX->Cron();
-		foreach ($cron->getAll() as $line) {
-			$line = (string)$line;
-			foreach (['sls_mass_notify_nws_poll.sh', 'sls_mass_notify_weather_poll.sh', 'sls_mass_notify_update.sh',
-				'sls_mass_notify_schedule_worker.php', 'sls_mass_notify_announcement_worker.php', 'sls_cron_runner.py'] as $marker) {
-				if (strpos($line, $marker) !== false) { $cron->remove($line); break; }
-			}
-		}
-		foreach (['weather', 'scheduling', 'announcement_reconcile'] as $job) {
-			$cron->addLine($this->slsCronLine($job));
-		}
+		$this->updateManagedUserCron(['weather', 'scheduling', 'announcement_reconcile']);
 		// Root maintenance/update entries are installed by the authenticated root helper.
+	}
+
+	/** Coordinate the complete read/merge/write with the native FreePBX writer. */
+	private function withNativeCronLock(callable $operation, string $account = 'asterisk')
+	{
+		$user = function_exists('posix_getpwuid') ? posix_getpwuid(posix_geteuid()) : false;
+		if (!is_array($user) || ($user['name'] ?? '') !== $account || !in_array($account, ['root', 'asterisk'], true)) {
+			throw new \RuntimeException(_('Native cron updates require the matching fixed service account. Existing cron entries were preserved.'));
+		}
+		if (!function_exists('sem_get') || !function_exists('sem_acquire') || !function_exists('sem_remove') || !class_exists('\Symfony\Component\Lock\LockFactory')
+			|| !class_exists('\Symfony\Component\Lock\Store\SemaphoreStore')) {
+			throw new \RuntimeException(_('The native FreePBX cron semaphore is unavailable. Existing cron entries were preserved.'));
+		}
+		$factory = new \Symfony\Component\Lock\LockFactory(new \Symfony\Component\Lock\Store\SemaphoreStore());
+		$lock = $factory->createLock('crontab-' . $account, 60);
+		$deadline = microtime(true) + 5;
+		do {
+			if ($lock->acquire(false)) {
+				try { return $operation(); }
+				finally { $lock->release(); }
+			}
+			usleep(50000);
+		} while (microtime(true) < $deadline);
+		throw new \RuntimeException(_('The native FreePBX cron writer is busy. Existing cron entries were preserved; retry after it finishes.'));
+	}
+
+	private function updateManagedUserCron(array $jobs, string $account = 'asterisk'): void
+	{
+		$this->withNativeCronLock(function () use ($jobs, $account) {
+			$current = $this->readNativeUserCrontab(); $filtered = [];
+			foreach ($current as $line) {
+				if (!SlsManagedCron::owns((string)$line, $account)) { $filtered[] = $line; }
+			}
+			foreach ($jobs as $job) { $filtered[] = $this->slsCronLine($job); }
+			if ($filtered === $current) { return; }
+			// Direct crontab administrators may not participate in the native lock.
+			// Detect changes before writing; never overwrite them with an old snapshot.
+			if ($this->readNativeUserCrontab() !== $current) {
+				throw new \RuntimeException(_('The PBX runtime crontab changed during inspection. Existing cron entries were preserved; retry after the other editor finishes.'));
+			}
+			$this->installNativeUserCrontab($filtered);
+			if ($this->readNativeUserCrontab() !== $filtered) {
+				throw new \RuntimeException(_('The PBX runtime crontab did not retain the verified update. Preserve its current entries and review concurrent cron writers before retrying.'));
+			}
+		}, $account);
 	}
 
 	private function readNativeUserCrontab(): array
 	{
-		$current = [];
-		$code = 1;
-		exec('LC_ALL=C /usr/bin/timeout --kill-after=1 5 /usr/bin/crontab -l 2>&1', $current, $code);
-		if ($code === 1 && count($current) === 1) {
+		// PHP exec() trims every output line. Encode bounded raw bytes so unrelated
+		// comments, blank lines and escaped trailing spaces survive the merge.
+		$encoded = []; $code = 1;
+		exec('LC_ALL=C /bin/bash -o pipefail -c ' . escapeshellarg('/usr/bin/timeout --kill-after=1 5 /usr/bin/crontab -l 2>&1 | /usr/bin/head -c 1048577 | /usr/bin/base64 -w0'), $encoded, $code);
+		$raw = base64_decode(implode('', $encoded), true);
+		if (!is_string($raw) || strlen($raw) > 1048576 || substr_count($raw, "\n") > 16384
+			|| strpos($raw, "\0") !== false || strpos($raw, "\r") !== false || ($raw !== '' && substr($raw, -1) !== "\n")) {
+			throw new \RuntimeException(_('The PBX runtime crontab is oversized, incomplete or unrepresentable. Existing cron entries were preserved.'));
+		}
+		if ($code === 1) {
 			$account = function_exists('posix_getpwuid') ? posix_getpwuid(posix_geteuid()) : false;
-			if (is_array($account) && $current[0] === 'no crontab for ' . $account['name']) { return []; }
+			if (is_array($account) && $raw === 'no crontab for ' . $account['name'] . "\n") { return []; }
 		}
 		if ($code !== 0) {
 			throw new \RuntimeException(_('The current PBX runtime crontab could not be read completely. No cron entries were replaced. Check crontab permissions and the cron service before retrying installation.'));
 		}
-		return $current;
+		return $raw === '' ? [] : explode("\n", substr($raw, 0, -1));
 	}
 
 	private function removeLegacyNwsCronJob()
 	{
-		$current = $this->readNativeUserCrontab();
-		$filtered = [];
-		$changed = false;
-		foreach ($current as $line) {
-			if (strpos((string)$line, '/usr/local/bin/nws_weather_alert.sh') !== false
-				|| strpos((string)$line, 'nwsalerts_ensure_menu_patch.sh') !== false
-				|| strpos((string)$line, 'sls_mass_notify_update.sh') !== false
-				|| strpos((string)$line, 'sls_mass_notify_maintenance.sh') !== false
-				|| strpos((string)$line, 'sls_cron_runner.py maintenance') !== false
-				|| strpos((string)$line, 'sls_cron_runner.py update') !== false) {
-				$changed = true;
-				continue;
-			}
-			$filtered[] = $line;
-		}
-		if (!$changed) {
-			return;
-		}
-		$this->installNativeUserCrontab($filtered);
+		$this->updateManagedUserCron([]);
 	}
 
 	private function ensureRootUpdateCron()
 	{
-		$current = $this->readNativeUserCrontab();
-		$filtered = [];
-		foreach ($current as $line) {
-			if (strpos((string)$line, 'sls_mass_notify_update.sh') !== false
-				|| strpos((string)$line, 'sls_mass_notify_maintenance.sh') !== false
-				|| strpos((string)$line, 'sls_cron_runner.py') !== false) {
-				continue;
-			}
-			$filtered[] = $line;
-		}
-		$filtered[] = $this->slsCronLine('maintenance');
-		$filtered[] = $this->slsCronLine('update');
-		$this->installNativeUserCrontab($filtered);
+		$this->updateManagedUserCron(['maintenance', 'update'], 'root');
 	}
 
 	private function installNativeUserCrontab(array $lines): void
@@ -13119,7 +13127,7 @@ PY;
 				throw new \RuntimeException(_('A crontab line is invalid. Existing cron entries were preserved.'));
 			}
 		}
-		$contents = implode("\n", $lines) . "\n";
+		$contents = $lines ? implode("\n", $lines) . "\n" : "";
 		$tmp = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . '/sls-root-cron.' . bin2hex(random_bytes(16));
 		$mask = umask(0077);
 		try { $handle = @fopen($tmp, 'x+b'); }
@@ -13160,13 +13168,8 @@ PY;
 
 	private function removeCronJob()
 	{
-		$cron = $this->FreePBX->Cron();
-		foreach ($cron->getAll() as $line) {
-			if (strpos((string)$line, 'sls_mass_notify_nws_poll.sh') !== false || strpos((string)$line, 'sls_mass_notify_weather_poll.sh') !== false || strpos((string)$line, 'sls_mass_notify_schedule_worker.php') !== false || strpos((string)$line, 'sls_mass_notify_announcement_worker.php') !== false || strpos((string)$line, 'sls_mass_notify_update.sh') !== false || strpos((string)$line, 'sls_cron_runner.py') !== false) {
-				$cron->remove($line);
-			}
-		}
-		// The root-owned uninstaller removes its separate maintenance/update cron entries.
+		$this->updateManagedUserCron([]);
+		// The authenticated root uninstaller removes its separate root cron entries.
 	}
 
 	private function detectPbxHost()
@@ -15013,7 +15016,7 @@ PY;
 		// intentionally validates structure and secrets without resolving live
 		// extensions, SIP contacts, recordings, or network destinations.
 		$errors = $this->validateConfigValueTypes($settings);
-		$known = array_fill_keys(array_merge(array_keys($this->getDefaultSettings()), ['sound_map', 'test_sound_pool']), true);
+		$known = array_fill_keys(array_merge(array_keys($this->getDefaultSettings()), ['sound_map', 'test_sound_pool', 'operator_access', 'automations']), true);
 		foreach (array_keys($settings) as $key) {
 			if (!isset($known[$key])) {
 				$errors[] = sprintf(_('Unknown config key: %s.'), (string)$key);
@@ -15042,6 +15045,17 @@ PY;
 				_('The protected configuration failed validation: %s'),
 				$this->sanitizeScheduleText($summary, 500, true)
 			));
+		}
+		foreach (['operator_access' => \SLS\MassNotify\OperatorAccess::class,
+			'automations' => \SLS\MassNotify\AutomationConfig::class] as $key => $normalizer) {
+			if (!array_key_exists($key, $settings)) { continue; }
+			try {
+				$value = $normalizer::normalize($settings[$key]);
+				if ($key === 'operator_access' && array_intersect(array_column($value['accounts'], 'id'),
+					array_column($settings['control_api']['credentials'] ?? [], 'id'))) {
+					throw new \DomainException('Operator and Control API identifiers must be distinct.');
+				}
+			} catch (\Throwable $error) { $errors[] = $error->getMessage(); }
 		}
 		if (is_array($settings['desktop_clients'] ?? null)) {
 			$errors = array_merge($errors, $this->validateDesktopClientIdentifiers($settings['desktop_clients']));
@@ -15994,6 +16008,17 @@ PY;
 			if (!empty($schedules) && empty($warnings)) {
 				$warnings[] = _('Scheduled announcements were disabled because their restored state could not be verified safely.');
 			}
+		}
+		$operatorReviewRequired = false;
+		foreach ($settings['operator_access']['accounts'] ?? [] as $index => $account) {
+			if (!empty($account['enabled'])) {
+				$settings['operator_access']['accounts'][$index]['enabled'] = false;
+				$configChanged = true;
+				$operatorReviewRequired = true;
+			}
+		}
+		if ($operatorReviewRequired) {
+			$warnings[] = _('Operator accounts were disabled after restore. Review account identities and permissions before enabling them on this PBX.');
 		}
 		foreach ($settings['automations']['rules'] ?? [] as $index => $rule) {
 			if (!empty($rule['enabled'])) {

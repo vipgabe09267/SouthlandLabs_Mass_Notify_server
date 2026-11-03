@@ -167,6 +167,30 @@ class ConsoleTests(unittest.TestCase):
         with patch.object(CONSOLE.os,'geteuid',return_value=self.uid),patch('sys.argv',['slsconsole','stop']):
             with self.assertRaisesRegex(RuntimeError,'requires root'):CONSOLE.main()
 
+    def test_helper_loader_rejects_changed_source_before_execution(self):
+        original=os.fstat
+        def changed(fd):
+            info=original(fd)
+            values={name:getattr(info,name) for name in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns')}
+            values['st_mtime_ns']+=1
+            return types.SimpleNamespace(**values)
+        with tempfile.TemporaryDirectory(prefix='sls-console-source-',dir='/run') as directory:
+            folder=Path(directory);helper=folder/'fixture_helper.py'
+            helper.write_text('VALUE=7\n');helper.chmod(0o600)
+            with patch.object(CONSOLE,'__file__',str(folder/'sls_console.py')), \
+                 patch.object(CONSOLE.os,'fstat',side_effect=changed), \
+                 self.assertRaises(RuntimeError):
+                CONSOLE.load('fixture_helper')
+
+    def test_helper_loader_bounds_source_and_executes_only_its_pinned_bytes(self):
+        with tempfile.TemporaryDirectory(prefix='sls-console-source-',dir='/run') as directory:
+            folder=Path(directory);helper=folder/'fixture_helper.py'
+            helper.write_text('VALUE=7\n');helper.chmod(0o600)
+            with patch.object(CONSOLE,'__file__',str(folder/'sls_console.py')):
+                self.assertEqual(CONSOLE.load('fixture_helper').VALUE,7)
+                helper.write_bytes(b'VALUE=9\n'+b' '*262144)
+                with self.assertRaises(RuntimeError):CONSOLE.load('fixture_helper')
+
     def test_uninstall_dispatch_uses_only_authenticated_teardown(self):
         trusted = types.SimpleNamespace()
         for explicit, inherited, expected in [(False, '1', '0'), (True, '0', '1')]:

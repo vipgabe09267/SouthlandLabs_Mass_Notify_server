@@ -69,6 +69,12 @@ class ReleaseSignerTransaction(unittest.TestCase):
         self.assertEqual(value['package'], 'slsmassnotifyserver-0.1.7-beta.tgz')
         self.private_verify(manifest, signature, self.signer.ROOT/'tools/install_release.sh', self.package, '0.1.7-beta')
 
+    def test_current_candidate_signs_the_exact_uppercase_reserved_tag(self):
+        (self.signer.ROOT/'slsmassnotifyserver/module.xml').write_text('<module><version>0.1.9-beta</version></module>')
+        self.package=self.package.rename(self.package.with_name('slsmassnotifyserver-0.1.9-beta.tgz'))
+        self.invoke()
+        self.assertEqual(json.loads(self.outputs()[0].read_text())['tag'],'V0.1.9-beta')
+
     def test_refuses_linked_output_without_touching_victim(self):
         manifest, _ = self.outputs()
         victim = self.root / 'victim'

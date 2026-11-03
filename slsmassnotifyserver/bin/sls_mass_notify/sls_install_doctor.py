@@ -21,11 +21,37 @@ import subprocess
 import sys
 import threading
 import time
+import types
 import xml.etree.ElementTree as ET
 sys.dont_write_bytecode = True
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sls_php_security import evaluate as php_security
-from sls_web_readiness import probe as freepbx_gui_probe
+
+
+def diagnostic_source(name):
+    """Load fixed, stable root source without sibling import/cache searches."""
+    if name not in ('sls_php_security', 'sls_web_readiness'):
+        raise RuntimeError('Unknown fixed diagnostic helper.')
+    path = Path(__file__).absolute().with_name(name + '.py')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    identity = lambda info: tuple(getattr(info, key) for key in (
+        'st_dev', 'st_ino', 'st_mode', 'st_uid', 'st_gid', 'st_nlink',
+        'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+    with os.fdopen(descriptor, 'rb') as source:
+        before = os.fstat(source.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022
+                or before.st_nlink != 1 or not 0 < before.st_size <= 262144
+                or identity(before) != identity(path.lstat())):
+            raise RuntimeError('Diagnostic helper source is unsafe.')
+        body = source.read(262145)
+        if (len(body) != before.st_size or identity(before) != identity(os.fstat(source.fileno()))
+                or identity(before) != identity(path.lstat())):
+            raise RuntimeError('Diagnostic helper source changed during inspection.')
+    helper = types.ModuleType('_sls_diagnostic_' + name); helper.__file__ = str(path)
+    exec(compile(body, str(path), 'exec'), helper.__dict__)
+    return helper
+
+
+php_security = diagnostic_source('sls_php_security').evaluate
+freepbx_gui_probe = diagnostic_source('sls_web_readiness').probe
 
 PROFILE = {'id': 'freepbx17-debian12-amd64', 'freepbx_major': 17,
            'os_id': 'debian', 'os_version': '12', 'python': 'CPython 3.11',
@@ -41,7 +67,7 @@ DATA = Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin')
 WEB_ROOT = Path('/var/www/html')
 PHP_EXTENSIONS = ('pdo_sqlite', 'curl', 'dom', 'mbstring', 'posix', 'openssl', 'sodium')
 PHP_FUNCTIONS = ('exec', 'proc_open', 'posix_geteuid', 'posix_getpwnam', 'openssl_encrypt',
-                 'openssl_decrypt', 'sodium_crypto_aead_xchacha20poly1305_ietf_encrypt', 'sodium_crypto_pwhash_str')
+                 'openssl_decrypt', 'sodium_crypto_aead_xchacha20poly1305_ietf_encrypt', 'sodium_crypto_pwhash_str', 'sem_get', 'sem_acquire', 'sem_remove')
 PHASES = {'preparing', 'prepared', 'mutating', 'recovering', 'recovery_failed', 'committed', 'rolled_back', 'abandoned'}
 STAGES = {'initialization', 'hardware admission', 'platform validation', 'release download and validation',
           'publisher and stock approval', 'FreePBX ownership protection',
@@ -55,9 +81,17 @@ STAGES = {'initialization', 'hardware admission', 'platform validation', 'releas
 def command(args, timeout=5):
     process = None
     try:
+        identity = {}
+        if args and args[0] == '/usr/sbin/asterisk':
+            account = pwd.getpwnam('asterisk')
+            if account.pw_uid <= 0 or os.geteuid() not in (0, account.pw_uid):
+                return 126, ''
+            if os.geteuid() == 0:
+                identity = {'user': account.pw_uid, 'group': account.pw_gid,
+                            'extra_groups': os.getgrouplist('asterisk', account.pw_gid)}
         process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, start_new_session=True,
-            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE':'1'})
+            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, cwd='/',
+            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE':'1'}, **identity)
         output = bytearray(); deadline=time.monotonic()+timeout
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -70,7 +104,7 @@ def command(args, timeout=5):
                     output.extend(block)
                     if len(output)>262144:return 125,''
         return process.wait(timeout=max(.01,deadline-time.monotonic())),output.decode('utf-8','replace')
-    except (OSError, subprocess.TimeoutExpired): return 124,''
+    except (OSError, KeyError, subprocess.TimeoutExpired): return 124,''
     finally:
         if process is not None:
             # A child can leave a descendant holding stdout after it exits.
@@ -198,7 +232,7 @@ try:
     exec(compile(loader.read(runtime/'sls_release_trust.py',262144,protected=True),publisher.__file__,'exec'),publisher.__dict__)
     manifest=publisher.authenticate_manifest(loader.read(generation/'release-manifest.json',16384,protected=True),loader.read(generation/'release-manifest.sig',64,protected=True),loader.PUBLIC_KEY,root)
     version=inventory['version']
-    if manifest.get('version')!=version or manifest.get('tag') not in ('v'+version,'slsmassnotifyserver-'+version) or manifest.get('package')!='slsmassnotifyserver-'+version+'.tgz' or manifest.get('package_sha256')!=inventory['source']['archive_sha256']:raise ValueError()
+    if manifest.get('version')!=version or manifest.get('tag') not in (('v'+version,'slsmassnotifyserver-'+version)+(('V0.1.9-beta',) if version=='0.1.9-beta' else ())) or manifest.get('package')!='slsmassnotifyserver-'+version+'.tgz' or manifest.get('package_sha256')!=inventory['source']['archive_sha256']:raise ValueError()
     loader.check(root,'slsmassnotifyserver',webroot)
     stock={}
     for module in ('framework','dashboard'):

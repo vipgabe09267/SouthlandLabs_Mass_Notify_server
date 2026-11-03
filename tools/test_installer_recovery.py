@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from contextlib import contextmanager, nullcontext
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -18,7 +19,7 @@ class Fixture(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory(prefix='sls-recovery-test-')
         self.base=Path(self.tmp.name); self.fs=self.base/'fs'; self.fs.mkdir()
         self.private=self.base/'recovery'; self.private.mkdir(mode=0o700)
-        self.cron=b'12 1 * * * /usr/bin/true\n* * * * * /usr/local/bin/sls_mass_notify/old.php\n'
+        self.cron=b'12 1 * * * /usr/bin/true\n* * * * * /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh\n'
         def cron(body=None):
             if body is not None: self.cron=body
             return self.cron
@@ -27,7 +28,8 @@ class Fixture(unittest.TestCase):
             if body is not None: self.user_cron=body
             return self.user_cron
         self.commands=[]; self.service={'enabled':'not-found','active':'inactive'}
-        self.helper=r.Recovery(self.private/'static',self.fs,cron,self.command,user_cron=user_cron)
+        self.helper=r.Recovery(self.private/'static',self.fs,cron,self.command,user_cron=user_cron,
+                               cron_lock=lambda accounts:nullcontext())
         self.file(r.RUNTIME+'/worker.py',b'old worker\n',0o755)
         self.file('/var/www/html/api/sipnotify/index.php',b'old web\n')
         self.file('/etc/asterisk/extensions_custom.conf',b'original dialplan\n')
@@ -555,5 +557,343 @@ echo (new ServiceTemplateFixture())->contents();'''
         self.helper.approval=approval
         with self.assertRaises(r.RecoveryError):self.snapshot()
         self.assertFalse((self.private/'static').exists())
+
+    def test_recovery_cron_ownership_uses_the_executable_not_data_operands(self):
+        vectors=json.loads((ROOT/'tools/fixtures/installer_cron_ownership.json').read_text())
+        classifier=getattr(r,'sls_cron_job',None)
+        self.assertTrue(callable(classifier),'Recovery has no executable-aware cron ownership classifier')
+        for row in vectors:
+            with self.subTest(account=row['account'],line=row['line']):
+                line=row['line'].encode()
+                if row['classification']=='review':
+                    with self.assertRaises(r.RecoveryError):classifier(line,row['account'])
+                else:
+                    self.assertEqual(classifier(line,row['account']),row['classification']=='owned')
+
+    def test_static_recovery_preserves_current_cron_comments_and_backup_operands(self):
+        self.snapshot()
+        root_lines=[b'# verify /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh',
+                    b'0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh',
+                    b'0 2 * * * /usr/bin/cp /etc/asterisk/extensions_custom.conf /root/SLS_Mass_Notifications_Plugin.backup']
+        user_lines=[b'# retain sls_mass_notify_nws_poll.sh instructions',
+                    b'0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_nws_poll.sh']
+        self.cron+=b'\n'.join(root_lines)+b'\n'
+        self.user_cron+=b'\n'.join(user_lines)+b'\n'
+        self.helper.restore()
+        for line in root_lines:self.assertIn(line,self.cron.splitlines())
+        for line in user_lines:self.assertIn(line,self.user_cron.splitlines())
+        self.assertTrue(self.helper.verify()['snapshot_verified'])
+
+    def test_ambiguous_owned_cron_refuses_before_static_or_either_cron_changes(self):
+        self.snapshot()
+        worker=self.file(r.RUNTIME+'/worker.py',b'candidate still present\n',0o755)
+        for account in ('root','asterisk'):
+            with self.subTest(account=account):
+                original_root=self.cron;original_user=self.user_cron
+                line=b'* * * * * /usr/local/bin/sls_mass_notify/unreviewed.php\n'
+                if account=='root':self.cron+=line
+                else:self.user_cron+=line
+                before_root=self.cron;before_user=self.user_cron
+                with self.assertRaises(r.RecoveryError):self.helper.restore()
+                self.assertEqual(self.cron,before_root)
+                self.assertEqual(self.user_cron,before_user)
+                self.assertEqual(worker.read_bytes(),b'candidate still present\n')
+                self.cron=original_root;self.user_cron=original_user
+
+    def test_approved_recovery_ignores_unrelated_cron_references_to_its_runtime(self):
+        import hashlib
+        code=b'authenticated maintenance';script=r.RUNTIME+'/sls_mass_notify_maintenance.sh'
+        self.file(script,code,0o755)
+        job='* * * * * /usr/bin/timeout 900 '+script
+        unrelated=b'0 2 * * * /usr/bin/sha256sum /usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh'
+        self.cron=job.encode()+b'\n'+unrelated+b'\n'
+        approval={'schema':1,'source':'publisher-verified-previous-release','version':'0.1.8-beta',
+                  'archive_sha256':'a'*64,'files':{script:hashlib.sha256(code).hexdigest()},'root_jobs':[job]}
+        self.helper.approval=self.private/'approval.json'
+        self.helper.approval.write_text(json.dumps(approval));self.helper.approval.chmod(0o600)
+        self.snapshot();self.helper.restore();self.helper.restore_maintenance()
+        self.assertIn(unrelated,self.cron.splitlines())
+        self.assertEqual(self.cron.splitlines().count(job.encode()),1)
+        self.assertTrue(self.helper.verify()['snapshot_verified'])
+
+    def test_recovery_holds_both_native_account_locks_across_cron_merge(self):
+        self.snapshot()
+        active=[];seen=[]
+        @contextmanager
+        def guard(accounts):
+            self.assertFalse(active,'Recovery tried to reacquire its own native cron semaphore')
+            self.assertEqual(set(accounts),{'root','asterisk'})
+            active.append(True)
+            try:yield
+            finally:active.pop()
+        original_root=self.helper.cron;original_user=self.helper.user_cron
+        def root_cron(body=None):
+            self.assertTrue(active,'Root schedule was accessed outside the native cron lock')
+            seen.append(('root',body is not None));return original_root(body)
+        def user_cron(body=None):
+            self.assertTrue(active,'Asterisk schedule was accessed outside the native cron lock')
+            seen.append(('asterisk',body is not None));return original_user(body)
+        self.helper.cron_lock=guard;self.helper.cron=root_cron;self.helper.user_cron=user_cron
+        self.helper.restore()
+        self.assertIn(('root',True),seen)
+        self.assertIn(('asterisk',True),seen)
+        self.assertFalse(active)
+
+    def test_uninstall_cron_reconciliation_preserves_all_unrelated_vectors(self):
+        reconcile=getattr(r,'reconcile_cron',None)
+        self.assertTrue(callable(reconcile),'Recovery has no coordinated cron teardown')
+        vectors=json.loads((ROOT/'tools/fixtures/installer_cron_ownership.json').read_text())
+        tables={};expected={}
+        for account in ('root','asterisk'):
+            cases=[row for row in vectors if row['account']==account and row['classification']!='review']
+            tables[account]=('\n'.join(row['line'] for row in cases)+'\n').encode()
+            expected[account]=('\n'.join(row['line'] for row in cases if row['classification']=='unrelated')+'\n').encode()
+        active=[];writes=[]
+        @contextmanager
+        def guard(accounts):
+            self.assertEqual(accounts,('root','asterisk'));active.append(True)
+            try:yield
+            finally:active.pop()
+        evidence=self.private/'cron';evidence.mkdir(mode=0o700)
+        before=dict(tables)
+        def backend(body=None,user='root'):
+            self.assertTrue(active,'Cron access escaped its native account coordination')
+            if body is not None:
+                archives=list(evidence.glob('cron-removal.*'))
+                self.assertEqual(len(archives),1)
+                for account in ('root','asterisk'):
+                    self.assertEqual((archives[0]/(account+'.original')).read_bytes(),before[account])
+                writes.append(user);tables[user]=body
+            return tables[user]
+        report=reconcile('remove',evidence=evidence,cron=backend,cron_lock=guard)
+        self.assertEqual(tables,expected);self.assertEqual(writes,['root','asterisk'])
+        self.assertTrue(report['ok']);self.assertFalse(active)
+        archive=Path(report['cron_originals'])
+        self.assertEqual((archive.stat().st_uid,stat.S_IMODE(archive.stat().st_mode)),(0,0o700))
+        for account in ('root','asterisk'):
+            original=archive/(account+'.original')
+            self.assertEqual(original.read_bytes(),before[account])
+            self.assertEqual((original.stat().st_uid,stat.S_IMODE(original.stat().st_mode)),(0,0o600))
+        reconcile('verify',cron=backend,cron_lock=guard)
+
+    def test_uninstall_cron_preflight_refuses_unknown_execution_before_writes(self):
+        reconcile=getattr(r,'reconcile_cron',None)
+        self.assertTrue(callable(reconcile),'Recovery has no coordinated cron teardown')
+        tables={'root':self.cron,'asterisk':self.user_cron+b'* * * * * /usr/local/bin/sls_mass_notify/unknown.sh\n'}
+        writes=[]
+        def backend(body=None,user='root'):
+            if body is not None:writes.append(user)
+            return tables[user]
+        for action in ('preflight','remove','verify'):
+            with self.subTest(action=action),self.assertRaises(r.RecoveryError):
+                reconcile(action,evidence=self.private,cron=backend,cron_lock=lambda accounts:nullcontext())
+        self.assertFalse(writes)
+
+    def test_uninstall_cron_failure_restores_only_unchanged_expected_schedules(self):
+        reconcile=getattr(r,'reconcile_cron',None)
+        self.assertTrue(callable(reconcile),'Recovery has no coordinated cron teardown')
+        for external_change in (False,True):
+            with self.subTest(external_change=external_change):
+                tables={'root':self.cron,'asterisk':self.user_cron};before=dict(tables);writes=[]
+                changed=b'7 8 * * * /usr/bin/administrator-added-job\n'
+                def backend(body=None,user='root'):
+                    if body is not None:
+                        writes.append(user)
+                        if user=='asterisk':
+                            if external_change:tables['root']+=changed
+                            raise r.RecoveryError('fixture second-account failure')
+                        tables[user]=body
+                    return tables[user]
+                evidence=self.private/('failure-'+str(external_change));evidence.mkdir(mode=0o700)
+                with self.assertRaises(r.RecoveryError) as failed:
+                    reconcile('remove',evidence=evidence,cron=backend,cron_lock=lambda accounts:nullcontext())
+                self.assertIn('cron-removal.',str(failed.exception))
+                self.assertEqual(tables['asterisk'],before['asterisk'])
+                if external_change:
+                    self.assertIn(changed,tables['root']);self.assertEqual(writes,['root','asterisk'])
+                else:self.assertEqual(tables,before);self.assertEqual(writes,['root','asterisk','root'])
+
+    def test_system_cron_requires_separate_exact_absence_diagnostics(self):
+        import subprocess
+        cases=[(0,b'0 2 * * * /usr/bin/true\n',b'',b'0 2 * * * /usr/bin/true\n'),
+               (1,b'',b'no crontab for root\n',b''),
+               (1,b'unexpected spool output\n',b'no crontab for root\n',None),
+               (0,b'0 2 * * * /usr/bin/true\n',b'partial spool warning\n',None),
+               (2,b'',b'no crontab for root\n',None)]
+        for status,output,diagnostic,expected in cases:
+            with self.subTest(status=status,output=output,diagnostic=diagnostic):
+                def run(command,**keywords):
+                    self.assertEqual(command,['/usr/bin/crontab','-u','root','-l'])
+                    keywords['stdout'].write(output);keywords['stderr'].write(diagnostic)
+                    return subprocess.CompletedProcess(command,status)
+                with patch.object(r.subprocess,'run',side_effect=run):
+                    if expected is None:
+                        with self.assertRaises(r.RecoveryError):r.Recovery.system_cron()
+                    else:self.assertEqual(r.Recovery.system_cron(),expected)
+
+    def test_cron_teardown_rejects_a_successful_write_without_matching_readback(self):
+        tables={'root':self.cron,'asterisk':self.user_cron};before=dict(tables);writes=[]
+        def backend(body=None,user='root'):
+            if body is not None:writes.append(user)  # False success from a broken crontab backend.
+            return tables[user]
+        with self.assertRaisesRegex(r.RecoveryError,'readback'):
+            r.reconcile_cron('remove',evidence=self.private,cron=backend,cron_lock=lambda accounts:nullcontext())
+        self.assertEqual(writes,['root']);self.assertEqual(tables,before)
+
+    def test_native_cron_lock_matches_php_sysv_contention_and_releases(self):
+        import subprocess
+        self.assertTrue(callable(getattr(r,'native_cron_lock',None)),
+                        'Recovery has no bounded native cron semaphore coordination')
+        script=r'''
+import importlib.util, json, os, subprocess, sys, time
+assert os.readlink('/proc/self/ns/ipc')!=sys.argv[2], 'IPC namespace was not isolated'
+spec=importlib.util.spec_from_file_location('native_cron_fixture',sys.argv[1])
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+probe=r"""$s=sem_get(unpack('i',md5('crontab-root',true))[1]);
+if(sem_acquire($s,true)){echo 'acquired';sem_remove($s);}else{echo 'busy';}"""
+command=['/usr/sbin/runuser','-u','asterisk','--','/usr/bin/php','-n','-d','extension=sysvsem','-r',probe]
+with module.native_cron_lock(('root',),timeout=.25):
+    first=subprocess.check_output(command,text=True,timeout=3)
+    started=time.monotonic()
+    try:
+        with module.native_cron_lock(('root',),timeout=.25):
+            raise AssertionError('A second process acquired the same native Cron semaphore')
+    except module.RecoveryError:pass
+    elapsed=time.monotonic()-started
+after=subprocess.check_output(command,text=True,timeout=3)
+print(json.dumps({'while_held':first,'after_release':after,'bounded':elapsed<3}))
+'''
+        result=subprocess.run(['/usr/bin/unshare','--ipc','--fork','/usr/bin/python3','-I','-c',script,str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_installer_recovery.py'),os.readlink('/proc/self/ns/ipc')],
+                              text=True,capture_output=True,timeout=12)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(json.loads(result.stdout),{'while_held':'busy','after_release':'acquired','bounded':True})
+
+    def test_native_cron_lock_rejects_unapproved_accounts_before_starting_php(self):
+        lock=getattr(r,'native_cron_lock',None)
+        self.assertTrue(callable(lock),'Recovery has no native cron account validation')
+        for accounts in (('administrator',),(),('root','root'),('root','asterisk','unexpected')):
+            with self.subTest(accounts=accounts),patch.object(r.subprocess,'Popen',side_effect=AssertionError('Unapproved account reached process creation')):
+                with self.assertRaises(r.RecoveryError):
+                    with lock(accounts):pass
+
+    @contextmanager
+    def native_php_startup_fixture(self,probe_delay=0,lease_delay=0):
+        import pwd,signal,time
+        with tempfile.TemporaryDirectory(prefix='sls-native-php-startup-',dir='/run') as directory:
+            root=Path(directory);root.chmod(0o755);observations=root/'observations';observations.mkdir()
+            account=pwd.getpwnam('asterisk');os.chown(observations,account.pw_uid,account.pw_gid);observations.chmod(0o750)
+            real_php=r._protected_os_file('/usr/bin/php');shim=root/'php-fixture'
+            shim.write_text('''#!/usr/bin/python3 -I
+import json,os,pathlib,sys,time
+kind='lease' if 'array_slice($argv, 2)' in ' '.join(sys.argv[1:]) else 'metadata'
+info={'kind':kind,'pid':os.getpid(),'uid':os.geteuid(),'cwd':os.getcwd(),
+      'start_tick':pathlib.Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19],
+      'caller_secret_present':'SLS_NATIVE_CRON_CALLER_SECRET' in os.environ}
+destination=pathlib.Path('''+repr(str(observations))+''')/(kind+'-'+str(os.getpid())+'.json')
+destination.write_text(json.dumps(info))
+time.sleep('''+repr(lease_delay)+''' if kind=='lease' else '''+repr(probe_delay)+''')
+os.execv('''+repr(real_php)+''',['''+repr(real_php)+''',*sys.argv[1:]])
+''');shim.chmod(0o755)
+            protected=r._protected_os_file
+            def resolve(path):return protected(shim if str(path)=='/usr/bin/php' else path)
+            try:
+                with patch.object(r,'_protected_os_file',side_effect=resolve):yield root,observations
+            finally:
+                # Only our inert shim PIDs with the captured start tick may be
+                # stopped if an earlier implementation leaves a child behind.
+                for item in observations.glob('*.json'):
+                    row=json.loads(item.read_text());process=Path('/proc')/str(row['pid'])
+                    try:
+                        fields=(process/'stat').read_text().rsplit(')',1)[1].split()
+                        if fields[19]==row['start_tick'] and fields[0]!='Z':os.kill(row['pid'],signal.SIGKILL)
+                    except (FileNotFoundError,ProcessLookupError):pass
+
+    def test_native_php_metadata_accepts_delayed_valid_result_from_safe_cwd(self):
+        import pwd,time
+        before=(self.cron,self.user_cron);original=Path.cwd()
+        with self.native_php_startup_fixture(probe_delay=2.25) as (root,observations):
+            private=root/'root-only';private.mkdir(mode=0o700);os.chdir(private)
+            try:
+                started=time.monotonic()
+                with patch.dict(os.environ,{'SLS_NATIVE_CRON_CALLER_SECRET':'fixture-only'}):
+                    try:command,environment=r._native_cron_php()
+                    except r.RecoveryError as error:self.fail('A valid delayed PHP startup was refused: '+str(error))
+                self.assertEqual(Path.cwd(),private,'Child startup changed its caller directory')
+                self.assertGreaterEqual(time.monotonic()-started,2.2)
+            finally:os.chdir(original)
+            row=json.loads(next(observations.glob('metadata-*.json')).read_text())
+            self.assertEqual((row['uid'],row['cwd'],row['caller_secret_present']),(pwd.getpwnam('asterisk').pw_uid,'/',False))
+            self.assertIn('-n',command);self.assertEqual(environment,{'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C'})
+        self.assertEqual((self.cron,self.user_cron),before)
+
+    def test_native_php_hung_metadata_is_bounded_specific_and_reaps_child(self):
+        import subprocess,time
+        self.assertTrue(hasattr(r,'NATIVE_CRON_PHP_STARTUP_SECONDS'),'Native PHP startup has no shared bounded allowance')
+        before=(self.cron,self.user_cron)
+        with self.native_php_startup_fixture(probe_delay=300) as (root,observations):
+            started=time.monotonic()
+            with patch.object(r,'NATIVE_CRON_PHP_STARTUP_SECONDS',.25),self.assertRaisesRegex(r.RecoveryError,'metadata.*timed out') as failed:
+                r._native_cron_php()
+            self.assertIsInstance(failed.exception.__cause__,subprocess.TimeoutExpired)
+            self.assertLess(time.monotonic()-started,3)
+            for item in observations.glob('*.json'):
+                row=json.loads(item.read_text());process=Path('/proc')/str(row['pid'])
+                self.assertTrue(not process.exists() or (process/'stat').read_text().rsplit(')',1)[1].split()[0]=='Z','Timed-out metadata child still executes')
+        self.assertEqual((self.cron,self.user_cron),before)
+
+    def test_native_php_lease_accepts_slow_start_but_preserves_busy_deadline(self):
+        import time
+        self.assertNotEqual(os.readlink('/proc/self/ns/ipc'),os.environ.get('SLS_TEST_PARENT_IPC_NS'),'Real lease fixture needs isolated IPC')
+        before=(self.cron,self.user_cron)
+        with self.native_php_startup_fixture(lease_delay=1.3) as (root,observations):
+            try:
+                with r.native_cron_lock(('root',),timeout=.1):pass
+            except r.RecoveryError as error:self.fail('A valid slow semaphore-child startup was refused: '+str(error))
+            self.assertTrue(list(observations.glob('lease-*.json')))
+            self.assertTrue(all(json.loads(path.read_text())['cwd']=='/' for path in observations.glob('*.json')))
+        with r.native_cron_lock(('root',),timeout=.1):
+            started=time.monotonic()
+            with self.assertRaisesRegex(r.RecoveryError,'unavailable or busy'):
+                with r.native_cron_lock(('root',),timeout=.15):self.fail('Contending native cron lease was granted')
+            self.assertLess(time.monotonic()-started,2,'Startup allowance extended actual lock contention')
+        self.assertEqual((self.cron,self.user_cron),before)
+
+    def test_native_php_hung_readiness_is_bounded_specific_and_never_grants_lease(self):
+        import subprocess,time
+        self.assertTrue(hasattr(r,'NATIVE_CRON_PHP_STARTUP_SECONDS'),'Native PHP startup has no shared bounded allowance')
+        before=(self.cron,self.user_cron);granted=False
+        with self.native_php_startup_fixture(lease_delay=300) as (root,observations):
+            started=time.monotonic()
+            with patch.object(r,'NATIVE_CRON_PHP_STARTUP_SECONDS',.25),self.assertRaisesRegex(r.RecoveryError,'readiness.*timed out') as failed:
+                with r.native_cron_lock(('root',),timeout=.1):granted=True
+            self.assertIsInstance(failed.exception.__cause__,subprocess.TimeoutExpired)
+            self.assertLess(time.monotonic()-started,4)
+            self.assertFalse(granted)
+            for item in observations.glob('lease-*.json'):
+                row=json.loads(item.read_text());process=Path('/proc')/str(row['pid'])
+                self.assertTrue(not process.exists() or (process/'stat').read_text().rsplit(')',1)[1].split()[0]=='Z','Timed-out readiness child still executes')
+        self.assertEqual((self.cron,self.user_cron),before)
+
+    def test_builtin_php_cron_extensions_do_not_require_shared_library_files(self):
+        import subprocess
+        self.assertTrue(callable(getattr(r,'_native_cron_php',None)))
+        metadata={'extension_dir':'/nonexistent-custom-php-extensions',
+                  'sysvsem':True,'posix':True}
+        result=subprocess.CompletedProcess([],0,json.dumps(metadata).encode(),b'')
+        with patch.object(r,'_native_cron_metadata_probe',return_value=result):
+            command,environment=r._native_cron_php()
+        self.assertIn('-n',command)
+        self.assertNotIn('-d',command)
+        self.assertEqual(environment,{'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C'})
+
+    def test_missing_or_invalid_php_cron_extensions_refuse_before_lock_process(self):
+        import subprocess
+        for metadata in ({'extension_dir':'/nonexistent-custom-php-extensions','sysvsem':False,'posix':True},
+                         {'extension_dir':'/usr/lib/php','sysvsem':'1','posix':True},
+                         {'extension_dir':'relative','sysvsem':False,'posix':False}):
+            with self.subTest(metadata=metadata):
+                result=subprocess.CompletedProcess([],0,json.dumps(metadata).encode(),b'')
+                with patch.object(r,'_native_cron_metadata_probe',return_value=result):
+                    with self.assertRaises(r.RecoveryError):r._native_cron_php()
 
 if __name__=='__main__': unittest.main()
