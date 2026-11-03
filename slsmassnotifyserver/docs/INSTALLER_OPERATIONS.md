@@ -1,6 +1,8 @@
 # Installer diagnostics, recovery and qualification
 
-These instructions describe the published `0.1.9-beta` correction, tag `V0.1.9-beta`. Use its exact qualified signed assets and review the [qualification boundaries](QUALIFICATION_MATRIX.md) before target-PBX acceptance. Existing failed transactions still require authenticated recovery; publication does not approve unexplained history loss.
+The V0.1.9-beta release is withdrawn and its downloads have been removed. The source candidate is unpublished; 0.1.8-beta remains the available published prerelease. Installation, repair and upgrade commands await a corrected signed release. Preserve any existing failed transaction; the generic recovery examples below document the protocol and do not authorize executing withdrawn assets.
+
+The reported actual LiteNet recovery has 22 baseline records, 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history recovery must continue to refuse with exit 4; no loss acceptance exists. Separately, changes limited to `totp_last_counter` and the `operator_access` revision trigger the configuration hash guard. Do not overwrite live settings, mask those changes, replace history or manually approve loss to force completion. No successful target recovery or replacement fix is established. See [qualification boundaries](QUALIFICATION_MATRIX.md).
 
 Activation reloads Apache and each independently qualified PHP-FPM version. This
 refreshes their separate opcode caches without changing PHP settings or restarting
@@ -165,9 +167,10 @@ bash /path/to/publisher-authenticated/install_release.sh --recover \
 ```
 
 Recovery authenticates the saved installer, package and executable helpers
-against publisher evidence. The corrected `0.1.9-beta` publisher-signed installer can supply recovery
-helpers for an earlier unfinished transaction, including the withdrawn package
-with the same version. Its own installer and package are authenticated separately and
+against publisher evidence. The withdrawn H `0.1.9-beta` installer historically supplied recovery
+helpers for earlier unfinished transactions, including an earlier withdrawn package
+with the same version. That history does not authorize its use for the currently
+blocked target; a corrected carrier remains pending. Carrier installer and package are authenticated separately and
 retained in a private `recovery-carrier.*` directory. The original signed
 artifacts, approvals and operational baseline remain the restoration authority.
 The journal does not approve live file hashes. It does not restore operational
@@ -182,8 +185,11 @@ permissions still stop admission with a specific diagnostic.
 Recovery checks active and pending settings before restoring anything. It
 accepts the original configuration or a change whose exact encoded hash was
 recorded durably before an installer profile/branding write. Later administrator
-edits are preserved and reported for review. Do not replace the live settings
-merely to get past this check; retain both the live file and original snapshot.
+edits are preserved and reported for review. The reported target shows that
+normal MFA replay-counter and operator-access revision changes can also reach
+this guard; distinguishing those semantics safely remains unresolved. Do not
+replace the live settings merely to get past this check; retain both the live
+file and original snapshot.
 
 ### Phone history during installation
 
@@ -250,7 +256,10 @@ The protected `history-loss-review.json` binds the original signed artifacts,
 exact transaction directory, original baseline bytes and missing record hashes.
 Review its counts and `review_sha256` before deciding what to do.
 
-If no matching evidence can be found, an administrator can separately accept
+No administrator has accepted missing history for the reported LiteNet case.
+The following documents the separate explicit loss-decision mechanism; it is
+not an instruction or approval to use it for that target. If no matching
+evidence can be found, an administrator can separately accept
 the **unverified historical loss**. This is a recorded loss decision; it does
 not reconstruct missing history or prove retention expiry. Replace the three
 placeholders below with the exact reviewed SHA256, administrator identity and

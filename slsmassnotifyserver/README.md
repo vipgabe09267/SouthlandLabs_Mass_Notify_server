@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **The corrected 0.1.9-beta release is published as [V0.1.9-beta](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/V0.1.9-beta).** Use the verified commands below; do not reuse the withdrawn installer.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **0.1.9-beta is withdrawn.** Its GitHub release and downloads have been removed. The available published prerelease is **0.1.8-beta**; the 0.1.9-beta source candidate is unpublished while recovery corrections are investigated.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,33 +14,21 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-For a fresh installation, run the following command as root:
+**Installation and upgrade commands for 0.1.9-beta are suspended pending a corrected signed release.** Do not install, repair or upgrade from the retired `V0.1.9-beta` assets or copied offline bundles. The source tag remains historical recovery evidence; it does not advertise an available installer. A replacement version and tag have not been selected.
 
-```bash
-cd "$(mktemp -d /tmp/sls-install.XXXXXXXX)" &&
-curl -fsSL -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/V0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
-bash ./sls-bootstrap.sh 0.1.9-beta
+The latest remaining published prerelease is `0.1.8-beta` (tag `slsmassnotifyserver-0.1.8-beta`). This is release availability information, not an instruction to downgrade an existing PBX or use it as a recovery carrier. Preserve existing settings, publisher trust and every failed transaction directory.
+
+The reported LiteNet recovery has 22 baseline history records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history recovery must continue to return exit 4 without matching evidence; no administrator has accepted the missing history. Independently, configuration differences limited to `totp_last_counter` and the `operator_access` revision currently trigger the configuration hash guard. Neither blocker has been resolved by this withdrawal. See [recovery operations](docs/INSTALLER_OPERATIONS.md) and the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+
+Historical bootstrap identity is retained for evidence checks only:
+
+```text
+bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh
 ```
 
-For an existing **0.1.8-beta or 0.1.9-beta installation**, use this one-time verified upgrade command:
+The former invocation `sls-bootstrap.sh 0.1.9-beta` is withdrawn; do not run it. A checksum or publisher signature authenticates old bytes and does not make the withdrawn installer suitable for use. Updated installation commands will accompany a newly qualified signed release.
 
-```bash
-cd "$(mktemp -d /tmp/sls-upgrade.XXXXXXXX)" &&
-curl -fsSL -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/V0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
-bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
-```
-
-`--upgrade` authenticates the installer against the PBX's existing publisher authority before execution. It enforces an initialized key policy when present, or the protected signed approval on installations using the original factory authority. It preserves keys and revocations. Incomplete established policies are refused. The default fresh-install command refuses established installation records.
-
-The software version remains `0.1.9-beta`; its release tag is exactly `V0.1.9-beta`. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
-
-The installer checks resources, verifies signatures and keeps recovery files. It preserves saved settings during an update. Back up your PBX before installing.
-
-The H correction includes desktop-journal coordination during legacy permission migration and passed 423/423 independent isolated suites, including required browser/UI and JSON-schema validation. Four native install/rollback cases and three installed journal-stress profiles also passed. Exact-commit CI, all nine public assets and all four artifact provenance policies were verified. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md) for exact H artifact hashes, current verification results and remaining acceptance work. Earlier candidate G's 423 isolated suites, 18 recorded native scenarios and 360 focused follow-up tests remain historical evidence; they do not establish a complete H rerun. The immutable tag and release package retain their prepublication documentation snapshot; main-branch documentation records the published status. Reproduce the release from its tag, since later documentation changes do not produce the same pinned package bytes.
+Candidate H previously passed 423 isolated suites, four native install/rollback cases and three installed journal profiles. Those bounded historical results did not cover the reported target recovery blockers and do not qualify a replacement release. Earlier G 423/18/360 results remain historical as well.
 
 ## Requirements
 
@@ -53,11 +41,7 @@ The locked speech runtime requires an x86-64-v2 CPU on every CPU available to th
 
 **Standard is the default.** If usable RAM falls below its baseline, the installer checks whether Lite can run, explains its limits and asks before installing it. Ordinary kernel reservations on a nominal 4 GiB system are allowed. Declining the Lite prompt cancels installation.
 
-For an unattended Lite installation, explicitly select it:
-
-```bash
-bash ./sls-bootstrap.sh 0.1.9-beta --lite
-```
+For a future corrected release, unattended Lite installation will require explicit selection. The withdrawn bootstrap command is suspended along with the Standard installation commands above.
 
 Lite allows one speech renderer, two waiting speech jobs, four simultaneous desktop streams, one Weather/Lightning delivery worker and two Weather.gov fetch workers. It retains core notifications, scheduling and local operator authentication. Saved Enterprise configuration is retained but disabled. Hosts that meet Standard requirements cannot select Lite.
 
@@ -93,7 +77,7 @@ These commands manage SLL; they do not reboot the PBX or restart Asterisk. Add `
 
 ## Repair and recovery
 
-Use **General Settings > Danger Zone > Repair Installation**, or follow the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Repairs preserve settings and delivery history. Keep the recovery path printed by a failed installer; do not delete it or change live file hashes to bypass a check.
+Installer-driven repair and upgrade remain suspended pending a corrected signed release. Follow the evidence-preservation guidance in the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the recovery path printed by a failed installer; do not delete it, replace live settings or alter history to bypass a check.
 
 Export configuration under **General Settings > Config Backup**. Keep the export passphrase separately. Native FreePBX backups also include module recovery data; protect the whole backup archive. See [backup and restore](docs/RECOVERY.md).
 

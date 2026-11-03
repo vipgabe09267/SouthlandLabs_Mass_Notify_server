@@ -1,6 +1,6 @@
 # 0.1.9-beta security and reliability audit
 
-Historical status at review: unpublished prerelease candidate, 2026-10-27. For the subsequently published correction and its exact qualification scope, see [qualification boundaries](QUALIFICATION_MATRIX.md). This dated review retains its original evidence and limits.
+Historical status at review: unpublished prerelease candidate, 2026-10-27. The later V0.1.9-beta release was withdrawn on 2026-11-03; its actual target recovery remains blocked. See [qualification boundaries](QUALIFICATION_MATRIX.md) for the current unpublished status, reported history/MFA blockers and bounded historical H evidence. This dated review retains its original evidence and limits.
 
 This record covers the repository candidate, not an installed PBX. The review
 inventoried every tracked file, parsed or linted applicable PHP, Python,

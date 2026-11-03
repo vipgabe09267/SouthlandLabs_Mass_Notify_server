@@ -12,9 +12,9 @@ Do not publish configuration, API keys, passwords, authenticator seeds, AMI cred
 
 ## Supported releases
 
-Security fixes target the latest published prerelease, currently `0.1.9-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
+The latest available published prerelease is currently `0.1.8-beta`. The 0.1.9-beta release is withdrawn and its source candidate is unpublished pending recovery corrections. Installation and upgrade instructions for that candidate are suspended. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
 
-The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected release is published under the exact tag `V0.1.9-beta` with new signed artifacts. Do not reuse the withdrawn installer. Review the [qualification boundaries](docs/QUALIFICATION_MATRIX.md): actual LiteNet recovery has not been performed, and publication does not authorize unknown history loss on any PBX.
+Both the earlier 0.1.9-beta installer and the subsequently published V0.1.9-beta correction are withdrawn. The latter GitHub release and downloads were removed on 2026-11-03; source remains historical evidence. Review the [qualification boundaries](docs/QUALIFICATION_MATRIX.md): the reported LiteNet recovery remains blocked by 21 missing records without expiry proof and an independent configuration hash mismatch involving MFA replay state and its section revision. No missing-history acceptance or successful target recovery has been established.
 
 Corrections receive signed assets. The updater does not replace equal versions; same-version corrections require the independently authenticated manual installer. The checked bootstrap accepts an explicit `--upgrade` mode, verifies against the protected installed publisher policy before executing downloaded code, and never resets keys or revocations. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
 

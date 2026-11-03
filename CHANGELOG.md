@@ -2,7 +2,11 @@
 
 ## 0.1.9-beta — 2026-11-03
 
-The corrected release is published under the exact tag `V0.1.9-beta`; its software version remains `0.1.9-beta`. Do not reuse the earlier withdrawn downloads. Candidate H rebuilds the signed package after tag CI exposed a desktop-journal normalization-before-flock race. H passed 423/423 isolated suites with required browser/UI and schema checks, four native install/rollback cases, three installed journal-stress profiles and all required GitHub CI runs. Immutable publication, nine public asset downloads and all four hosted provenance policies verified the exact H release. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md) for exact H evidence and the separate historical G 423/18/360 results. Earlier local and owner acceptance did not cover the legacy hash-only baseline with already-missing history; actual LiteNet recovery remains unperformed.
+**WITHDRAWN — 2026-11-03.** The V0.1.9-beta GitHub release and downloads were removed after the reported actual LiteNet recovery remained blocked. The available published prerelease is 0.1.8-beta; the 0.1.9-beta source candidate is unpublished pending investigation and a new release identity. Do not reuse the withdrawn installer or offline bundle.
+
+The reported target baseline contains 22 history records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history refusal (exit 4) remains required; there is no administrator acceptance of that loss. An independent active-configuration mismatch is limited to `totp_last_counter` and the `operator_access` revision and still triggers the recovery hash guard. No target recovery or replacement fix is claimed.
+
+Historical H passed 423/423 isolated suites, four native install/rollback cases and three installed journal profiles; its signed assets, CI, public readback and provenance were verified before withdrawal. Those checks did not establish recovery of this target state. Earlier G 423/18/360 results remain separate historical evidence. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
 - Require native Module Admin installation to return strict success and read back the actual enabled version. Refusals cannot be hidden by a zero CLI exit or by stamping the database version. Return explicit PHP success only after native validation, including hosts whose FreePBX bootstrap leaves a nonzero implicit exit status.
 - Validate the running Asterisk configuration, account, startup policy and actual required providers before mutation. Discover module directories, preserve complete custom builds and keep package repair explicit. Health inspection discovers AMI commands without sending SIP NOTIFY.
@@ -52,7 +56,7 @@ The corrected release is published under the exact tag `V0.1.9-beta`; its softwa
 
 Prior native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. Those historical results and earlier owner acceptance do not qualify the current correction. See docs/QUALIFICATION_MATRIX.md for evidence and remaining checks.
 
-The GitHub release tag is `V0.1.9-beta`; the module version is unchanged. The withdrawn immutable tag cannot be reused. A checksum-pinned `--upgrade` bootstrap provides a one-time manual update for older installations, enforcing their existing publisher policy before executing the installer. Updated clients recognize both tag formats.
+Historical release identity: `V0.1.9-beta`, software 0.1.9-beta. That immutable tag is retired and cannot be reused. Its earlier checksum-pinned upgrade instructions are withdrawn; replacement version/tag selection and corrected signed installation commands remain pending.
 
 ### Southland Labs rebrand
 

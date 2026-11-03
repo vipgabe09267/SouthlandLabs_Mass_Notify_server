@@ -1,14 +1,24 @@
 # Qualification boundaries
 
-`0.1.9-beta` is published under the exact tag `V0.1.9-beta`. The earlier installer remains withdrawn. Qualification applies to the exact signed release identified below and its declared profiles. No entry certifies every FreePBX layout, sustained load or delivery provider. Historical entries remain dated and do not extend the current release's scope.
+`0.1.9-beta` is an unpublished source candidate after withdrawal of the V0.1.9-beta release on 2026-11-03. The available published prerelease is `0.1.8-beta`. The historical H tests below do not establish recovery of the reported actual LiteNet state or qualify a replacement release. No entry certifies every FreePBX layout, sustained load or delivery provider.
 
-## Published correction — 2026-11-03 (candidate H)
+## Withdrawal and reported actual recovery — 2026-11-03
 
-Published on 2026-11-03 as the immutable [V0.1.9-beta release](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/V0.1.9-beta). Public downloads and GitHub-hosted provenance verified the exact H commit and artifacts described below.
+The V0.1.9-beta GitHub release and nine downloads were removed; anonymous release and installer requests returned 404 after withdrawal. Public source/tag history remains available for historical recoverability. It must not be used to advertise or reinstall the withdrawn package. A replacement version/tag and corrected signed assets have not been selected.
+
+The reported LiteNet transaction has **22 baseline closed-history records: 1 unchanged, 21 missing and 0 with proven expiry**. The missing count and age alone cannot establish expiry. Ordinary recovery must continue to refuse unexplained loss with exit 4. No administrator has accepted this loss, and this withdrawal does not authorize acceptance, reconstruction or replacement of the live ledger.
+
+An independent active-configuration difference is limited to the TOTP replay counter `totp_last_counter` and the `operator_access` section revision. The current encoded hash guard rejects that change. Its handling remains under review; there is no approved configuration overwrite, masked comparison or corrected recovery result. Retain live settings and protected snapshots together.
+
+The H 423-suite/four-lifecycle/three-journal-profile results below are historical and insufficient to establish this actual recovery. No successful target recovery, replacement release publication or implemented correction of these blockers is claimed.
+
+## Historical withdrawn H — 2026-11-03
+
+H was published and its public downloads/provenance were verified before the release was withdrawn. The artifact identities and observed results remain below for evidence review; they do not authorize installation.
 
 Candidate H corrects a real desktop-journal race exposed by G's second tag CI run. Lock ownership and recognized legacy permissions are normalized under the permanent exclusive lock, and the named inode and file safety are rechecked after acquisition. H includes new runtime bytes, installer/package pins, signed metadata and regression coverage; the earlier G release draft was not published.
 
-H source freeze SHA-256: `245943efa556e8e073ef1ce3c6d9927e6726be72110a0ef7caa767b75030f97d`. The freeze contains 3,122 source files. H release commit: `babdb5230e2acdd2e4712063ad19ca77863c1885`; tag: `V0.1.9-beta`. All 3,122 committed and worktree source hashes matched this freeze, all six frozen/nine release asset hashes matched, the publisher signature verified and the deterministic package reproduced exactly. The earlier G commits are separate historical identities. The immutable tag/package documentation retains its prepublication snapshot; this main-branch follow-up records publication status. Reproduce release bytes from the final immutable tag, not later main documentation.
+H source freeze SHA-256: `245943efa556e8e073ef1ce3c6d9927e6726be72110a0ef7caa767b75030f97d`. The freeze contains 3,122 source files. H release commit: `babdb5230e2acdd2e4712063ad19ca77863c1885`; tag: `V0.1.9-beta`. All 3,122 committed and worktree source hashes matched this freeze, all six frozen/nine release asset hashes matched, the publisher signature verified and the deterministic package reproduced exactly. The earlier G commits are separate historical identities. The retained source tag and package are historical snapshots. Their signed bytes and prior public readback do not establish that recovery is suitable for the reported target; the release is now withdrawn.
 
 | H artifact | SHA-256 |
 | --- | --- |
@@ -21,14 +31,14 @@ H source freeze SHA-256: `245943efa556e8e073ef1ce3c6d9927e6726be72110a0ef7caa767
 
 These hashes identify H artifacts bound to the completed source, full-suite, native-delta and public-release checks. Publisher signature and established trust checks remain required on each target PBX. The bootstrap remains byte-identical to G.
 
-| H verification gate | Current evidence |
+| Historical H verification gate | Evidence before withdrawal |
 | --- | --- |
 | Full isolated suite, required browser/UI and schema checks | **Passed: 423/423 independent suites**, including required browser/UI and JSON-schema validation. The official archive matches signed package `c3086abf251ae5c400ee83b52dac42552a16c7ed8ac6df590a623962c0505dbb`. |
 | Native install and rollback delta | **Passed: four cases**, covering post-activation rollback, ordinary Standard installation with pending settings, PHP-FPM/HTTPS 8443 and Lite over preserved settings. All four passed 16/16 doctor checks. |
 | Installed desktop-journal stress | **Passed: three service-account profiles** — Standard, PHP-FPM/HTTPS 8443 and nominal 2 GiB Lite. These are bounded journal-concurrency checks, not sustained delivery or PBX-load certification. |
 | H committed source and artifacts | **Verified.** Exact commit `babdb5230e2acdd2e4712063ad19ca77863c1885`, 3,122 source hashes, six frozen/nine release assets, publisher signature and deterministic package reproduction. |
 | GitHub CI | **Passed.** Exact H commit passed [main validation](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41612842592), [tag validation](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41612842602) and [sensor compilation](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41612842525). |
-| Public release and bootstrap | **Verified.** Immutable release; all nine assets downloaded without GitHub authentication and matched H hashes. The public bootstrap downloaded/authenticated its manifest and installer without executing an installation. |
+| Public release and bootstrap | **Historically verified, now withdrawn.** Before removal, all nine assets downloaded without GitHub authentication and matched H hashes. The bootstrap authenticated its manifest/installer without executing an installation. |
 | Artifact provenance | **Verified.** All four package/manifest/signature/installer policies bound the exact H tag, source and signer commits to the [GitHub-hosted release workflow](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41615979149). |
 
 The H rollback case deliberately exited 97 after activation and returned `rolled_back`; the other three installations exited 0 and committed. All four preserved active configuration bytes, present pending configuration bytes/captured metadata, keys and retained closed phone-history rows, with unchanged boot and Asterisk process identity. Native Framework regenerated only the two recognized cron jobs' valid schedules/positions; unrelated bytes and their relative order stayed exact. No production notifications were sent, and the disposable VM was cleanly stopped afterward.
@@ -66,7 +76,7 @@ Native Framework reload intentionally regenerates schedules and entry positions 
 
 Actual kernel cgroup calculations covered ordinary v2, remounted namespace and bind-root topologies in earlier candidate C. The complete resource helper is byte-identical in G. This is bounded component evidence, not a complete G installation under each constrained resource topology.
 
-The protected `transaction-sequence` file is a counter, never a recovery directory. A real failed transaction beside it still requires recovery. Hash-only history cannot prove why records are missing: matching protected evidence or a separate explicit transaction/artifact-bound administrator decision is required. Publication does not approve unknown loss. **Actual LiteNet recovery was not performed, and no administrator approved loss there.**
+The protected `transaction-sequence` file is a counter, never a recovery directory. A real failed transaction beside it still requires recovery. Hash-only history cannot prove why records are missing: matching protected evidence or a separate explicit transaction/artifact-bound administrator decision is required. These historical G tests did not recover the actual LiteNet transaction. The currently reported target recovery remains blocked as described above, with no administrator approval of missing history.
 
 No production installation or real notifications occurred during qualification. There is no universal-layout, other-OS/architecture, sustained PBX/fleet load, physical handset/provider delivery or every-crash-window claim. Each target PBX still needs read-only inspection, `slsconsole doctor --json` and its own endpoint/provider acceptance.
 
@@ -108,8 +118,9 @@ the old cache with its review evidence instead of widening its permissions. The 
 
 Historical scenario evidence is retained separately from the public source tree.
 Qualification of earlier candidates is recorded by scenario; it does not imply
-every discarded candidate passed the complete gate. The published correction
-uses the exact already-qualified assets listed above.
+every discarded candidate passed the complete gate. The subsequently published
+H correction is now withdrawn; its earlier local and public checks do not
+qualify a replacement release or the reported actual LiteNet recovery.
 
 ## Local browser qualification — 2026-10-17
 
