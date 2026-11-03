@@ -12,9 +12,9 @@ Do not publish configuration, API keys, passwords, authenticator seeds, AMI cred
 
 ## Supported releases
 
-Security fixes target the latest published prerelease, currently `0.1.8-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
+Security fixes target the latest published prerelease, currently `0.1.9-beta`. Earlier betas should be upgraded after reviewing the supported installation profile. A signature authenticates release bytes; it does not certify security, performance or delivery reliability.
 
-The original `0.1.9-beta` installer was withdrawn after a recovery failure. Its correction is an unpublished `0.1.9-beta` candidate awaiting final qualification and signed release assets. Do not reuse the withdrawn installer or treat candidate source as a published release.
+The original `0.1.9-beta` installer was withdrawn after a recovery failure. The corrected release is published under the exact tag `V0.1.9-beta` with new signed artifacts. Do not reuse the withdrawn installer. Review the [qualification boundaries](docs/QUALIFICATION_MATRIX.md): actual LiteNet recovery has not been performed, and publication does not authorize unknown history loss on any PBX.
 
 Corrections receive signed assets. The updater does not replace equal versions; same-version corrections require the independently authenticated manual installer. The checked bootstrap accepts an explicit `--upgrade` mode, verifies against the protected installed publisher policy before executing downloaded code, and never resets keys or revocations. See [release trust](docs/RELEASE_TRUST.md) and [installation](INSTALL.md).
 
@@ -94,7 +94,7 @@ Publisher Ed25519 signing and PBX-local module signing are distinct. Private rel
 
 ## Delivery state, files and resources
 
-Protected journals use bounded validated state, permanent history markers, locking and atomic synchronized replacement. Missing or damaged established evidence stops new admission instead of resetting replay, consent or spending history. Individual storage helpers document whether they use descriptor-relative no-follow access or checked pathname replacement; those guarantees apply only to the helper and path that implements them. No general filesystem-race guarantee is made for all mutable state.
+Protected journals use bounded validated state, permanent history markers, locking and atomic synchronized replacement. Desktop-journal lock ownership and recognized legacy modes are normalized only under its permanent exclusive lock, with the named inode and safety rechecked after acquisition. Missing or damaged established evidence stops new admission instead of resetting replay, consent or spending history. Individual storage helpers document whether they use descriptor-relative no-follow access or checked pathname replacement; those guarantees apply only to the helper and path that implements them. No general filesystem-race guarantee is made for all mutable state.
 
 Queues claim irreversible work before submission. Accepted or uncertain calls, SMS, webhook, mail and physical effects are not automatically replayed. Scheduled deadlines remain absolute through preparation and delivery; active playback is not interrupted to serve urgent work. Registration, queue and speech limits refuse oversized/unavailable work without silently truncating recipients.
 

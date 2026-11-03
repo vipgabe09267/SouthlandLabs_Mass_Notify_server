@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **The corrected 0.1.9-beta candidate is unpublished.** Its earlier installer was withdrawn; 0.1.8-beta remains the available published release. The candidate installation commands below are retained for review until qualified signed assets are published.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **The corrected 0.1.9-beta release is published as [V0.1.9-beta](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/V0.1.9-beta).** Use the verified commands below; do not reuse the withdrawn installer.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -36,9 +36,11 @@ bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
 
 `--upgrade` authenticates the installer against the PBX's existing publisher authority before execution. It enforces an initialized key policy when present, or the protected signed approval on installations using the original factory authority. It preserves keys and revocations. Incomplete established policies are refused. The default fresh-install command refuses established installation records.
 
-The candidate software version remains `0.1.9-beta`; verify its final GitHub tag and signed assets when publication is announced. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
+The software version remains `0.1.9-beta`; its release tag is exactly `V0.1.9-beta`. Older updaters do not recognize the new tag format. After this one-time upgrade, **General Settings > Check for updates > Install Selected Release** supports the new and legacy tags. For offline installation or interrupted recovery, follow [INSTALL.md](INSTALL.md) and the [verification guide](docs/FIRST_INSTALL_VERIFICATION.md).
 
 The installer checks resources, verifies signatures and keeps recovery files. It preserves saved settings during an update. Back up your PBX before installing.
+
+The H correction includes desktop-journal coordination during legacy permission migration and passed 423/423 independent isolated suites, including required browser/UI and JSON-schema validation. Four native install/rollback cases and three installed journal-stress profiles also passed. Exact-commit CI, all nine public assets and all four artifact provenance policies were verified. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md) for exact H artifact hashes, current verification results and remaining acceptance work. Earlier candidate G's 423 isolated suites, 18 recorded native scenarios and 360 focused follow-up tests remain historical evidence; they do not establish a complete H rerun. The immutable tag and release package retain their prepublication documentation snapshot; main-branch documentation records the published status. Reproduce the release from its tag, since later documentation changes do not produce the same pinned package bytes.
 
 ## Requirements
 

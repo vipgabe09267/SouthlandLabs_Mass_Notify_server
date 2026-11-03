@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.9-beta — 2026-11-02
+## 0.1.9-beta — 2026-11-03
 
-The published installers are withdrawn. The current correction is an unpublished `0.1.9-beta` candidate undergoing qualification; `0.1.8-beta` remains the available published release. Do not reuse the withdrawn downloads. Earlier local and owner acceptance did not cover the legacy hash-only baseline with already-missing history.
+The corrected release is published under the exact tag `V0.1.9-beta`; its software version remains `0.1.9-beta`. Do not reuse the earlier withdrawn downloads. Candidate H rebuilds the signed package after tag CI exposed a desktop-journal normalization-before-flock race. H passed 423/423 isolated suites with required browser/UI and schema checks, four native install/rollback cases, three installed journal-stress profiles and all required GitHub CI runs. Immutable publication, nine public asset downloads and all four hosted provenance policies verified the exact H release. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md) for exact H evidence and the separate historical G 423/18/360 results. Earlier local and owner acceptance did not cover the legacy hash-only baseline with already-missing history; actual LiteNet recovery remains unperformed.
 
 - Require native Module Admin installation to return strict success and read back the actual enabled version. Refusals cannot be hidden by a zero CLI exit or by stamping the database version. Return explicit PHP success only after native validation, including hosts whose FreePBX bootstrap leaves a nonzero implicit exit status.
 - Validate the running Asterisk configuration, account, startup policy and actual required providers before mutation. Discover module directories, preserve complete custom builds and keep package repair explicit. Health inspection discovers AMI commands without sending SIP NOTIFY.
@@ -14,7 +14,7 @@ The published installers are withdrawn. The current correction is an unpublished
 - Admit exact recognized historical Piper wrapper implementations during protected upgrade preflight, then migrate them through the authenticated installer. Modified wrappers and unsafe filesystem metadata still stop repair.
 - Flush recovery helper contents, approvals, activation metadata and directory transitions before granting durable journal authority. Publish a completely prepared Dashboard directory atomically.
 - Accept current operator/automation backup fields and disable restored operator accounts. Require reviewed native dependency versions before starting an SLL transaction.
-- Bind the exact candidate release tag `V0.1.9-beta`, canonical publisher repository, signed manifest and release event. Historical authenticated recovery identities remain supported.
+- Bind the exact release tag `V0.1.9-beta`, canonical publisher repository, signed manifest and release event. Historical authenticated recovery identities remain supported.
 
 - Check an interrupted transaction's history before repeating static restoration. Produce a protected, transaction-bound report for unknown historical loss. A separate exact-challenge administrator decision records accepted loss without calling it verified retention expiry; normal recovery still refuses it.
 - Preserve the administrator receipt and all original signed recovery evidence after completion and across future installs. Later evidence may prove expiry for a subset of the accepted records without changing the original receipt. Revocation still blocks active recovery; passive archives remain preserved.

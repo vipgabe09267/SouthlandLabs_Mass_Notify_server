@@ -588,7 +588,7 @@
     }
   },
   "info": {
-    "description": "Unpublished 0.1.9-beta candidate. Available published release: 0.1.8-beta. Additive Control API, notification schema 1 and desktop SSE protocol 2. Signed trigger, provider callback and operator-portal routes have separate authentication contracts and are outside this OpenAPI document. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
+    "description": "Published 0.1.9-beta release. Additive Control API, notification schema 1 and desktop SSE protocol 2. Signed trigger, provider callback and operator-portal routes have separate authentication contracts and are outside this OpenAPI document. Labs features require explicit configuration. Use the configured public HTTPS origin, including a forwarded port when applicable.",
     "license": {
       "identifier": "AGPL-3.0-or-later",
       "name": "AGPL-3.0-or-later"

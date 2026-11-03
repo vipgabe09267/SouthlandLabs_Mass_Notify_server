@@ -1,6 +1,6 @@
 # Installer diagnostics, recovery and qualification
 
-These instructions describe the unpublished `0.1.9-beta` correction candidate. Current full-build and native results remain pending; obtain qualified signed assets after publication.
+These instructions describe the published `0.1.9-beta` correction, tag `V0.1.9-beta`. Use its exact qualified signed assets and review the [qualification boundaries](QUALIFICATION_MATRIX.md) before target-PBX acceptance. Existing failed transactions still require authenticated recovery; publication does not approve unexplained history loss.
 
 Activation reloads Apache and each independently qualified PHP-FPM version. This
 refreshes their separate opcode caches without changing PHP settings or restarting
@@ -415,6 +415,8 @@ provider delivery, physical endpoint behavior or load certification. Record
 actual qualification results before expanding the supported deployment matrix.
 
 ## Recognized legacy permission recovery
+
+Desktop-journal lock ownership and recognized legacy permissions are normalized while holding the permanent exclusive lock. The H correction rechecks the named inode and file safety after acquiring that lock, so a cooperating migration cannot cause simultaneous writers to fail their metadata comparison. Unknown replacements and unsafe paths remain rejected; preserve the journal and permanent lock when reviewing a failure.
 
 An older FreePBX chown/startup run can leave `enterprise-worker.lock`, `phone-admission.lock` or `phone-admission.json` publicly readable at mode `0644`. The installer authenticates the previous release before recovering recognized files to `0640`. The same bounded pass checks the active/pending central configuration and its permanent locks when native chown changed their modes. Configuration is decoded with the authenticated crypto helper before any permission changes; ciphertext, keys and saved settings are not rewritten. It validates the directory and open file descriptors, rejects symbolic/hard links, unexpected ownership, oversized or malformed state, and preserves journal bytes and lock inodes. It does not erase admission history or delete locks.
 

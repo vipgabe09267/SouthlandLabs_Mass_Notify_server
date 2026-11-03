@@ -1,5 +1,7 @@
 ## Executive summary
 
+This threat model retains the source-review findings and qualification state recorded before publication. Current exact-release qualification and remaining acceptance work are recorded in the [qualification boundaries](QUALIFICATION_MATRIX.md).
+
 SLL turns public FreePBX, scoped operator/API and signed external inputs into notifications and optional physical effects. Principal risks are stale authority, duplicate effects, content exposure, shared-PBX availability and privileged maintenance. Confirmed source fixes and remaining limits are distinguished below; ten threat scenarios do not mean ten vulnerabilities. No account bypass or root code execution was demonstrated. Source and installed-generation qualification remain separate.
 
 ## Scope and assumptions

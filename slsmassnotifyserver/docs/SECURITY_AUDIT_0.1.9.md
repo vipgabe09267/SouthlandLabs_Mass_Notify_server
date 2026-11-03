@@ -1,6 +1,6 @@
 # 0.1.9-beta security and reliability audit
 
-Status: unpublished prerelease candidate, reviewed 2026-10-27.
+Historical status at review: unpublished prerelease candidate, 2026-10-27. For the subsequently published correction and its exact qualification scope, see [qualification boundaries](QUALIFICATION_MATRIX.md). This dated review retains its original evidence and limits.
 
 This record covers the repository candidate, not an installed PBX. The review
 inventoried every tracked file, parsed or linted applicable PHP, Python,

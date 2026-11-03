@@ -1,15 +1,78 @@
 # Qualification boundaries
 
-`0.1.9-beta` is an unpublished correction candidate. Its earlier installer was withdrawn; `0.1.8-beta` remains the available published release. The historical entries below do not qualify the current correction. Qualification results are recorded separately against the exact package SHA-256; component checks alone do not qualify an installation. No entry certifies every FreePBX layout or delivery provider.
+`0.1.9-beta` is published under the exact tag `V0.1.9-beta`. The earlier installer remains withdrawn. Qualification applies to the exact signed release identified below and its declared profiles. No entry certifies every FreePBX layout, sustained load or delivery provider. Historical entries remain dated and do not extend the current release's scope.
 
-## Current correction — 2026-11-02
+## Published correction — 2026-11-03 (candidate H)
 
-Focused isolated fixtures cover strict native installation results and enabled/version readback, dependency and hook refusals, translated Module Admin output, absent/disabled prerequisite handling, exactly-once native hooks, complete Dashboard publication, saved operator/automation backup fields and disabled restored operator accounts. Cron fixtures preserve unrelated comments and file operands, reject unknown SLL execution and failed reads, and coordinate with the native FreePBX semaphore in a disposable IPC namespace. These checks do not establish a successful current full installer lifecycle on a target PBX.
+Published on 2026-11-03 as the immutable [V0.1.9-beta release](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/V0.1.9-beta). Public downloads and GitHub-hosted provenance verified the exact H commit and artifacts described below.
 
-The history review additionally covers a legacy hash-only baseline of 22 closed records with 6 unchanged and 16 missing, an explicit administrator history-loss decision and complete pre-install history evidence. Already-missing history is not restored or treated as verified expiry.
+Candidate H corrects a real desktop-journal race exposed by G's second tag CI run. Lock ownership and recognized legacy permissions are normalized under the permanent exclusive lock, and the named inode and file safety are rechecked after acquisition. H includes new runtime bytes, installer/package pins, signed metadata and regression coverage; the earlier G release draft was not published.
 
-FreePBX Module Admin disable is not a verified notification pause control. Workers use the protected runtime admission state; use `sudo slsconsole stop` to pause new notifications and verify that state before maintenance. Framework can ignore disable-hook failures, so this candidate does not claim that native disable fences all worker activity. The cron semaphore coordinates participating native writers; direct administrators may bypass it. A fresh comparison detects changes before replacement, but crontab provides no atomic compare-and-swap against nonparticipating writers.
+H source freeze SHA-256: `245943efa556e8e073ef1ce3c6d9927e6726be72110a0ef7caa767b75030f97d`. The freeze contains 3,122 source files. H release commit: `babdb5230e2acdd2e4712063ad19ca77863c1885`; tag: `V0.1.9-beta`. All 3,122 committed and worktree source hashes matched this freeze, all six frozen/nine release asset hashes matched, the publisher signature verified and the deterministic package reproduced exactly. The earlier G commits are separate historical identities. The immutable tag/package documentation retains its prepublication snapshot; this main-branch follow-up records publication status. Reproduce release bytes from the final immutable tag, not later main documentation.
 
+| H artifact | SHA-256 |
+| --- | --- |
+| `slsmassnotifyserver-0.1.9-beta.tgz` | `c3086abf251ae5c400ee83b52dac42552a16c7ed8ac6df590a623962c0505dbb` |
+| `install_release.sh` | `f367db706fea8c7ecc2983106a39192b07ef4713fd36885576e2b52ba18808ca` |
+| `release-manifest.json` | `3118b362db7235abb30949d9c5a5829a1e543b892a73d26227db487796a5abe6` |
+| `release-manifest.sig` | `4dc85eb1ecc8f283c96dc87b860e37226486c9bfe8d7d3f30dd85a8e47f86a4c` |
+| `install_bootstrap.sh` | `bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75` |
+| Offline release bundle | `fd46fbac1bff1448b5d808815c6f3f5ec73f37cb5dcdc47fb4b7267f4faa15be` |
+
+These hashes identify H artifacts bound to the completed source, full-suite, native-delta and public-release checks. Publisher signature and established trust checks remain required on each target PBX. The bootstrap remains byte-identical to G.
+
+| H verification gate | Current evidence |
+| --- | --- |
+| Full isolated suite, required browser/UI and schema checks | **Passed: 423/423 independent suites**, including required browser/UI and JSON-schema validation. The official archive matches signed package `c3086abf251ae5c400ee83b52dac42552a16c7ed8ac6df590a623962c0505dbb`. |
+| Native install and rollback delta | **Passed: four cases**, covering post-activation rollback, ordinary Standard installation with pending settings, PHP-FPM/HTTPS 8443 and Lite over preserved settings. All four passed 16/16 doctor checks. |
+| Installed desktop-journal stress | **Passed: three service-account profiles** — Standard, PHP-FPM/HTTPS 8443 and nominal 2 GiB Lite. These are bounded journal-concurrency checks, not sustained delivery or PBX-load certification. |
+| H committed source and artifacts | **Verified.** Exact commit `babdb5230e2acdd2e4712063ad19ca77863c1885`, 3,122 source hashes, six frozen/nine release assets, publisher signature and deterministic package reproduction. |
+| GitHub CI | **Passed.** Exact H commit passed [main validation](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41612842592), [tag validation](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41612842602) and [sensor compilation](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41612842525). |
+| Public release and bootstrap | **Verified.** Immutable release; all nine assets downloaded without GitHub authentication and matched H hashes. The public bootstrap downloaded/authenticated its manifest and installer without executing an installation. |
+| Artifact provenance | **Verified.** All four package/manifest/signature/installer policies bound the exact H tag, source and signer commits to the [GitHub-hosted release workflow](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/actions/runs/41615979149). |
+
+The H rollback case deliberately exited 97 after activation and returned `rolled_back`; the other three installations exited 0 and committed. All four preserved active configuration bytes, present pending configuration bytes/captured metadata, keys and retained closed phone-history rows, with unchanged boot and Asterisk process identity. Native Framework regenerated only the two recognized cron jobs' valid schedules/positions; unrelated bytes and their relative order stayed exact. No production notifications were sent, and the disposable VM was cleanly stopped afterward.
+
+On each installed journal profile, eight `asterisk` writers performed four appends each: 32 exact events in a fresh journal and 32 with a legacy `0644` lock. A separate controlled stale-snapshot interleaving with a real locked peer produced one exact event. Final journal/lock modes were `0640`, and existing lock inodes were preserved. Native legacy fixtures were owned by `asterisk`; these cases do not establish native root-owned-lock migration coverage. The installed H runtime ran in private workspaces with read-only operational data, isolated loopback networking and forbidden socket/subprocess transports; no delivery entry points were called.
+
+These H results are a bounded delta following the journal correction. They do not repeat G's entire 18-record native matrix or its 360 focused follow-up tests; fresh crash recovery, source Asterisk and unsupported-CPU cases below remain historical G evidence.
+
+H full-suite skips remain declared: the host timezone catalogue was unavailable; mocked timezone validation and rollback ran, and fixture-specific unittest skips remain in the complete log. This is not a zero-skips claim. Full-gate log SHA-256: `2f212afb0b2f6f21377f715a0ab7769f2472163cf4331f532ad3bbd407e5fdc5`.
+
+The supported adapter is Debian 12 / FreePBX 17 / amd64 / CPython 3.11, standard FreePBX paths and the `asterisk` service account. Reviewed native prerequisite floors are Framework 17.0.33, Dashboard 17.0.5, Backup 17.0.13 and Recordings 17.0.6. Standard requires two effective cores and nominal 4 GiB RAM. Explicit Lite requires two cores and nominal 2 GiB, caps desktops and phone contacts at 25 each, and excludes Enterprise Labs/SSO. Every available CPU must expose x86-64-v2; AVX is optional.
+
+## Historical candidate G — 2026-11-02
+
+The following local results apply to G package `63def4495d03d0e8dc41bafd4ca04e9a4d954c3e60f6582d2d86c8d8a7cb28f0`. A subsequent tag CI run exposed the real desktop-journal race, so G was not published. These historical results are not a complete H native rerun or an H qualification claim.
+
+- **423/423 independent isolated suites passed**, including required browser/UI and JSON-schema validation. The full log retains namespace timezone-catalogue and fixture-specific skips; this is not a zero-skips claim.
+- **18 recorded native scenarios passed** in disposable FreePBX VMs. These include expected refusals and related scenario observations; they are not 18 independent complete installations.
+- **360 targeted follow-up tests passed**, including the exact 22-to-19 closed-batch expiry regression and a protected counter beside a real failed transaction. All 3,122 frozen source hashes remained unchanged; the deterministic G package, publisher signature and offline bundle matched.
+
+| Historical G native scenario group | Observed result and boundary |
+| --- | --- |
+| Fresh install and retained-config reinstall | Ordinary signed installation completed with 16/16 doctor checks. Fresh setup created its four required factory recording rows; retained encrypted configuration survived the reinstall after the historical F rollback. |
+| 0.1.8 upgrade and controlled rollback | Upgrade completed with 16/16 checks and the exact factory-branding migration. Injected post-activation exit 97 restored active/pending settings, keys, closed history and native state. |
+| Fresh interrupted before ledger creation | Installer process-group SIGKILL after durable activation; ordinary recovery returned `rolled_back`, preserving prior configuration/ledger absence and the existing keyring alongside native state and signed originals. |
+| Abrupt QEMU stop and reboot | QEMU SIGKILL 0.554 seconds after the armed report; ordinary recovery on the same disk after a different boot returned `rolled_back`. One selected virtual-machine boundary was tested, not physical-host power loss or every crash window. |
+| Legacy hash-only history | Six negative/review attempts preserved unknown loss. Partial matching proof still blocked; complete protected evidence verified 16 expired records and restored the old release with 15/15 doctor checks. A separate synthetic administrator decision accepted 16 unverified losses; it did not classify them as verified expiry. |
+| Actual Lite resource admission | At nominal 2 GiB, two CPUs and no swap, unattended default, explicit Standard and interactive No all refused before protected mutation. Guest cron was briefly quiescent for exact metadata comparison, then restored before ordinary Lite installation, which passed 16/16 checks. |
+| Preserved Lite uninstall/reinstall | Signed removal and reinstall preserved active settings, an actual pending file, key bytes and captured metadata, plus six closed history rows. Pending contained the same valid encrypted values as active, not divergent staged values. Whole-ledger bytes changed with collector bookkeeping. |
+| PHP-FPM and HTTPS 8443 | Native PHP-FPM 8.2.35 with ionCube and timestamp checks disabled; ports 80/443 closed. Actual cached content A with disk content B became B after ordinary repair without manual flushing. Existing canonical site, hostname binding, configuration, keys, boot and Asterisk PID were preserved; 16/16 doctor checks passed. FPM reload can close active requests. |
+| Source Asterisk 20.7 without AVX | Actual Nehalem CPU met v2 without AVX. Repair passed 16/16 checks and preserved all 302 coherent loaded-build files, binary/module inventory and package database. Native packaged Asterisk 22 was also exercised by the matrix. |
+| Unsupported CPU | Actual kvm64 missing required v2 features refused with exit 3 before downstream mutation or NumPy/ONNX/Piper import. The guest scheduler was quiescent only for exact metadata comparison. |
+
+Native Framework reload intentionally regenerates schedules and entry positions for exactly one each of `/usr/sbin/fwconsole util cleanplaybackcache -q` and `[ -e /usr/sbin/fwconsole ] && /usr/sbin/fwconsole ma listonline --sendemail -q > /dev/null 2>&1`. Under the unchanged, read-only-captured default policy, cleanup allows hour 0–5 with its other four fields `*`; the updater allows minute 0–59, hour 8–11, day/month `*` and Saturday. Qualification retained raw crons and explicitly recorded only those valid schedule/position changes; all unknown/admin bytes and their relative order remained strict. Complete crontabs are not claimed byte-identical across reload. FreePBX Module Admin disable is not a verified notification pause control: use `sudo slsconsole stop` and verify admission state before maintenance. The native cron semaphore coordinates participating writers; crontab has no atomic compare-and-swap against direct administrator writes.
+
+Actual kernel cgroup calculations covered ordinary v2, remounted namespace and bind-root topologies in earlier candidate C. The complete resource helper is byte-identical in G. This is bounded component evidence, not a complete G installation under each constrained resource topology.
+
+The protected `transaction-sequence` file is a counter, never a recovery directory. A real failed transaction beside it still requires recovery. Hash-only history cannot prove why records are missing: matching protected evidence or a separate explicit transaction/artifact-bound administrator decision is required. Publication does not approve unknown loss. **Actual LiteNet recovery was not performed, and no administrator approved loss there.**
+
+No production installation or real notifications occurred during qualification. There is no universal-layout, other-OS/architecture, sustained PBX/fleet load, physical handset/provider delivery or every-crash-window claim. Each target PBX still needs read-only inspection, `slsconsole doctor --json` and its own endpoint/provider acceptance.
+
+## Historical qualification records
+
+The following dated records describe earlier candidates and fixtures. Their successes do not replace the exact-release matrix above.
 
 ## Native installer incident qualification — 2026-11-01
 
@@ -43,10 +106,10 @@ the PBX account's resource check. A regression reproduced it; optional voice
 selection now suppresses bytecode generation. Authenticated repair quarantines
 the old cache with its review evidence instead of widening its permissions. The native repair passed the actual PBX-account resource check afterward. Root-run doctor now also measures resources as the PBX account, so root traversal authority cannot hide a runtime permission problem.
 
-Release artifacts are rebuilt and signed after the final source checks. Native
-scenario evidence is retained separately from the public source tree. Qualification
-of earlier candidates is recorded by scenario; it does not imply every discarded
-candidate passed the complete gate.
+Historical scenario evidence is retained separately from the public source tree.
+Qualification of earlier candidates is recorded by scenario; it does not imply
+every discarded candidate passed the complete gate. The published correction
+uses the exact already-qualified assets listed above.
 
 ## Local browser qualification — 2026-10-17
 

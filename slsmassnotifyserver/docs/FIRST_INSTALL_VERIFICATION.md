@@ -1,6 +1,6 @@
 # Verify an installation or upgrade
 
-The correction is unpublished and awaits final qualification and signed release assets. The software version is **0.1.9-beta** and the GitHub tag is **V0.1.9-beta**. GitHub permanently retired the withdrawn release's original tag. Existing 0.1.8-beta and withdrawn 0.1.9-beta installations need the one-time `--upgrade` command in [README](../README.md); their old updaters cannot recognize the new tag format.
+The corrected release is published with qualified signed assets. See the [qualification boundaries](QUALIFICATION_MATRIX.md) for its tested scope. The software version is **0.1.9-beta** and the GitHub tag is **V0.1.9-beta**. GitHub permanently retired the withdrawn release's original tag. Existing 0.1.8-beta and withdrawn 0.1.9-beta installations need the one-time `--upgrade` command in [README](../README.md); their old updaters cannot recognize the new tag format.
 
 ## Publisher identity
 
