@@ -1,12 +1,11 @@
 # SLL Mass Notify Server Control API
 
-This document describes the unpublished `0.1.10-beta` candidate, planned tag
-`v0.1.10-beta`. The V0.1.9-beta release is withdrawn and its tag retired;
-the available published prerelease remains `0.1.8-beta`. Qualification,
-corrected native recovery and publication remain pending. The API changes are additive to the existing routes and authentication. Notification payload schema **1** and
+This document describes the published `0.1.10-beta` release, immutable tag
+`v0.1.10-beta`. The V0.1.9-beta release remains withdrawn and its tag retired.
+The API changes are additive to the existing routes and authentication. Notification payload schema **1** and
 desktop SSE protocol **2** are retained. Features marked **Labs** in the module
 need acceptance with the actual devices, providers and desktop client before
-operational use.
+operational use. See the [qualification boundaries](QUALIFICATION_MATRIX.md).
 
 The API includes bounded pre-authentication admission and sampled rejection
 auditing. Successful and attributable authenticated operations retain individual

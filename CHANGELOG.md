@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.10-beta — unpublished candidate, 2026-11-03
+## 0.1.10-beta — published prerelease, 2026-11-04
 
-Planned release tag: `v0.1.10-beta`. The available published prerelease remains `0.1.8-beta`; the retired `V0.1.9-beta` tag and withdrawn downloads must not be reused. Checksum-pinned command examples target the new candidate only and remain unavailable pending qualification and publication.
+Published immutable release tag: `v0.1.10-beta`. The available published prerelease is `0.1.10-beta`; the retired `V0.1.9-beta` tag and withdrawn downloads must not be reused. Checksum-pinned commands use the new tag and unchanged bootstrap. The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
 
 - Preserve increasing TOTP replay counters and their associated operator-access revision through existing failed-transaction recovery. Require type-exact equality for every other setting, account order, credential, permission, recovery code and passkey; unrelated edits remain conflicts.
 - Preserve matching active/pending MFA progress without applying unrelated staged values. Refuse divergent staged operator policy, unproved intermediate configurations and unresolved immediate-settings transactions; do not invent pending files during an MFA merge.
@@ -10,7 +10,7 @@ Planned release tag: `v0.1.10-beta`. The available published prerelease remains 
 - Stage and fsync separate root-private recovery targets before atomic publication. Crash retries, partial restoration and later valid MFA advancement retain the highest validated counters. Keep transaction-bound MFA receipts, original settings, intention evidence and authenticated carriers through verified rollback and later pruning; do not classify this as administrator-accepted history loss.
 - Preserve the ordinary history gate: the reported baseline has 22 records, 1 unchanged, 21 missing and 0 with proven expiry. Matching evidence or a separate explicit administrator decision is still required; no acceptance exists for that reported case.
 
-**Verification so far: 207 focused cases across seven isolated suites passed.** These cover real PHP login and replay rejection, configuration reads, protected transactions, interruption/retry, keeper locks, history review and retained-history checks, including signed terminal receipt/pruning fixtures. The full 424-suite gate, corrected native recovery, signed release assets and publication remain pending. Historical H/G results below do not qualify this candidate.
+**Release verification:** **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. The earlier 207 focused cases across seven isolated suites covered real PHP login/replay, configuration readers, protected transactions, interruptions/retries, locks, history review and retained evidence. Native qualification includes an actual QEMU power loss after durable MFA targets and retry after another real PHP login, plus the bounded profiles in the [qualification matrix](docs/QUALIFICATION_MATRIX.md). The reported actual LiteNet target remains unrecovered; unknown history still needs its own matching evidence or a valid explicit administrator decision. Historical H/G findings below remain historical.
 
 ## 0.1.9-beta — 2026-11-03
 

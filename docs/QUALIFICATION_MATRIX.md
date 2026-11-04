@@ -1,33 +1,51 @@
 # Qualification boundaries
 
-`0.1.10-beta` is the unpublished replacement candidate, with planned tag `v0.1.10-beta`. The available published prerelease remains `0.1.8-beta`. Its command examples are unavailable pending qualification and publication. Historical H/G results below do not qualify the replacement or establish recovery of the reported actual LiteNet state. No entry certifies every FreePBX layout, sustained load or delivery provider.
+`0.1.10-beta` is the published replacement prerelease, immutable tag `v0.1.10-beta`. Its signed assets, public readback and exact-tag provenance were verified. **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. No entry certifies every FreePBX layout, sustained load or delivery provider.
 
 ## Withdrawal and reported actual recovery — 2026-11-03
 
-The V0.1.9-beta GitHub release and nine downloads were removed; anonymous release and installer requests returned 404 after withdrawal. Public source/tag history remains historical evidence. The immutable tag is retired and must not advertise an installer or be reused. The replacement has a new 0.1.10-beta identity; corrected signed assets and publication remain pending.
+The V0.1.9-beta GitHub release and nine downloads were removed; anonymous release and installer requests returned 404 after withdrawal. Public source/tag history remains historical evidence. The immutable tag is retired and must not advertise an installer or be reused. The replacement has the separate published 0.1.10-beta identity and its own signed assets.
 
-The reported LiteNet transaction has **22 baseline closed-history records: 1 unchanged, 21 missing and 0 with proven expiry**. The missing count and age alone cannot establish expiry. Ordinary recovery must continue to refuse unexplained loss with exit 4. No administrator has accepted this loss, and this withdrawal does not authorize acceptance, reconstruction or replacement of the live ledger.
+The reported LiteNet transaction has **22 baseline closed-history records: 1 unchanged, 21 missing and 0 with proven expiry**. The missing count and age alone cannot establish expiry. Ordinary recovery must continue to refuse unexplained loss with exit 4. No administrator has accepted this loss, and this withdrawal does not authorize acceptance, reconstruction or replacement of the live ledger. **The reported actual LiteNet target has not been recovered.**
 
-An independent active-configuration difference was limited to the TOTP replay counter `totp_last_counter` and the `operator_access` section revision. The replacement implements a strict semantic proof for that limited progress, without broadly ignoring operator settings or resetting counters. Separate durable targets preserve it while original snapshots, hashes and intentions remain unchanged. Retain live settings and protected snapshots together; corrected native recovery remains pending.
+An independent active-configuration difference was limited to the TOTP replay counter `totp_last_counter` and the `operator_access` section revision. The replacement proves that limited progress without broadly ignoring operator settings or resetting counters. Separate durable targets preserve it while original snapshots, hashes and intentions remain unchanged. Retain live settings and protected snapshots together. Disposable qualification supplied its own full matching 22-row backup; it does not supply evidence for the reported target.
 
-The H 423-suite/four-lifecycle/three-journal-profile results below remain historical. They do not establish this actual recovery or qualify 0.1.10-beta. No successful corrected native recovery or replacement publication is claimed.
+Historical H/G findings below remain historical. Current 0.1.10-beta qualification is recorded separately here.
 
-## Unpublished 0.1.10-beta correction — 2026-11-03
+## Published 0.1.10-beta qualification — 2026-11-04
 
-**207 focused cases across seven isolated suites passed** through the official namespace wrapper: configuration readers, installer transactions, interruptions, worker/settings guards, history review, installation idleness/history and real PHP MFA recovery. This is a focused result, not the complete release gate.
+The earlier **207 focused cases across seven isolated suites passed** through the official namespace wrapper. The subsequent exact-release gate passed **424/424 independent isolated suites**, including required browser/UI and schema validation. The official archive reproduced the signed J package. Source freeze `fb3da7bd27f90e3a88db3b17cc65af4bf9bfb92ba28014c0a8e0a119abc39d8e` contains 3123 files; release commit `b3fbafc2d9304732f45643d5892b7cebdc83931e`, immutable tag `v0.1.10-beta`.
 
-The cases exercise actual PHP TOTP consumption and replay rejection, active/pending settings, keeper-lock exclusion, durable target publication, SIGKILL/retry boundaries, further MFA advancement and strict unrelated-change refusals. Authenticated transaction fixtures use real temporary publisher signatures; verified rollback records bind original/target/intent evidence, later transaction creation preserves it, and tampered originals, targets or intentions refuse pruning.
+Future installer writes retain exact ciphertext before publishing a hash intention. Durable separate root-private targets and transaction-bound MFA receipts preserve only proved monotonic TOTP counters and associated revisions, together with original configuration/intention/carrier evidence. Unresolved immediate-settings transactions, divergent staged operator policy, credential/recovery-code/passkey changes, malformed counters, unrelated revision changes and unproved legacy intermediate ciphertext remain conflicts.
 
-Future installer settings writes retain exact ciphertext before publishing their hash intentions. This allows an approved intermediate configuration plus later MFA progress to be proved. A legacy hash-only intermediate without corresponding bytes remains unprovable; the original snapshot still supports a pure MFA delta. Unresolved immediate-settings transactions, divergent staged operator policy, credential/recovery-code/passkey changes, malformed counters and unrelated revision changes remain conflicts.
-
-| Current replacement gate | Status |
+| Exact-release native scenario | Observed result |
 | --- | --- |
-| Focused recovery tests | Passed: 207 cases / seven isolated suites. |
-| Full 424-suite, required browser/UI and schema gate | Pending. |
-| Corrected native recovery of a signed old transaction | Pending. |
-| New signed installer/package, public readback and provenance | Pending; command examples remain unavailable. |
+| `mfa-history-unapproved-refusal` | Passed. Unknown 21-row history loss: ordinary exit 4, review without acceptance, no MFA target or restoration. |
+| `mfa-targets-power-loss` | Passed. Actual QEMU power loss after durable MFA targets, before active/pending restoration. |
+| `mfa-recovery-after-new-login` | Passed. New PHP TOTP consumption after reboot; signed old-transaction rollback, latest MFA/pending/key preservation, old doctor 15/15 and replay rejection. |
+| `mfa-upgrade-0110` | Passed. 0.1.8 to 0.1.10 upgrade over recovered MFA/pending/key/surviving-history state; actual new-generation authentication. |
+| `mfa-unrelated-settings-refusal` | Passed. Unrelated configuration changes remain conflicts; no broad operator-section waiver. |
+| `fresh-install-0110` | Passed. Fresh installation from the preserved truly absent-config/module/zero-ledger branch. |
+| `lite-2gb-0110` | Passed. Actual 2 GiB Lite profile upgrade, with preserved configuration, pending state, keys and history. |
+| `fpm-https8443-0110` | Passed. Native PHP-FPM over HTTPS 8443 with timestamp validation disabled; warmed old handler replaced and served new version verified. |
+| `post-activation-rollback-0110` | Passed. Controlled post-activation exit 97, verified rollback and preserved MFA/pending/key/native state. |
 
-The unexplained 21-record loss remains a separate gate. Ordinary recovery must return exit 4 before MFA-target preparation or configuration/runtime restoration when matching evidence or a valid explicit decision is absent. These focused tests do not supply the reported target's missing evidence or an administrator's consent.
+The recovery fixture reproduced the old signed transaction with 22 baseline rows, 1 unchanged survivor and 21 unknown missing rows. Ordinary recovery first returned exit 4 before MFA-target preparation or configuration/runtime restoration. Supplying the fixture's **full matching 22-row backup** then established **21 expired** rows and zero unknown loss. An actual QEMU power loss occurred after durable target publication; after reboot and another real PHP TOTP login, ordinary signed recovery returned 0 and `rolled_back`. Latest active/pending MFA counters and revisions, every other setting, key bytes/metadata, the surviving closed row, original evidence and authenticated native state were preserved. Both consumed codes were rejected within their original valid windows, and the next actual code succeeded. The old generation passed 15/15 doctor checks; new-generation install/rollback cases require 16/16. No operational ledger replacement, key reset or history-loss approval was used.
+
+Native Framework may regenerate only the two recognized native cron jobs' allowed schedules/positions; unrelated jobs and bytes/order remain protected. Root SLL maintenance/update jobs are restored only after verified rollback and must match their authenticated original approval. No notifications were sent and no production PBX was installed or repaired. The disposable VM was cleanly stopped after the complete matrix. Fresh, Lite and PHP-FPM/HTTPS tests are bounded native profiles, not a universal topology or every-crash-window guarantee.
+
+| Published artifact | SHA-256 |
+| --- | --- |
+| Package | `ed167717198282349f89569f39bd7e6b08e3550e9ce8085072caee13d1858d6b` |
+| Installer | `27a8a5eec07f5c8e21f8ceba8c1ab12edd39e07388bcc58d9ecf16fe6646a7e0` |
+| Manifest | `b83fb63347d68a4226821def91032093abf94bdaf80568c7a771dfb0c412a177` |
+| Manifest signature | `4161a68cf8897acf76abb4eebd90aad142d0fb53e7d155e92afbd46549ea9a9a` |
+
+Public readback verified all 9 release assets without GitHub download authentication, matched tagged bootstrap/installer bytes and exercised the real bootstrap downloader/signature verifier without installation. All 4 package/installer/manifest/signature provenance policies matched this repository, tag, source/signer commit and GitHub-hosted runner; the exact release provenance workflow succeeded. Required exact main/tag validation and tag sensor compilation also passed. [Published release](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.1.10-beta).
+
+The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
+
+The unexplained 21-record loss on the reported actual target remains a separate gate. That target still requires its own matching evidence or valid explicit administrator decision. Disposable matching-backup recovery does not authorize accepting that loss or deleting its snapshots.
 
 ## Historical withdrawn H — 2026-11-03
 

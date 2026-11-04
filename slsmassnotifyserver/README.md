@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **0.1.10-beta is an unpublished candidate**, with planned tag `v0.1.10-beta`. The available published prerelease remains **0.1.8-beta**. **0.1.9-beta is withdrawn**; its release and downloads were removed, and the retired `V0.1.9-beta` tag must not be reused.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **0.1.10-beta is the available published prerelease**, tag `v0.1.10-beta`. **0.1.9-beta is withdrawn**; its release and downloads were removed, and the retired `V0.1.9-beta` tag must not be reused.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,11 +14,11 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-**The following 0.1.10-beta command examples are unavailable pending qualification and publication. Do not run them yet.** They document the planned new release; no corrected signed package or successful actual target recovery is claimed. Never substitute retired `V0.1.9-beta` downloads or an old offline bundle.
+**0.1.10-beta is published with signed assets and verified public downloads/provenance.** The checksum-pinned commands below use its new immutable tag. Never substitute retired `V0.1.9-beta` downloads or an old offline bundle.
 
-The latest remaining published prerelease is `0.1.8-beta` (tag `slsmassnotifyserver-0.1.8-beta`). This is release availability information, not an instruction to downgrade an existing PBX or use it as a recovery carrier. Preserve existing settings, publisher trust and every failed transaction directory.
+Use `--upgrade` for an existing installation so its publisher policy, keys and revocations remain authoritative. Preserve existing settings, publisher trust and every failed transaction directory. The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
 
-Planned fresh installation, **after the new release is qualified and published**:
+Fresh installation:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
@@ -27,7 +27,7 @@ printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75 
 sudo bash ./sls-bootstrap.sh 0.1.10-beta
 ```
 
-Planned existing-installation upgrade or repair, **also unavailable until publication**:
+Existing-installation upgrade or repair:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
@@ -38,7 +38,7 @@ sudo bash ./sls-bootstrap.sh 0.1.10-beta --upgrade
 
 The unchanged bootstrap supports the new version's generic `v` tag. `--upgrade` authenticates against existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. An eligible unattended Lite installation needs explicit `--lite` (after `--upgrade` when upgrading). Review the limits below before selecting it.
 
-The candidate implements strict preservation of consumed MFA counters and the associated operator-access revision during recovery. Separate durable targets preserve that progress without replacing original evidence or accepting unrelated settings edits. **207 focused cases across seven isolated suites passed**; the full 424-suite gate and corrected native recovery remain pending.
+The release preserves consumed MFA counters and the associated operator-access revision during recovery. Separate durable targets preserve that progress without replacing original evidence or accepting unrelated settings edits. **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md) for the nine scenarios and their limits.
 
 The reported LiteNet history still has 22 baseline records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary recovery must return exit 4 without matching evidence; no administrator has accepted the missing history. MFA handling does not waive this gate. See [recovery operations](docs/INSTALLER_OPERATIONS.md) and the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
@@ -55,7 +55,7 @@ The locked speech runtime requires an x86-64-v2 CPU on every CPU available to th
 
 **Standard is the default.** If usable RAM falls below its baseline, the installer checks whether Lite can run, explains its limits and asks before installing it. Ordinary kernel reservations on a nominal 4 GiB system are allowed. Declining the Lite prompt cancels installation.
 
-For the unpublished 0.1.10-beta candidate, unattended Lite installation requires explicit selection. Its command examples above remain unavailable until qualification and publication.
+Unattended Lite installation requires explicit `--lite` selection. The published commands above otherwise select Standard by default; eligible interactive users receive the Lite offer only after its resource checks pass.
 
 Lite allows one speech renderer, two waiting speech jobs, four simultaneous desktop streams, one Weather/Lightning delivery worker and two Weather.gov fetch workers. It retains core notifications, scheduling and local operator authentication. Saved Enterprise configuration is retained but disabled. Hosts that meet Standard requirements cannot select Lite.
 
