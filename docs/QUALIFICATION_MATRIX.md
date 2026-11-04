@@ -1,19 +1,23 @@
 # Qualification boundaries
 
-`0.1.9-beta` is the unpublished corrected candidate K, planned lowercase tag `v0.1.9-beta`. Available published prerelease: `0.1.8-beta`. Commands and new signed assets remain unavailable pending qualification/publication. Retired uppercase V0.1.9-beta and withdrawn v0.1.10-beta evidence below do not qualify the rebuilt candidate or establish recovery of the reported actual target.
+`0.1.9-beta` is the unpublished corrected candidate L, planned reserved tag `release-0.1.9-beta`. Available published prerelease: `0.1.8-beta`. Commands and new signed assets remain unavailable pending qualification/publication. Retired uppercase V0.1.9-beta and withdrawn v0.1.10-beta evidence below do not qualify the rebuilt candidate or establish recovery of the reported actual target.
 
-## Current lowercase-tag 0.1.9-beta correction — 2026-11-04
+## Current reserved-tag 0.1.9-beta correction — 2026-11-04
 
-The user required the software to remain 0.1.9-beta. The correction retains the strict MFA/history recovery changes; no replay counter, credential, key or operational history is reset. New artifacts must bind the lowercase tag and exact package/installer hashes because historical uppercase assets have the same module version/package filename. This pass changes naming/package/signature metadata only. Its full isolated build and planned fresh 0.1.9 plus explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS test require their own completed evidence; no automatic updater downgrade is enabled.
+The user required the software to remain 0.1.9-beta. The correction retains the strict MFA/history recovery changes; no replay counter, credential, key or operational history is reset. New artifacts must bind the reserved tag and exact package/installer hashes because historical uppercase assets have the same module version/package filename. This pass changes naming/package/signature metadata only. Its full isolated build and planned fresh 0.1.9 plus explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS test require their own completed evidence; no automatic updater downgrade is enabled.
 
-The bootstrap now selects lowercase v0.1.9-beta for new downloads. Its current SHA-256 is `89fb64997bf84ddb427b133effbaf960dd10b847791c4360e9c6749452949c54`. Existing-version equality/downgrade protections remain; the manual authenticated installer provides repair while preserving enrolled publisher policy. Exact generated metadata is rebuilt from module.xml and truthful release status.
+The bootstrap now selects lowercase release-0.1.9-beta for new downloads. Its current SHA-256 is `0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6`. Existing-version equality/downgrade protections remain; the manual authenticated installer provides repair while preserving enrolled publisher policy. Exact generated metadata is rebuilt from module.xml and truthful release status.
 
-| Current K gate | Status |
+| Current L gate | Status |
 | --- | --- |
 | Recovery fixes retained; version/default/document metadata reviewed | Source preparation in progress. |
 | Full isolated build/browser/schema gate | Pending for K. |
 | Fresh 0.1.9 and explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS tests | Pending. |
 | Signed assets, public readback/provenance and publication | Pending; commands unavailable. |
+
+## Historical K — unpublished lower-v candidate
+
+K passed the full 424-suite gate and a fresh installation with 16/16 doctor checks. Publication did not occur because immutable tag history blocked recreating v0.1.9-beta and the legacy slsmassnotifyserver-0.1.9-beta name. These exact K results are archived separately and are not L qualification. L retains software version 0.1.9-beta and uses the reserved release-0.1.9-beta alias; its new full gate and fresh/FPM cases remain pending.
 
 ## Withdrawals and reported actual target
 

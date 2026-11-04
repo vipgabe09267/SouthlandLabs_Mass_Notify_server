@@ -141,9 +141,24 @@ class VerifiedBootstrap(unittest.TestCase):
         self.assertNotEqual(self.execute().returncode,0)
         self.assertFalse(self.marker.exists())
 
+    def test_release_alias_is_exact_and_bound_to_only_version_019(self):
+        self.manifest['tag']='release-0.1.9-beta';self.sign()
+        result=self.execute();self.assertEqual(result.returncode,0,result.stderr)
+        self.marker.unlink()
+        for tag in ('release-0.1.8-beta','release-0.1.10-beta','Release-0.1.9-beta',
+                    'release-0.1.9','release-0.1.9-beta/other','release-0.1.9-beta\n'):
+            with self.subTest(tag=tag):
+                self.manifest['tag']=tag;self.sign()
+                self.assertNotEqual(self.execute().returncode,0)
+                self.assertFalse(self.marker.exists())
+        self.version='0.1.10-beta'
+        self.manifest.update(version=self.version,tag='release-0.1.9-beta',package='slsmassnotifyserver-'+self.version+'.tgz');self.sign()
+        self.assertNotEqual(self.execute().returncode,0)
+        self.assertFalse(self.marker.exists())
+
     def test_download_selects_exact_candidate_or_historical_prefix_without_execution(self):
         code=BOOTSTRAP.read_text().split('bootstrap_download() {',1)[1].split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
-        for version,tag in [('0.1.8-beta','slsmassnotifyserver-0.1.8-beta'),('0.1.9-beta','v0.1.9-beta'),('0.1.10-beta','v0.1.10-beta')]:
+        for version,tag in [('0.1.8-beta','slsmassnotifyserver-0.1.8-beta'),('0.1.9-beta','release-0.1.9-beta'),('0.1.10-beta','v0.1.10-beta')]:
             destination=self.path/version;destination.mkdir()
             urls=[]
             class Reply(io.BytesIO):
@@ -157,7 +172,7 @@ class VerifiedBootstrap(unittest.TestCase):
             self.assertTrue(all('/'+tag+'/' in url for url in urls),urls)
             self.assertFalse(self.marker.exists())
 
-    def test_current_default_executes_lowercase_release_and_refuses_historical_tag_replay(self):
+    def test_current_default_executes_exact_release_alias_and_refuses_historical_tag_replay(self):
         fixture=self.path/'current-bootstrap.sh'
         anchor=(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/release-signing.pub').read_text().strip()
         fixture.write_text(BOOTSTRAP.read_text().replace(anchor,(self.path/'publisher.pem').read_text().strip()))
@@ -165,18 +180,20 @@ class VerifiedBootstrap(unittest.TestCase):
         installer=self.installer+b'printf "%s" "$SLS_MASS_NOTIFY_TGZ_URL" > '+str(selected).encode()+b'\n'
         (self.path/'install_release.sh').write_bytes(installer)
         self.manifest['installer_sha256']=hashlib.sha256(installer).hexdigest()
-        self.manifest['tag']='v0.1.9-beta';self.sign()
+        self.manifest['tag']='release-0.1.9-beta';self.sign()
         command='source "$1"; fixture_assets="$2"; bootstrap_download(){ cp "$fixture_assets/install_release.sh" "$fixture_assets/release-manifest.json" "$fixture_assets/release-manifest.sig" "$1/"; }; bootstrap_main "$3"'
         args=['bash','-c',command,'fixture',str(fixture),str(self.path),self.version]
         result=subprocess.run(args,capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.marker.read_text(),'verified')
-        self.assertEqual(selected.read_text(),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz')
+        self.assertEqual(selected.read_text(),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/release-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz')
         self.marker.unlink();selected.unlink()
-        self.manifest['tag']='V0.1.9-beta';self.sign()
-        result=subprocess.run(args,capture_output=True,text=True,timeout=15)
-        self.assertNotEqual(result.returncode,0,'Historical tag was replayed into the new current release command')
-        self.assertFalse(self.marker.exists());self.assertFalse(selected.exists())
+        for tag in ('V0.1.9-beta','v0.1.9-beta','slsmassnotifyserver-0.1.9-beta'):
+            with self.subTest(tag=tag):
+                self.manifest['tag']=tag;self.sign()
+                result=subprocess.run(args,capture_output=True,text=True,timeout=15)
+                self.assertNotEqual(result.returncode,0,'Historical tag was replayed into the new current release command')
+                self.assertFalse(self.marker.exists());self.assertFalse(selected.exists())
 
     def test_existing_policy_revocation_is_checked_before_execution(self):
         if os.geteuid() != 0 or os.environ.get('SLS_TEST_NAMESPACE') != 'entered':
@@ -223,7 +240,7 @@ class VerifiedBootstrap(unittest.TestCase):
         store.state.write_bytes(trust.canonical(state))
         current_key=(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/release-signing.pub').read_text().strip()
         fixture.write_text(fixture.read_text().replace(current_key,(self.path/'publisher.pem').read_text().strip()))
-        self.manifest['tag']='v0.1.9-beta';self.sign()
+        self.manifest['tag']='release-0.1.9-beta';self.sign()
         command = 'source "$1"; fixture_assets="$2"; bootstrap_download(){ cp "$fixture_assets/install_release.sh" "$fixture_assets/release-manifest.json" "$fixture_assets/release-manifest.sig" "$1/"; }; bootstrap_main "$3" --upgrade'
         result=subprocess.run(['bash','-c',command,'fixture',str(fixture),str(self.path),self.version],capture_output=True,text=True,timeout=15)
         self.assertEqual(result.returncode,0,result.stderr)
@@ -258,7 +275,7 @@ class VerifiedBootstrap(unittest.TestCase):
         diagnostic=fixture.read_text().replace(str(policy_path),str(legacy_path))
         diagnostic=diagnostic.replace('except (OSError,ValueError,TypeError,KeyError,RuntimeError):','except (OSError,ValueError,TypeError,KeyError,RuntimeError) as error:\n    print(type(error).__name__,str(error),file=sys.stderr)')
         legacy_fixture.write_text(diagnostic)
-        legacy_args=['bash','-c','source "$1"; bootstrap_verify "$2" "$3" "v$3" 1 && /bin/bash "$2/install_release.sh"','fixture',str(legacy_fixture),str(self.path),self.version]
+        legacy_args=['bash','-c','source "$1"; bootstrap_verify "$2" "$3" "release-$3" 1 && /bin/bash "$2/install_release.sh"','fixture',str(legacy_fixture),str(self.path),self.version]
         result=subprocess.run(legacy_args,capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,'Approved legacy installation was rejected: '+result.stderr)
         self.assertTrue(self.marker.exists());self.marker.unlink()

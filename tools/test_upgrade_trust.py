@@ -35,7 +35,7 @@ def package(path, name, contents):
 class UpgradeTrustTests(unittest.TestCase):
     def test_previous_release_urls_preserve_legacy_and_current_tag_identities(self):
         self.assertEqual(self.upgrade.sls_release_url('0.1.8-beta','slsmassnotifyserver-0.1.8-beta.tgz'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.8-beta/slsmassnotifyserver-0.1.8-beta.tgz')
-        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/release-manifest.json')
+        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/release-0.1.9-beta/release-manifest.json')
         for version,name in (('../0.1.9','release-manifest.json'),('0.1.9-beta','slsmassnotifyserver-0.1.8-beta.tgz'),('0.1.9-beta','../key')):
             with self.subTest(version=version,name=name),self.assertRaises(self.upgrade.UpgradeError):
                 self.upgrade.sls_release_url(version,name)
@@ -57,6 +57,25 @@ class UpgradeTrustTests(unittest.TestCase):
             client.return_value.open.return_value=response
             self.upgrade.download(url,destination,64)
         self.assertEqual(destination.read_bytes(),b'historical signed input')
+
+    def test_exact_release_alias_downloads_and_other_aliases_fail_before_network(self):
+        prefix='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'
+        destination=self.root/'alias-download.tgz'
+        response=io.BytesIO(b'fixture');response.headers={'Content-Length':'7'}
+        with patch.object(self.upgrade.urllib.request,'build_opener') as client:
+            client.return_value.open.return_value=response
+            self.upgrade.download(prefix+'release-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz',destination,16)
+        self.assertEqual(destination.read_bytes(),b'fixture')
+        for relative in ('release-0.1.8-beta/release-manifest.json',
+                         'release-0.1.10-beta/release-manifest.json',
+                         'release-0.1.9/release-manifest.json',
+                         'Release-0.1.9-beta/release-manifest.json',
+                         'release-0.1.9-beta/slsmassnotifyserver-0.1.10-beta.tgz',
+                         'release-0.1.9-beta/release-manifest.json?other=1'):
+            with self.subTest(relative=relative),patch.object(self.upgrade.urllib.request,'build_opener') as client:
+                with self.assertRaises(self.upgrade.UpgradeError):
+                    self.upgrade.download(prefix+relative,self.root/'rejected-download',16)
+                client.assert_not_called()
 
     def test_signed_stock_verifies_with_long_persistent_recovery_workspace(self):
         workspace=self.root/('persistent-recovery-'+'x'*100);workspace.mkdir(mode=0o700)
@@ -571,12 +590,12 @@ class UpgradeTrustTests(unittest.TestCase):
         self.assertEqual(framework['files'][self.upgrade.MENU_NAME]['target'], 'admin/views/menu_items.php')
         with patch.object(self.upgrade, 'WEB', self.web): self.upgrade.verify_previous(self.workspace)
 
-    def test_same_version_current_lowercase_release_preserves_historical_uppercase_approval(self):
+    def test_same_version_exact_release_alias_preserves_historical_uppercase_approval(self):
         version='0.1.9-beta'
         xml=b'<module><rawname>slsmassnotifyserver</rawname><version>0.1.9-beta</version></module>'
         self.old['module.xml']=xml;self.new['module.xml']=xml
         self.previous=self.release('historical-uppercase',version,self.old,tag='V0.1.9-beta')
-        self.candidate=self.release('current-lowercase',version,self.new,tag='v0.1.9-beta')
+        self.candidate=self.release('current-alias',version,self.new,tag='release-0.1.9-beta')
         (self.web/'admin/modules/slsmassnotifyserver/module.xml').write_bytes(xml)
         self.args.archive,self.args.manifest,self.args.signature=self.candidate
         keys=('SLS_MASS_NOTIFY_PREVIOUS_TGZ','SLS_MASS_NOTIFY_PREVIOUS_MANIFEST','SLS_MASS_NOTIFY_PREVIOUS_MANIFEST_SIGNATURE')

@@ -336,7 +336,7 @@ except Exception:
 
 def norm(value):
     value = str(value or "")
-    if value == "V0.1.9-beta": return "0.1.9-beta"
+    if value in ("V0.1.9-beta", "release-0.1.9-beta"): return "0.1.9-beta"
     if value.startswith("slsmassnotifyserver-"): return value[len("slsmassnotifyserver-"):]
     return value[1:] if value.startswith("v") else value
 
@@ -379,7 +379,7 @@ for release in releases if isinstance(releases, list) else []:
         continue
     matching_releases += 1
     tag = str(release.get("tag_name") or "")
-    if tag != "V0.1.9-beta" and not re.fullmatch(r"(?:slsmassnotifyserver-|v)\d+\.\d+\.\d+(?:-beta)?", tag):
+    if tag not in ("V0.1.9-beta", "release-0.1.9-beta") and not re.fullmatch(r"(?:slsmassnotifyserver-|v)\d+\.\d+\.\d+(?:-beta)?", tag):
         continue
     for asset in release.get("assets", []) if isinstance(release.get("assets"), list) else []:
         if not isinstance(asset, dict):

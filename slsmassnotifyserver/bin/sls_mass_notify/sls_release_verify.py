@@ -34,7 +34,7 @@ def verify(manifest, signature, installer, package, version, public_key=PUBLIC_K
     data = trust.authenticate_manifest(trust.bounded_read(manifest), trust.bounded_read(signature),
         Path(public_key).read_bytes(), trust_directory, now)
     expected_name = f'slsmassnotifyserver-{version}.tgz'
-    allowed_tags = (f'v{version}', f'slsmassnotifyserver-{version}') + (('V0.1.9-beta',) if version == '0.1.9-beta' else ())
+    allowed_tags = (f'v{version}', f'slsmassnotifyserver-{version}') + (('V0.1.9-beta', 'release-0.1.9-beta') if version == '0.1.9-beta' else ())
     if not isinstance(data, dict) or data.get('schema') != 1 or data.get('version') != version \
             or data.get('tag') not in allowed_tags or (expected_tag is not None and data.get('tag') != expected_tag) \
             or data.get('package') != expected_name:

@@ -8,7 +8,7 @@ bootstrap_download() {
   /usr/bin/timeout --signal=TERM --kill-after=3 75 /usr/bin/python3 -I - "$1" "$2" <<'PY'
 import os,re,sys,urllib.request,urllib.parse
 from pathlib import Path
-root=Path(sys.argv[1]);version=sys.argv[2];tag=('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.')))<(0,1,9) else 'v')+version
+root=Path(sys.argv[1]);version=sys.argv[2];tag='release-0.1.9-beta' if version=='0.1.9-beta' else ('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.')))<(0,1,9) else 'v')+version
 class Redirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,request,fp,code,message,headers,url):
         target=urllib.parse.urlsplit(url)
@@ -74,7 +74,7 @@ try:
     raw=(root/'release-manifest.json').read_bytes()
     if len(raw)>16384 or (root/'release-manifest.sig').stat().st_size!=64:raise ValueError('Manifest bounds')
     manifest=json.loads(raw,object_pairs_hook=unique)
-    if set(manifest)!={'schema','version','tag','package','package_sha256','installer_sha256','signing'} or type(manifest['schema']) is not int or manifest['schema']!=1 or manifest['version']!=version or manifest['tag'] not in (('v'+version,'slsmassnotifyserver-'+version)+(('V0.1.9-beta',) if version=='0.1.9-beta' else ())) or (expected_tag and manifest['tag']!=expected_tag) or manifest['package']!='slsmassnotifyserver-'+version+'.tgz':raise ValueError('Release identity')
+    if set(manifest)!={'schema','version','tag','package','package_sha256','installer_sha256','signing'} or type(manifest['schema']) is not int or manifest['schema']!=1 or manifest['version']!=version or manifest['tag'] not in (('v'+version,'slsmassnotifyserver-'+version)+(('V0.1.9-beta','release-0.1.9-beta') if version=='0.1.9-beta' else ())) or (expected_tag and manifest['tag']!=expected_tag) or manifest['package']!='slsmassnotifyserver-'+version+'.tgz':raise ValueError('Release identity')
     signing=manifest['signing'];now=int(time.time())
     if not isinstance(signing,dict) or set(signing)!={'key_id','issued_at','expires_at'} or signing['key_id']!=hashlib.sha256((root/'publisher.der').read_bytes()).hexdigest() or type(signing['issued_at']) is not int or type(signing['expires_at']) is not int or not 0<signing['issued_at']<=now+60 or not signing['issued_at']<signing['expires_at']<=signing['issued_at']+366*86400 or signing['expires_at']<=now:raise ValueError('Signing validity')
     for field in ('installer_sha256','package_sha256'):
@@ -180,7 +180,8 @@ PY
 MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
 -----END PUBLIC KEY-----
 KEY
-  if /usr/bin/python3 -I -c 'import sys; raise SystemExit(0 if tuple(map(int,sys.argv[1].removesuffix("-beta").split("."))) < (0,1,9) else 1)' "$version"; then release_tag="slsmassnotifyserver-$version"
+  if [[ "$version" == 0.1.9-beta ]]; then release_tag=release-0.1.9-beta
+  elif /usr/bin/python3 -I -c 'import sys; raise SystemExit(0 if tuple(map(int,sys.argv[1].removesuffix("-beta").split("."))) < (0,1,9) else 1)' "$version"; then release_tag="slsmassnotifyserver-$version"
   else release_tag="v$version"; fi
   bootstrap_download "$directory" "$version"
   bootstrap_verify "$directory" "$version" "$release_tag" "$existing_mode"

@@ -69,14 +69,14 @@ class ReleaseSignerTransaction(unittest.TestCase):
         self.assertEqual(value['package'], 'slsmassnotifyserver-0.1.7-beta.tgz')
         self.private_verify(manifest, signature, self.signer.ROOT/'tools/install_release.sh', self.package, '0.1.7-beta')
 
-    def test_current_candidate_signs_and_verifies_the_exact_lowercase_tag(self):
+    def test_current_candidate_signs_and_verifies_the_exact_release_alias(self):
         (self.signer.ROOT/'slsmassnotifyserver/module.xml').write_text('<module><version>0.1.9-beta</version></module>')
         self.package=self.package.rename(self.package.with_name('slsmassnotifyserver-0.1.9-beta.tgz'))
         self.invoke()
         manifest,signature=self.outputs()
-        self.assertEqual(json.loads(manifest.read_text())['tag'],'v0.1.9-beta')
+        self.assertEqual(json.loads(manifest.read_text())['tag'],'release-0.1.9-beta')
         self.signer.verifier.verify(manifest,signature,self.signer.ROOT/'tools/install_release.sh',
-            self.package,'0.1.9-beta',self.public,trust_directory=self.root/'trust',expected_tag='v0.1.9-beta')
+            self.package,'0.1.9-beta',self.public,trust_directory=self.root/'trust',expected_tag='release-0.1.9-beta')
         with self.assertRaisesRegex(ValueError,'identity'):
             self.signer.verifier.verify(manifest,signature,self.signer.ROOT/'tools/install_release.sh',
                 self.package,'0.1.9-beta',self.public,trust_directory=self.root/'trust',expected_tag='V0.1.9-beta')

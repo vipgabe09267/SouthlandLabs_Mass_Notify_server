@@ -144,6 +144,27 @@ class ReleaseManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'identity'):
             verifier.verify(self.manifest,self.signature,self.installer,self.package,'0.1.10-beta',self.public,trust_directory=self.root/'trust')
 
+    def test_exact_release_alias_binds_version_artifacts_and_expected_event_tag(self):
+        self.data.update(version='0.1.9-beta',tag='release-0.1.9-beta',package='slsmassnotifyserver-0.1.9-beta.tgz')
+        self.sign()
+        args=(self.manifest,self.signature,self.installer,self.package,'0.1.9-beta',self.public)
+        self.assertEqual(verifier.verify(*args,trust_directory=self.root/'trust',expected_tag='release-0.1.9-beta'),self.data)
+        for historical in ('v0.1.9-beta','V0.1.9-beta','slsmassnotifyserver-0.1.9-beta'):
+            with self.subTest(historical=historical),self.assertRaisesRegex(ValueError,'identity'):
+                verifier.verify(*args,trust_directory=self.root/'trust',expected_tag=historical)
+        self.package.write_bytes(b'changed archive')
+        with self.assertRaisesRegex(ValueError,'hash mismatch'):
+            verifier.verify(*args,trust_directory=self.root/'trust',expected_tag='release-0.1.9-beta')
+
+    def test_release_alias_does_not_open_a_new_tag_namespace(self):
+        for version,tag in (('0.1.8-beta','release-0.1.8-beta'),('0.1.10-beta','release-0.1.10-beta'),
+                            ('0.1.10-beta','release-0.1.9-beta'),('0.1.9-beta','Release-0.1.9-beta'),
+                            ('0.1.9-beta','release-0.1.9'),('0.1.9-beta','release-0.1.9-beta/other')):
+            with self.subTest(version=version,tag=tag):
+                self.data.update(version=version,tag=tag,package='slsmassnotifyserver-'+version+'.tgz');self.sign()
+                with self.assertRaisesRegex(ValueError,'identity'):
+                    verifier.verify(self.manifest,self.signature,self.installer,self.package,version,self.public,trust_directory=self.root/'trust')
+
     def test_signed_tag_cannot_change_version_or_escape_its_namespace(self):
         for tag in ('v0.1.1-beta', 'v0.1.2-beta-extra', 'v0.1.2-beta/other', 'slsmassnotifyserver-0.1.1-beta'):
             with self.subTest(tag=tag):
@@ -155,7 +176,7 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_release_workflow_accepts_v_and_legacy_tags_but_rejects_unsafe_names(self):
         source = (ROOT / '.github/workflows/release-provenance.yml').read_text()
         script = textwrap.dedent(source.split('- name: Validate release identity', 1)[1].split('run: |\n', 1)[1].split('      - uses:', 1)[0])
-        for tag, allowed in (('V0.1.9-beta', True), ('V0.1.10-beta', False), ('V0.1.9', False), ('v0.1.9-beta', True), ('slsmassnotifyserver-0.1.8-beta', True), ('v0.1.9-beta\n', False), ('v0.1.9-beta;id', False), ('../v0.1.9-beta', False)):
+        for tag, allowed in (('release-0.1.9-beta', True), ('release-0.1.8-beta', False), ('release-0.1.10-beta', False), ('release-0.1.9', False), ('Release-0.1.9-beta', False), ('release-0.1.9-beta\n', False), ('release-0.1.9-beta/other', False), ('V0.1.9-beta', True), ('V0.1.10-beta', False), ('V0.1.9', False), ('v0.1.9-beta', True), ('slsmassnotifyserver-0.1.8-beta', True), ('v0.1.9-beta\n', False), ('v0.1.9-beta;id', False), ('../v0.1.9-beta', False)):
             with self.subTest(tag=tag):
                 result = subprocess.run(['bash', '-c', script], env={**os.environ, 'SLS_RELEASE_TAG':tag,'GITHUB_REPOSITORY':'vipgabe09267/SouthlandLabs_Mass_Notify_server','GITHUB_REF':'refs/tags/'+tag}, capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode == 0, allowed, result.stderr)
@@ -169,6 +190,31 @@ class ReleaseManifestTests(unittest.TestCase):
             result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True,timeout=5)
             self.assertNotEqual(result.returncode,0,result.stderr)
         self.assertIn('--tag "$SLS_RELEASE_TAG"',source)
+
+    def test_release_workflow_downloads_canonical_package_for_exact_alias(self):
+        source=(ROOT/'.github/workflows/release-provenance.yml').read_text()
+        script=textwrap.dedent(source.split('- name: Require immutable release and verify publisher signature',1)[1].split('run: |\n',1)[1].split('      - name:',1)[0])
+        fixture=self.root/'workflow';fixture.mkdir()
+        executable=fixture/'gh'
+        executable.write_text('#!/usr/bin/python3\nimport json,os,sys\n'
+            'if sys.argv[1]=="api":\n'
+            ' print(json.dumps({"tag_name":os.environ["SLS_RELEASE_TAG"],"draft":False,"immutable":True}))\n'
+            'elif sys.argv[1:3]==["release","download"]:\n'
+            ' open(os.environ["SLS_DOWNLOAD_ARGUMENTS"],"w").write(json.dumps(sys.argv[1:]))\n'
+            ' raise SystemExit(79)\n'
+            'else: raise SystemExit(91)\n')
+        executable.chmod(0o700)
+        arguments=fixture/'download.json'
+        env={**os.environ,'PATH':str(fixture)+os.pathsep+os.environ['PATH'],
+             'SLS_RELEASE_TAG':'release-0.1.9-beta',
+             'GITHUB_REPOSITORY':'vipgabe09267/SouthlandLabs_Mass_Notify_server',
+             'SLS_DOWNLOAD_ARGUMENTS':str(arguments)}
+        result=subprocess.run(['bash','-ec',script],cwd=fixture,env=env,capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,79,result.stderr)
+        downloaded=json.loads(arguments.read_text())
+        self.assertEqual(downloaded[:3],['release','download','release-0.1.9-beta'])
+        self.assertEqual([downloaded[index+1] for index,item in enumerate(downloaded) if item=='--pattern'],
+                         ['slsmassnotifyserver-0.1.9-beta.tgz','release-manifest.json','release-manifest.sig'])
 
     def test_rejects_modified_manifest(self):
         self.manifest.write_text(self.manifest.read_text() + ' ')

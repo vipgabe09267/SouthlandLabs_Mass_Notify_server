@@ -253,6 +253,14 @@ class Doctor(unittest.TestCase):
     def test_exact_uppercase_current_inventory_remains_authenticated_and_read_only(self):
         self._check_real_publisher_inventory('V0.1.9-beta','0.1.9-beta')
 
+    def test_exact_reserved_release_alias_inventory_is_authenticated_and_read_only(self):
+        self._check_real_publisher_inventory('release-0.1.9-beta','0.1.9-beta')
+
+    def test_other_release_alias_inventories_are_not_enrolled(self):
+        for tag,version in [('release-0.1.10-beta','0.1.10-beta'),('release-0.1.8-beta','0.1.8-beta'),('Release-0.1.9-beta','0.1.9-beta'),('release-0.1.09-beta','0.1.9-beta')]:
+            with self.subTest(tag=tag),self.assertRaises(Exception) as failure:self._check_real_publisher_inventory(tag,version)
+            self.assertEqual(type(failure.exception).__name__,'TrustError')
+
     def test_uppercase_other_inventory_is_not_enrolled(self):
         with self.assertRaises(Exception) as failure:
             self._check_real_publisher_inventory('V0.1.10-beta','0.1.10-beta')

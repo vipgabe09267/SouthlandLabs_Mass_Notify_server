@@ -28,7 +28,7 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == vipgabe09267/SouthlandLabs_Mass_Notify_server ]]
           [[ "$GITHUB_REF" == "refs/tags/$SLS_RELEASE_TAG" ]]
-          [[ "$SLS_RELEASE_TAG" == V0.1.9-beta || "$SLS_RELEASE_TAG" =~ ^(slsmassnotifyserver-|v)[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]
+          [[ "$SLS_RELEASE_TAG" == V0.1.9-beta || "$SLS_RELEASE_TAG" == release-0.1.9-beta || "$SLS_RELEASE_TAG" =~ ^(slsmassnotifyserver-|v)[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ env.SLS_RELEASE_TAG }}
@@ -46,7 +46,7 @@ jobs:
           PY
           mkdir -m 0700 provenance-assets
           version="${SLS_RELEASE_TAG#slsmassnotifyserver-}"
-          if [[ "$version" == V0.1.9-beta ]]; then version=0.1.9-beta; else version="${version#v}"; fi
+          if [[ "$version" == V0.1.9-beta || "$version" == release-0.1.9-beta ]]; then version=0.1.9-beta; else version="${version#v}"; fi
           package="slsmassnotifyserver-$version.tgz"
           gh release download "$SLS_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir provenance-assets \
             --pattern "$package" --pattern release-manifest.json --pattern release-manifest.sig

@@ -96,6 +96,20 @@ class UpdatePolicy(unittest.TestCase):
         for tag in ('V0.1.10-beta','V0.1.9','V0.1.09-beta'):
             self.assertFalse(policy.release_allowed(release(tag_name=tag),policy.validate({})))
 
+    def test_only_exact_reserved_alias_keeps_version_comparison_and_package(self):
+        row=release('0.1.9-beta',tag_name='release-0.1.9-beta')
+        row['assets'][0]['browser_download_url']='https://github.com/'+REPO+'/releases/download/release-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        self.assertTrue(policy.release_allowed(row,policy.validate({'pinned_version':'0.1.9-beta'})))
+        result=self.feed([row],CURRENT_VERSION='0.1.8-beta')
+        self.assertTrue(result['ok'],result);self.assertTrue(result['update_available'],result)
+        self.assertEqual((result['latest_version'],result['tag_name'],result['tgz_url']),('0.1.9-beta','release-0.1.9-beta',row['assets'][0]['browser_download_url']))
+        self.assertEqual(result['installer_commit'],'b'*40)
+        self.assertEqual(result['installer_url'],'https://raw.githubusercontent.com/'+REPO+'/'+'b'*40+'/tools/install_release.sh')
+        for current in ('0.1.9-beta','0.1.10-beta'):self.assertFalse(self.feed([row],CURRENT_VERSION=current)['update_available'])
+        for tag in ('release-0.1.10-beta','release-0.1.8-beta','release-0.1.9','release-0.1.09-beta','Release-0.1.9-beta'):
+            with self.subTest(tag=tag):self.assertFalse(policy.release_allowed(release('0.1.9-beta',tag_name=tag),policy.validate({})))
+        row['assets'][0]['name']='release-0.1.9-beta.tgz';self.assertFalse(self.feed([row],CURRENT_VERSION='0.1.8-beta')['ok'])
+
     def test_absolute_delay_overnight_window_and_local_time(self):
         p = policy.validate({'window_start': '22:00', 'window_end': '03:00', 'rollout_delay_hours': 24})
         r = release(published_at='2026-01-01T06:00:00Z')
@@ -120,6 +134,8 @@ class UpdatePolicy(unittest.TestCase):
                 raise rows
             if request.full_url == f'https://api.github.com/repos/{REPO}/releases?per_page=100':
                 return io.BytesIO(rows if isinstance(rows, bytes) else json.dumps(rows).encode())
+            if request.full_url == f'https://api.github.com/repos/{REPO}/commits/release-0.1.9-beta':
+                return io.BytesIO(json.dumps({'sha':'b'*40}).encode())
             if request.full_url.startswith((f'https://api.github.com/repos/{REPO}/commits/slsmassnotifyserver-', f'https://api.github.com/repos/{REPO}/commits/v',f'https://api.github.com/repos/{REPO}/commits/V0.1.9-beta')):
                 return io.BytesIO(json.dumps({'sha': 'b' * 40}).encode())
             raise AssertionError('Unexpected network destination: ' + request.full_url)

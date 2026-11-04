@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. The corrected software remains **0.1.9-beta**, candidate K, with planned lowercase tag `v0.1.9-beta`. It is **unpublished**; its command examples remain unavailable until qualification and publication. The available published prerelease is **0.1.8-beta**. The retired uppercase `V0.1.9-beta` release and the withdrawn `v0.1.10-beta` release must not be reused.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. The corrected software remains **0.1.9-beta**, candidate L, with planned reserved tag `release-0.1.9-beta`. It is **unpublished**; its command examples remain unavailable until qualification and publication. The available published prerelease is **0.1.8-beta**. The retired uppercase `V0.1.9-beta` release and the withdrawn `v0.1.10-beta` release must not be reused.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,16 +14,16 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-**The following 0.1.9-beta command examples are unavailable pending qualification and publication. Do not run them yet.** They target only the new lowercase `v0.1.9-beta` correction. Never substitute retired uppercase `V0.1.9-beta` downloads, withdrawn `v0.1.10-beta` downloads or an old offline bundle.
+**The following 0.1.9-beta command examples are unavailable pending qualification and publication. Do not run them yet.** They target only the reserved `release-0.1.9-beta` correction. Never substitute retired uppercase `V0.1.9-beta` downloads, withdrawn `v0.1.10-beta` downloads or an old offline bundle.
 
-After publication, use `--upgrade` for an existing installation so its publisher policy, keys and revocations remain authoritative. Preserve settings and every failed transaction directory. The software version remains 0.1.9-beta; the updater does not automatically replace an equal version. The new lowercase tag and signed artifact hashes distinguish this correction from the retired uppercase release.
+After publication, use `--upgrade` for an existing installation so its publisher policy, keys and revocations remain authoritative. Preserve settings and every failed transaction directory. The software version remains 0.1.9-beta; the updater does not automatically replace an equal version. The new reserved tag and signed artifact hashes distinguish this correction from the retired uppercase release.
 
 Planned fresh installation, after qualification and publication:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '89fb64997bf84ddb427b133effbaf960dd10b847791c4360e9c6749452949c54  sls-bootstrap.sh' | sha256sum --check &&
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/release-0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6  sls-bootstrap.sh' | sha256sum --check &&
 sudo bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
@@ -31,18 +31,18 @@ Planned existing-installation upgrade or repair, also unavailable until publicat
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '89fb64997bf84ddb427b133effbaf960dd10b847791c4360e9c6749452949c54  sls-bootstrap.sh' | sha256sum --check &&
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/release-0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6  sls-bootstrap.sh' | sha256sum --check &&
 sudo bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
 ```
 
-The corrected bootstrap selects the new lowercase `v0.1.9-beta` tag by default while retained historical evidence remains verifiable. `--upgrade` authenticates existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. Eligible unattended Lite installation requires explicit `--lite` after `--upgrade` when upgrading.
+The corrected bootstrap selects only the reserved `release-0.1.9-beta` alias for this version by default while retained historical evidence remains verifiable. `--upgrade` authenticates existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. Eligible unattended Lite installation requires explicit `--lite` after `--upgrade` when upgrading.
 
-The MFA/history recovery fixes are retained. Only proved monotonic TOTP-counter and associated operator-access revision progress can enter separate durable targets; every other setting remains exact. Original snapshots, write intentions, ciphertext evidence and authenticated carrier records remain protected. Unknown missing history still requires matching evidence or a valid explicit administrator decision. Current K qualification and publication remain pending. The withdrawn J build passed 424 isolated suites and nine bounded native scenarios as 0.1.10-beta; those exact source/artifact results remain historical evidence and do not qualify these rebuilt 0.1.9-beta assets. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+The MFA/history recovery fixes are retained. Only proved monotonic TOTP-counter and associated operator-access revision progress can enter separate durable targets; every other setting remains exact. Original snapshots, write intentions, ciphertext evidence and authenticated carrier records remain protected. Unknown missing history still requires matching evidence or a valid explicit administrator decision. Current L qualification and publication remain pending. The withdrawn J build passed 424 isolated suites and nine bounded native scenarios as 0.1.10-beta; those exact source/artifact results remain historical evidence and do not qualify these rebuilt 0.1.9-beta assets. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
 The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
-Historical H passed 423 isolated suites, four native install/rollback cases and three installed journal profiles before withdrawal. Earlier G 423/18/360 and withdrawn J 424/nine-native results remain separate historical evidence; they do not qualify the new lowercase-tag 0.1.9-beta correction or establish recovery of the reported target.
+Historical H passed 423 isolated suites, four native install/rollback cases and three installed journal profiles before withdrawal. Earlier G 423/18/360 and withdrawn J 424/nine-native results remain separate historical evidence; they do not qualify the new reserved-tag 0.1.9-beta correction or establish recovery of the reported target.
 
 ## Requirements
 
@@ -91,7 +91,7 @@ These commands manage SLL; they do not reboot the PBX or restart Asterisk. Add `
 
 ## Repair and recovery
 
-Installer-driven repair and upgrade await qualified, published lowercase-tag `v0.1.9-beta` assets. Follow the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the exact failed transaction directory; do not reset MFA, delete evidence or alter history to bypass a check.
+Installer-driven repair and upgrade await qualified, published reserved-tag `release-0.1.9-beta` assets. Follow the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the exact failed transaction directory; do not reset MFA, delete evidence or alter history to bypass a check.
 
 Export configuration under **General Settings > Config Backup**. Keep the export passphrase separately. Native FreePBX backups also include module recovery data; protect the whole backup archive. See [backup and restore](docs/RECOVERY.md).
 

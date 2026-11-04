@@ -40,7 +40,7 @@ def release_allowed(release, policy):
     if not isinstance(tag, str):
         return False
     match = re.fullmatch(r'(?:slsmassnotifyserver-|v)(' + VERSION + ')', tag)
-    if tag == 'V0.1.9-beta':
+    if tag in ('V0.1.9-beta', 'release-0.1.9-beta'):
         version = '0.1.9-beta'
     elif match:
         version = match.group(1)

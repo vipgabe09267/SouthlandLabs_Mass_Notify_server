@@ -1,14 +1,18 @@
 # Changelog
 
-## 0.1.9-beta — unpublished lowercase-tag correction, 2026-11-04
+## 0.1.9-beta — unpublished reserved-tag correction, 2026-11-04
 
-The software remains `0.1.9-beta`, candidate K, planned new lowercase tag `v0.1.9-beta`. The retired uppercase `V0.1.9-beta` tag remains immutable historical evidence. The available published prerelease is `0.1.8-beta`; this correction's commands/assets remain unavailable pending qualification and publication.
+The software remains `0.1.9-beta`, candidate L, planned new reserved tag `release-0.1.9-beta`. The retired uppercase `V0.1.9-beta` tag remains immutable historical evidence. The available published prerelease is `0.1.8-beta`; this correction's commands/assets remain unavailable pending qualification and publication.
 
 The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts.
 
 - Retain the strict monotonic MFA-counter/revision preservation, durable targets and ciphertext evidence, crash/retry behavior, original evidence retention and unexplained-history refusal implemented in J. No MFA/key reset or blanket settings exception is introduced.
-- Restore current runtime/API/XML/package/installer identities and update default release selection to lowercase `v0.1.9-beta`; historical uppercase signed evidence remains verifiable for recovery. Existing version-equality/downgrade protections remain unchanged.
-- Rebuild generated API/SBOM metadata and signed assets for the corrected version. Current K qualification remains pending. The withdrawn J 424-suite/nine-native evidence below belongs to its exact 0.1.10-beta source and artifacts, not this rebuild.
+- Restore current runtime/API/XML/package/installer identities and update default release selection to lowercase `release-0.1.9-beta`; historical uppercase signed evidence remains verifiable for recovery. Existing version-equality/downgrade protections remain unchanged.
+- Rebuild generated API/SBOM metadata and signed assets for the corrected version. Current L qualification remains pending. The withdrawn J 424-suite/nine-native evidence below belongs to its exact 0.1.10-beta source and artifacts, not this rebuild.
+
+## Historical K — unpublished lower-v candidate, 2026-11-04
+
+K passed its full 424-suite gate and fresh installation with 16/16 doctor checks. It was not published: GitHub immutable tag history prevents recreating v0.1.9-beta or slsmassnotifyserver-0.1.9-beta after deletion. Those K results belong to its exact archived source/assets, not L. The software remains 0.1.9-beta; L uses the separately reserved release-0.1.9-beta alias.
 
 ## 0.1.10-beta — withdrawn, 2026-11-04
 

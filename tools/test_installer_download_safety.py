@@ -87,6 +87,26 @@ class DownloadTests(unittest.TestCase):
         self.run_download(url=url)
         self.assertEqual(self.output.read_bytes(),b'package')
 
+    def test_only_exact_reserved_release_alias_can_download_assets(self):
+        root='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'
+        for name in ('slsmassnotifyserver-0.1.9-beta.tgz','release-manifest.json','release-manifest.sig'):
+            self.run_download(url=root+'release-0.1.9-beta/'+name)
+            self.assertEqual(self.output.read_bytes(),b'package');self.output.unlink()
+        for tag in ('release-0.1.10-beta','release-0.1.8-beta','release-0.1.9','release-0.1.09-beta','Release-0.1.9-beta','release-0.1.9-beta\n'):
+            with self.subTest(tag=tag),self.assertRaises(SystemExit):
+                self.run_download(url=root+tag+'/slsmassnotifyserver-0.1.9-beta.tgz')
+            self.last_factory.assert_not_called();self.assertFalse(self.output.exists())
+
+    def test_reserved_alias_and_offline_defaults_bind_exact_current_identity(self):
+        code=SOURCE.split('verify_publisher_release() {',1)[1].split("<<'PY'\n",1)[1].split('public_key = ',1)[0]
+        alias='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/release-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        for url in (alias,''):
+            namespace={}
+            with patch.dict(os.environ,{'SLS_RELEASE_URL':url}):exec(compile(code,'<shipped signed alias identity>','exec'),namespace)
+            self.assertEqual((namespace['release_tag'],namespace['version'],namespace['package']),('release-0.1.9-beta','0.1.9-beta','slsmassnotifyserver-0.1.9-beta.tgz'))
+        for url in (alias.replace('0.1.9-beta','0.1.10-beta'),alias.replace('/slsmassnotifyserver-0.1.9-beta.tgz','/slsmassnotifyserver-0.1.8-beta.tgz'),alias+'?x=1',alias.replace('vipgabe09267/','other/')):
+            with self.subTest(url=url),patch.dict(os.environ,{'SLS_RELEASE_URL':url}),self.assertRaises(SystemExit):exec(compile(code,'<shipped signed alias identity>','exec'),{})
+
     def test_manifest_url_identity_is_canonical_and_exact_before_authority_loading(self):
         code=SOURCE.split('verify_publisher_release() {',1)[1].split("<<'PY'\n",1)[1].split('public_key = ',1)[0]
         upper='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'

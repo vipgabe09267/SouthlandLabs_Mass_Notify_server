@@ -118,14 +118,14 @@ def sls_release_url(version, name):
     if (not isinstance(version,str) or not SLS_VERSION.fullmatch(version)
             or name not in ('slsmassnotifyserver-'+version+'.tgz','release-manifest.json','release-manifest.sig')):
         raise UpgradeError('Unsupported signed SLL release asset identity')
-    prefix='slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.'))) < (0,1,9) else 'v'
+    prefix='release-' if version=='0.1.9-beta' else 'slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.'))) < (0,1,9) else 'v'
     return 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'+prefix+version+'/'+name
 
 
 def download(url, destination, limit):
     upstream = r'https://mirror\.freepbx\.org/modules/packages/(dashboard|framework)/\1-(17\.[0-9]+(?:\.[0-9]+){1,3})\.tgz\.gpg'
     sls = (r'https://github\.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'
-           r'(?:(?:slsmassnotifyserver-|v)([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(?:slsmassnotifyserver-\1\.tgz|release-manifest\.(?:json|sig))|V0\.1\.9-beta/(?:slsmassnotifyserver-0\.1\.9-beta\.tgz|release-manifest\.(?:json|sig)))')
+           r'(?:(?:slsmassnotifyserver-|v)([0-9]+\.[0-9]+\.[0-9]+(?:-beta)?)/(?:slsmassnotifyserver-\1\.tgz|release-manifest\.(?:json|sig))|(?:V0\.1\.9-beta|release-0\.1\.9-beta)/(?:slsmassnotifyserver-0\.1\.9-beta\.tgz|release-manifest\.(?:json|sig)))')
     if not re.fullmatch(upstream, url) and not re.fullmatch(sls, url):
         raise UpgradeError('Unsupported upgrade package URL')
     request = urllib.request.Request(url, headers={'User-Agent': 'SLL-Upgrade-Inventory', 'Accept-Encoding': 'identity'})
