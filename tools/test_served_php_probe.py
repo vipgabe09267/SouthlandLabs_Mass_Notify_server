@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Verify the loopback prerequisite probe through an isolated PHP HTTP handler."""
 import json
+import xml.etree.ElementTree as ET
 import importlib.util
 import os
 import pwd
@@ -21,6 +22,7 @@ if os.environ.get('SLS_TEST_NAMESPACE') != 'entered' or any(
     raise SystemExit('Use the private fixture runner; served-PHP isolation verification failed.')
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_VERSION = ET.parse(ROOT / 'slsmassnotifyserver/module.xml').findtext('version')
 
 
 class ServedPhp(unittest.TestCase):
@@ -98,7 +100,7 @@ class ServedPhp(unittest.TestCase):
             self.assertEqual(body['probe'],'sls_served_php_v1');self.assertTrue(body['ok']);self.assertEqual(body['missing'],[])
             self.assertTrue(body['runtime_account_ok']);self.assertRegex(body['php_version'],r'^8\.[0-9]+\.[0-9]+')
             self.assertEqual(body['php_sapi'],'cli-server')
-            self.assertEqual(body['module_version'],'0.1.9-beta')
+            self.assertEqual(body['module_version'],CURRENT_VERSION)
             self.assertTrue(all(value is True for value in body['extensions'].values()))
             self.assertTrue(all(value is True for value in body['functions'].values()))
             self.assertEqual(set(body),{'probe','ok','missing','module_version','php_version','php_sapi','runtime_account_ok','extensions','functions'})

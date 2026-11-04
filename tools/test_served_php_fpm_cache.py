@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Qualify cached PHP upgrades through a private FPM pool and installer helper."""
 import json
+import xml.etree.ElementTree as ET
 import os
 from pathlib import Path
 import signal
@@ -20,6 +21,7 @@ if os.environ.get('SLS_TEST_NAMESPACE') != 'entered' or any(
     raise SystemExit('Use the private fixture runner; no PHP-FPM processes were started.')
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_VERSION = ET.parse(ROOT / 'slsmassnotifyserver/module.xml').findtext('version')
 
 
 def record(kind, payload=b''):
@@ -86,7 +88,9 @@ class ServedFpmCache(unittest.TestCase):
             (root/'runtime-security.php').write_text(helper);(root/'runtime-security.php').chmod(0o644)
             script=root/'index.php'
             candidate=(ROOT/'slsmassnotifyserver/api/sls-mass-notify/index.php').read_text()
-            script.write_text(candidate.replace("'module_version'=>'0.1.9-beta'", "'module_version'=>'0.1.7-beta'", 1)); script.chmod(0o644)
+            current_literal = "'module_version'=>'" + CURRENT_VERSION + "'"
+            self.assertEqual(candidate.count(current_literal), 1)
+            script.write_text(candidate.replace(current_literal, "'module_version'=>'0.1.7-beta'", 1)); script.chmod(0o644)
             address=root/'fpm.sock'; configuration=root/'fpm.conf'
             configuration.write_text(f'''[global]
 pid = {root}/fpm.pid
@@ -143,7 +147,7 @@ catch_workers_output = yes
                 for unused in range(80):
                     try:
                         after=request(address,script)
-                        if after['module_version']=='0.1.9-beta': break
+                        if after['module_version']==CURRENT_VERSION: break
                     except (OSError,RuntimeError): pass
                     time.sleep(.05)
                 else: self.fail('Reload did not replace cached PHP source')

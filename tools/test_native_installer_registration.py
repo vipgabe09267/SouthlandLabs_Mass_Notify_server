@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise native module registration results without a PBX or database."""
 import json
+import xml.etree.ElementTree as ET
 import os
 from pathlib import Path
 import re
@@ -9,11 +10,12 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_VERSION = ET.parse(ROOT / 'slsmassnotifyserver/module.xml').findtext('version')
 INSTALLER = ROOT / 'tools/install_release.sh'
 
 
 class NativeRegistration(unittest.TestCase):
-    def run_install(self, result='true', *, enabled=1, version='0.1.9-beta', status='enabled', operation='install', rows=1):
+    def run_install(self, result='true', *, enabled=1, version=CURRENT_VERSION, status='enabled', operation='install', rows=1):
         # The real installer PHP program runs against only its native boundary:
         # the registry and native install return. No hook or PBX bootstrap runs.
         with tempfile.TemporaryDirectory(prefix='sls-native-registration-') as folder:
@@ -43,7 +45,7 @@ class FreePBX {
 class module_functions {
  private $didEnable=false;
  public static function create() {return new self;}
- public function getinfo($name) {return [$name=>['status'=>$this->didEnable?MODULE_STATUS_ENABLED:constant('MODULE_STATUS_'.strtoupper(getenv('FIXTURE_STATUS'))),'version'=>'0.1.9-beta']];}
+ public function getinfo($name) {return [$name=>['status'=>$this->didEnable?MODULE_STATUS_ENABLED:constant('MODULE_STATUS_'.strtoupper(getenv('FIXTURE_STATUS'))),'version'=>getenv('FIXTURE_SOURCE_VERSION')]];}
  public function install($name,$force=false,$ignorechecks=true) {
   if ($force || $ignorechecks) {throw new RuntimeException('Native dependency/conflict checks were bypassed');}
   file_put_contents(getenv('FIXTURE_CALLS'),"install\\n",FILE_APPEND);
@@ -76,7 +78,8 @@ case "$FIXTURE_OPERATION" in
 esac
 '''
             env = {**os.environ, 'FIXTURE_RESULT': result, 'FIXTURE_ENABLED': str(enabled),
-                   'FIXTURE_VERSION': version, 'FIXTURE_STATUS': status,
+                   'FIXTURE_VERSION': version, 'FIXTURE_SOURCE_VERSION': CURRENT_VERSION,
+                   'FIXTURE_STATUS': status,
                    'FIXTURE_OPERATION': operation, 'FIXTURE_ROWS': str(rows),
                    'FIXTURE_BOOTSTRAP': str(fixture),
                    'FIXTURE_CALLS': str(root / 'calls')}
@@ -127,7 +130,7 @@ esac
         self.assertEqual(calls, '')
 
     def test_registry_state_uses_native_boolean_and_version_not_translated_table(self):
-        for kwargs, expected in [({}, 'enabled\t0.1.9-beta\n'), ({'enabled': 0}, 'disabled\t0.1.9-beta\n'),
+        for kwargs, expected in [({}, 'enabled\t'+CURRENT_VERSION+'\n'), ({'enabled': 0}, 'disabled\t'+CURRENT_VERSION+'\n'),
                                  ({'rows': 0}, 'absent\n')]:
             with self.subTest(**kwargs):
                 proc, calls = self.run_install(operation='state', **kwargs)

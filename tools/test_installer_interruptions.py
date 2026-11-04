@@ -13,12 +13,14 @@ import subprocess
 import tempfile
 import time
 import unittest
+import xml.etree.ElementTree as ET
 import tarfile
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 BIN=ROOT/'slsmassnotifyserver/bin/sls_mass_notify'
 SOURCE=ROOT/'tools/install_release.sh'
+CURRENT_VERSION=ET.parse(ROOT/'slsmassnotifyserver/module.xml').findtext('version').strip()
 HARNESS=r'''
 source "$1"
 fixture="$2"; scenario="$3"
@@ -678,19 +680,19 @@ recover_interrupted_installation "$3"
                 patched.write_text(text)
                 patched.chmod(0o600)
                 carrier=root/'carrier';carrier.mkdir(mode=0o700)
-                carrier_package=carrier/'slsmassnotifyserver-0.1.9-beta.tgz'
+                carrier_package=carrier/('slsmassnotifyserver-'+CURRENT_VERSION+'.tgz')
                 current={name:(BIN/name).read_bytes() for name in names}
                 current['sls_release_trust.py']=verifier.encode()
                 with tarfile.open(carrier_package,'w:gz') as archive:
                     for filename,body in current.items():
                         member=tarfile.TarInfo('slsmassnotifyserver/bin/sls_mass_notify/'+filename)
                         member.size=len(body);archive.addfile(member,io.BytesIO(body))
-                    body=b'<module><rawname>slsmassnotifyserver</rawname><version>0.1.9-beta</version></module>'
+                    body=('<module><rawname>slsmassnotifyserver</rawname><version>'+CURRENT_VERSION+'</version></module>').encode()
                     member=tarfile.TarInfo('slsmassnotifyserver/module.xml');member.size=len(body)
                     archive.addfile(member,io.BytesIO(body))
                 carrier_manifest=carrier/'release-manifest.json'
-                carrier_manifest.write_text(json.dumps({'schema':1,'version':'0.1.9-beta',
-                    'tag':'slsmassnotifyserver-0.1.9-beta','package':carrier_package.name,
+                carrier_manifest.write_text(json.dumps({'schema':1,'version':CURRENT_VERSION,
+                    'tag':'v'+CURRENT_VERSION,'package':carrier_package.name,
                     'installer_sha256':hashlib.sha256(patched.read_bytes()).hexdigest(),
                     'package_sha256':hashlib.sha256(carrier_package.read_bytes()).hexdigest()}))
                 subprocess.run(['openssl','pkeyutl','-sign','-rawin','-inkey',str(key),'-in',str(carrier_manifest),

@@ -1,16 +1,33 @@
 # Qualification boundaries
 
-`0.1.9-beta` is an unpublished source candidate after withdrawal of the V0.1.9-beta release on 2026-11-03. The available published prerelease is `0.1.8-beta`. The historical H tests below do not establish recovery of the reported actual LiteNet state or qualify a replacement release. No entry certifies every FreePBX layout, sustained load or delivery provider.
+`0.1.10-beta` is the unpublished replacement candidate, with planned tag `v0.1.10-beta`. The available published prerelease remains `0.1.8-beta`. Its command examples are unavailable pending qualification and publication. Historical H/G results below do not qualify the replacement or establish recovery of the reported actual LiteNet state. No entry certifies every FreePBX layout, sustained load or delivery provider.
 
 ## Withdrawal and reported actual recovery — 2026-11-03
 
-The V0.1.9-beta GitHub release and nine downloads were removed; anonymous release and installer requests returned 404 after withdrawal. Public source/tag history remains available for historical recoverability. It must not be used to advertise or reinstall the withdrawn package. A replacement version/tag and corrected signed assets have not been selected.
+The V0.1.9-beta GitHub release and nine downloads were removed; anonymous release and installer requests returned 404 after withdrawal. Public source/tag history remains historical evidence. The immutable tag is retired and must not advertise an installer or be reused. The replacement has a new 0.1.10-beta identity; corrected signed assets and publication remain pending.
 
 The reported LiteNet transaction has **22 baseline closed-history records: 1 unchanged, 21 missing and 0 with proven expiry**. The missing count and age alone cannot establish expiry. Ordinary recovery must continue to refuse unexplained loss with exit 4. No administrator has accepted this loss, and this withdrawal does not authorize acceptance, reconstruction or replacement of the live ledger.
 
-An independent active-configuration difference is limited to the TOTP replay counter `totp_last_counter` and the `operator_access` section revision. The current encoded hash guard rejects that change. Its handling remains under review; there is no approved configuration overwrite, masked comparison or corrected recovery result. Retain live settings and protected snapshots together.
+An independent active-configuration difference was limited to the TOTP replay counter `totp_last_counter` and the `operator_access` section revision. The replacement implements a strict semantic proof for that limited progress, without broadly ignoring operator settings or resetting counters. Separate durable targets preserve it while original snapshots, hashes and intentions remain unchanged. Retain live settings and protected snapshots together; corrected native recovery remains pending.
 
-The H 423-suite/four-lifecycle/three-journal-profile results below are historical and insufficient to establish this actual recovery. No successful target recovery, replacement release publication or implemented correction of these blockers is claimed.
+The H 423-suite/four-lifecycle/three-journal-profile results below remain historical. They do not establish this actual recovery or qualify 0.1.10-beta. No successful corrected native recovery or replacement publication is claimed.
+
+## Unpublished 0.1.10-beta correction — 2026-11-03
+
+**207 focused cases across seven isolated suites passed** through the official namespace wrapper: configuration readers, installer transactions, interruptions, worker/settings guards, history review, installation idleness/history and real PHP MFA recovery. This is a focused result, not the complete release gate.
+
+The cases exercise actual PHP TOTP consumption and replay rejection, active/pending settings, keeper-lock exclusion, durable target publication, SIGKILL/retry boundaries, further MFA advancement and strict unrelated-change refusals. Authenticated transaction fixtures use real temporary publisher signatures; verified rollback records bind original/target/intent evidence, later transaction creation preserves it, and tampered originals, targets or intentions refuse pruning.
+
+Future installer settings writes retain exact ciphertext before publishing their hash intentions. This allows an approved intermediate configuration plus later MFA progress to be proved. A legacy hash-only intermediate without corresponding bytes remains unprovable; the original snapshot still supports a pure MFA delta. Unresolved immediate-settings transactions, divergent staged operator policy, credential/recovery-code/passkey changes, malformed counters and unrelated revision changes remain conflicts.
+
+| Current replacement gate | Status |
+| --- | --- |
+| Focused recovery tests | Passed: 207 cases / seven isolated suites. |
+| Full 424-suite, required browser/UI and schema gate | Pending. |
+| Corrected native recovery of a signed old transaction | Pending. |
+| New signed installer/package, public readback and provenance | Pending; command examples remain unavailable. |
+
+The unexplained 21-record loss remains a separate gate. Ordinary recovery must return exit 4 before MFA-target preparation or configuration/runtime restoration when matching evidence or a valid explicit decision is absent. These focused tests do not supply the reported target's missing evidence or an administrator's consent.
 
 ## Historical withdrawn H — 2026-11-03
 

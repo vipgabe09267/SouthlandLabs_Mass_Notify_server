@@ -794,7 +794,7 @@ foreach ((array)($settings['sipnotify']['format_overrides'] ?? []) as $extension
 						<div class="row">
 							<div class="col-sm-6 col-md-3 form-group">
 								<label for="sls-update-pin"><?php echo _('Pinned version'); ?></label>
-								<input id="sls-update-pin" class="form-control" name="updates[pinned_version]" maxlength="19" placeholder="0.1.9-beta" value="<?php echo htmlspecialchars($updates['pinned_version'] ?? '', ENT_QUOTES, 'UTF-8'); ?>" aria-describedby="sls-update-pin-help">
+								<input id="sls-update-pin" class="form-control" name="updates[pinned_version]" maxlength="19" placeholder="0.1.10-beta" value="<?php echo htmlspecialchars($updates['pinned_version'] ?? '', ENT_QUOTES, 'UTF-8'); ?>" aria-describedby="sls-update-pin-help">
 								<p id="sls-update-pin-help" class="help-block"><?php echo _('Optional exact version. Leave blank for the newest eligible release. An older pin holds the current installation; it does not downgrade it.'); ?></p>
 							</div>
 							<div class="col-sm-6 col-md-3 form-group">

@@ -42,6 +42,59 @@ os.read = changed_read
 
 
 class InstallerConfigReaders(unittest.TestCase):
+    def test_recovery_without_original_configuration_preserves_fresh_settings(self):
+        helpers = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify'
+        spec = importlib.util.spec_from_file_location('fresh_recovery_crypto', helpers / 'sls_config_crypto.py')
+        crypto = importlib.util.module_from_spec(spec); spec.loader.exec_module(crypto)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); recovery = root / 'recovery'; recovery.mkdir(mode=0o700)
+            active = root / 'active'; original = crypto.encode_config({'fresh_fixture': True})
+            active.write_bytes(original); active.chmod(0o640)
+            program = r'''
+source "$1"
+CONFIG_FILE="$2/active"; CONFIG_SNAPSHOT=""; CONFIG_HASH_BEFORE=""
+PENDING_CONFIG_PATH="$2/pending"; PENDING_CONFIG_SNAPSHOT=""
+PENDING_CONFIG_STATE=absent; PENDING_CONFIG_HASH=""
+RECOVERY_DIR="$2/recovery"; TRANSACTION_TOOL="$3"
+verify_recovery_configuration || exit $?
+[ -z "$CONFIG_RECOVERY_SNAPSHOT" ] && [ "$CONFIG_RECOVERY_HASH" = absent ]
+'''
+            result = subprocess.run(['bash', '-c', program, 'fixture',
+                str(Path(__file__).resolve().parents[1] / 'tools/install_release.sh'),
+                str(root), str(helpers / 'sls_install_transaction.py')],
+                capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(active.read_bytes(), original)
+            self.assertFalse((recovery / 'configuration-mfa-recovery.json').exists())
+
+    def test_recovery_preserves_a_monotonic_totp_counter_without_changing_original_evidence(self):
+        helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
+        spec = importlib.util.spec_from_file_location('mfa_configuration_transaction_fixture', helper)
+        journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); recovery = root / 'recovery'; recovery.mkdir(mode=0o700)
+            original = {'operator_access': {'portal_enabled': True, 'accounts': [{'id': 'op_fixture', 'source': 'portal', 'enabled': True,
+                'auth': {'totp_secret_enc': 'op1:' + 'A' * 80, 'totp_last_counter': 10}}]},
+                'immediate_config_revisions': {'operator_access': 2}, 'unrelated': {'preserve': True}}
+            current = json.loads(json.dumps(original))
+            current['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 11
+            current['immediate_config_revisions']['operator_access'] = 3
+            snapshot = root / 'config.snapshot'; snapshot.write_text(json.dumps(original)); snapshot.chmod(0o600)
+            active = root / 'active'; active.write_text(json.dumps(current)); active.chmod(0o640)
+            before = snapshot.read_bytes(); digest = hashlib.sha256(before).hexdigest()
+            try:
+                prepare = getattr(journal, 'prepare_configuration_recovery', None)
+                if prepare is None:
+                    journal.assert_configuration_recoverable(recovery, digest, hashlib.sha256(active.read_bytes()).hexdigest(), 'absent', '', 'absent')
+                    self.fail('No durable MFA-preserving configuration target was produced')
+                target = prepare(recovery, digest, snapshot, active, 'absent', '', '', root / 'pending')
+            except journal.TransactionError as error:
+                self.fail('A normal MFA counter advance blocked protected recovery: ' + str(error))
+            self.assertEqual(snapshot.read_bytes(), before)
+            self.assertEqual(json.loads(Path(target['active_snapshot']).read_bytes()), current)
+            self.assertEqual(target['active_sha256'], hashlib.sha256(active.read_bytes()).hexdigest())
+            self.assertEqual(target['pending_sha256'], 'absent')
+
     def run_reader(self, body, settings, change=""):
         return subprocess.run(
             ["/usr/bin/python3", "-I", "-c", (MUTATION if change else "") + body],
@@ -167,6 +220,160 @@ guard_config_on_exit
             path.chmod(0o644)
             with self.assertRaises(journal.TransactionError):
                 journal.configuration_intents(root, digest)
+
+    def test_configuration_intent_retains_exact_afterimage_before_publishing_hash_chain(self):
+        helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
+        spec = importlib.util.spec_from_file_location('configuration_intent_afterimage_fixture', helper)
+        journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); before = b'original encrypted settings'; after = b'installer encrypted settings'
+            digest = hashlib.sha256(before).hexdigest()
+            with mock.patch.object(journal, 'atomic', side_effect=OSError('Fixture intent publication interruption')):
+                with self.assertRaises(OSError):
+                    journal.record_configuration_intent(root, digest, before, after)
+            image = root / ('configuration-intent-' + hashlib.sha256(after).hexdigest() + '.snapshot')
+            self.assertTrue(image.exists(), 'Intent publication began without durable exact ciphertext evidence')
+            self.assertEqual(image.read_bytes(), after)
+            self.assertEqual(image.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((root / 'configuration-intents.json').exists())
+
+    def test_interrupted_configuration_image_never_publishes_partial_final_bytes(self):
+        helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
+        spec = importlib.util.spec_from_file_location('configuration_image_fixture', helper)
+        journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); body = b'complete encrypted configuration evidence'
+            path = root / ('configuration-mfa-' + hashlib.sha256(body).hexdigest() + '.snapshot')
+            program = '''import importlib.util,os,pathlib,sys
+spec=importlib.util.spec_from_file_location('crashed_image',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+os.fsync=lambda _fd:os._exit(77)
+m.configuration_image(pathlib.Path(sys.argv[2]),'configuration-mfa-',b'complete encrypted configuration evidence')
+'''
+            result = subprocess.run(['/usr/bin/python3', '-I', '-c', program, str(helper), name], timeout=5)
+            self.assertEqual(result.returncode, 77)
+            self.assertFalse(path.exists(), 'A kill before durable completion exposed a final image name')
+            published = journal.configuration_image(root, 'configuration-mfa-', body)
+            self.assertEqual(published.read_bytes(), body)
+            inode = published.stat().st_ino
+            self.assertEqual(journal.configuration_image(root, 'configuration-mfa-', body).stat().st_ino, inode)
+            published.write_bytes(b'contradictory evidence')
+            with self.assertRaises(journal.TransactionError): journal.configuration_image(root, 'configuration-mfa-', body)
+            self.assertEqual(published.read_bytes(), b'contradictory evidence')
+
+    def test_mfa_after_installer_write_requires_exact_afterimage_and_survives_pre_restore_retry(self):
+        self.assertEqual(os.environ.get('SLS_TEST_NAMESPACE'), 'entered', 'Use the official isolated runner')
+        directory = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify'
+        def load(name):
+            spec = importlib.util.spec_from_file_location('fixture_' + name, directory / (name + '.py'))
+            module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module); return module
+        journal, crypto = load('sls_install_transaction'), load('sls_config_crypto')
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); recovery = root / 'recovery'; recovery.mkdir(mode=0o700)
+            original = {'deployment_profile': 'standard', 'operator_access': {'portal_enabled': True, 'accounts': [{'id': 'op_fixture',
+                'source': 'portal', 'enabled': True, 'auth': {'totp_secret_enc': 'op1:' + 'A' * 80, 'totp_last_counter': 10}}]},
+                'immediate_config_revisions': {'operator_access': 2}, 'unrelated': True}
+            before = json.dumps(original).encode(); snapshot = root / 'config.snapshot'
+            snapshot.write_bytes(before); snapshot.chmod(0o600); digest = hashlib.sha256(before).hexdigest()
+            approved = json.loads(json.dumps(original)); approved['deployment_profile'] = 'lite'
+            encoded = json.dumps(approved).encode(); journal.record_configuration_intent(recovery, digest, before, encoded)
+            chain = (recovery / 'configuration-intents.json').read_bytes()
+            image = recovery / ('configuration-intent-' + hashlib.sha256(encoded).hexdigest() + '.snapshot')
+            image.unlink()  # Legacy transactions have hash-only intentions.
+            active = root / 'active'; current = json.loads(json.dumps(approved))
+            current['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 11
+            current['immediate_config_revisions']['operator_access'] = 3
+            active.write_text(json.dumps(current)); active.chmod(0o640)
+            arguments = (recovery, digest, snapshot, active, 'absent', '', '', root / 'pending')
+            with self.assertRaises(journal.TransactionError): journal.prepare_configuration_recovery(*arguments)
+            self.assertFalse((recovery / 'configuration-mfa-recovery.json').exists())
+            journal.configuration_image(recovery, 'configuration-intent-', encoded)
+            target = journal.prepare_configuration_recovery(*arguments)
+            expected = json.loads(json.dumps(original))
+            expected['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 11
+            expected['immediate_config_revisions']['operator_access'] = 3
+            self.assertEqual(crypto.read_config(target['active_snapshot']), expected)
+            self.assertEqual(journal.prepare_configuration_recovery(*arguments), target,
+                             'Retry before target restoration lost its durable MFA cursor')
+            current['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 12
+            current['immediate_config_revisions']['operator_access'] = 4
+            active.write_text(json.dumps(current))
+            newer = journal.prepare_configuration_recovery(*arguments)
+            self.assertEqual(crypto.read_config(newer['active_snapshot'])['operator_access']['accounts'][0]['auth']['totp_last_counter'], 12)
+            self.assertEqual(snapshot.read_bytes(), before)
+            self.assertEqual((recovery / 'configuration-intents.json').read_bytes(), chain)
+
+    def test_mfa_target_publication_failure_preserves_live_and_original_configuration(self):
+        helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
+        spec = importlib.util.spec_from_file_location('mfa_storage_fixture', helper)
+        journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); recovery = root / 'recovery'; recovery.mkdir(mode=0o700)
+            original = {'operator_access': {'portal_enabled': True, 'accounts': [{'id': 'op_fixture', 'source': 'portal', 'enabled': True,
+                'auth': {'totp_secret_enc': 'op1:' + 'A' * 80, 'totp_last_counter': 10}}]}, 'immediate_config_revisions': {'operator_access': 2}}
+            snapshot = root / 'config.snapshot'; snapshot.write_text(json.dumps(original)); snapshot.chmod(0o600)
+            current = json.loads(json.dumps(original)); current['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 11
+            current['immediate_config_revisions']['operator_access'] = 3
+            active = root / 'active'; active.write_text(json.dumps(current)); active.chmod(0o640)
+            before = (snapshot.read_bytes(), active.read_bytes())
+            arguments = (recovery, hashlib.sha256(before[0]).hexdigest(), snapshot, active, 'absent', '', '', root / 'pending')
+            with mock.patch.object(journal.os, 'fsync', side_effect=OSError('Fixture storage failure')):
+                with self.assertRaises(journal.TransactionError): journal.prepare_configuration_recovery(*arguments)
+            self.assertFalse((recovery / 'configuration-mfa-recovery.json').exists())
+            self.assertEqual((snapshot.read_bytes(), active.read_bytes()), before)
+            target = journal.prepare_configuration_recovery(*arguments)
+            self.assertEqual(Path(target['active_snapshot']).read_bytes(), before[1])
+
+    def test_ordinary_recovery_can_restore_missing_pending_but_mfa_merge_cannot_invent_it(self):
+        helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
+        spec = importlib.util.spec_from_file_location('pending_absence_fixture', helper)
+        journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); recovery = root / 'recovery'; recovery.mkdir(mode=0o700)
+            settings = {'operator_access': {'portal_enabled': True, 'accounts': [{'id': 'op_fixture', 'source': 'portal', 'enabled': True,
+                'auth': {'totp_secret_enc': 'op1:' + 'A' * 80, 'totp_last_counter': 10}}]}, 'immediate_config_revisions': {'operator_access': 2}}
+            body = json.dumps(settings).encode(); digest = hashlib.sha256(body).hexdigest()
+            snapshot = root / 'config.snapshot'; snapshot.write_bytes(body); snapshot.chmod(0o600)
+            pending_snapshot = root / 'pending.snapshot'; pending_snapshot.write_bytes(body); pending_snapshot.chmod(0o600)
+            active = root / 'active'; active.write_bytes(body); active.chmod(0o640)
+            args = (recovery, digest, snapshot, active, 'present', digest, pending_snapshot, root / 'pending')
+            try: target = journal.prepare_configuration_recovery(*args)
+            except journal.TransactionError as error: self.fail('Ordinary approved missing-file recovery regressed: ' + str(error))
+            self.assertEqual(target['pending_snapshot'], str(pending_snapshot))
+            self.assertEqual(target['pending_sha256'], digest)
+            settings['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 11
+            settings['immediate_config_revisions']['operator_access'] = 3
+            active.write_text(json.dumps(settings))
+            with self.assertRaises(journal.TransactionError): journal.prepare_configuration_recovery(*args)
+            self.assertFalse((recovery / 'configuration-mfa-recovery.json').exists())
+
+    def test_saved_paired_mfa_target_handles_active_absence_but_preserves_missing_pending_conflict(self):
+        helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
+        spec = importlib.util.spec_from_file_location('saved_mfa_absence_fixture', helper)
+        journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); recovery = root / 'recovery'; recovery.mkdir(mode=0o700)
+            original = {'operator_access': {'portal_enabled': True, 'accounts': [{'id': 'op_fixture', 'source': 'portal', 'enabled': True,
+                'auth': {'totp_secret_enc': 'op1:' + 'A' * 80, 'totp_last_counter': 10}}]}, 'immediate_config_revisions': {'operator_access': 2}}
+            staged = json.loads(json.dumps(original)); staged['staged_setting'] = 'preserve'; staged['immediate_config_revisions']['operator_access'] = 5
+            snapshots = []; hashes = []
+            for label, settings in [('config', original), ('pending', staged)]:
+                path = root / (label + '.snapshot'); path.write_text(json.dumps(settings)); path.chmod(0o600)
+                snapshots.append(path); hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+            active, pending = root / 'active', root / 'pending'
+            for path, settings in [(active, original), (pending, staged)]:
+                settings = json.loads(json.dumps(settings))
+                settings['operator_access']['accounts'][0]['auth']['totp_last_counter'] = 11
+                settings['immediate_config_revisions']['operator_access'] = 6
+                path.write_text(json.dumps(settings)); path.chmod(0o640)
+            arguments = (recovery, hashes[0], snapshots[0], active, 'present', hashes[1], snapshots[1], pending)
+            target = journal.prepare_configuration_recovery(*arguments)
+            pending_bytes = pending.read_bytes(); active.unlink()
+            self.assertEqual(journal.prepare_configuration_recovery(*arguments), target)
+            self.assertEqual(json.loads(Path(target['active_snapshot']).read_bytes())['operator_access']['accounts'][0]['auth']['totp_last_counter'], 11)
+            self.assertEqual(pending.read_bytes(), pending_bytes)
+            pending.unlink()
+            with self.assertRaises(journal.TransactionError): journal.prepare_configuration_recovery(*arguments)
+            self.assertFalse(active.exists()); self.assertFalse(pending.exists())
 
     def test_configuration_snapshot_retention_is_repeatable(self):
         with tempfile.TemporaryDirectory() as name:

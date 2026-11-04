@@ -219,7 +219,7 @@ PYVOICECACHE
     for ((attempt = 0; attempt < 2; attempt++)); do
       if /usr/bin/timeout --signal=TERM --kill-after=5 95 /usr/bin/curl -fL --proto '=https' --proto-redir '=https' \
         --max-filesize "$expected_bytes" --connect-timeout 20 --max-time 90 \
-        -A "SouthlandLabs-Mass-Notify-Server/0.1.9-beta" \
+        -A "SouthlandLabs-Mass-Notify-Server/0.1.10-beta" \
         -o - "$url" | bounded_voice_stream "$tmp" "$expected_bytes"; then
         downloaded=1
         break

@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **0.1.9-beta is withdrawn.** Its GitHub release and downloads have been removed. The available published prerelease is **0.1.8-beta**; the 0.1.9-beta source candidate is unpublished while recovery corrections are investigated.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **0.1.10-beta is an unpublished candidate**, with planned tag `v0.1.10-beta`. The available published prerelease remains **0.1.8-beta**. **0.1.9-beta is withdrawn**; its release and downloads were removed, and the retired `V0.1.9-beta` tag must not be reused.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,21 +14,35 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-**Installation and upgrade commands for 0.1.9-beta are suspended pending a corrected signed release.** Do not install, repair or upgrade from the retired `V0.1.9-beta` assets or copied offline bundles. The source tag remains historical recovery evidence; it does not advertise an available installer. A replacement version and tag have not been selected.
+**The following 0.1.10-beta command examples are unavailable pending qualification and publication. Do not run them yet.** They document the planned new release; no corrected signed package or successful actual target recovery is claimed. Never substitute retired `V0.1.9-beta` downloads or an old offline bundle.
 
 The latest remaining published prerelease is `0.1.8-beta` (tag `slsmassnotifyserver-0.1.8-beta`). This is release availability information, not an instruction to downgrade an existing PBX or use it as a recovery carrier. Preserve existing settings, publisher trust and every failed transaction directory.
 
-The reported LiteNet recovery has 22 baseline history records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history recovery must continue to return exit 4 without matching evidence; no administrator has accepted the missing history. Independently, configuration differences limited to `totp_last_counter` and the `operator_access` revision currently trigger the configuration hash guard. Neither blocker has been resolved by this withdrawal. See [recovery operations](docs/INSTALLER_OPERATIONS.md) and the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+Planned fresh installation, **after the new release is qualified and published**:
 
-Historical bootstrap identity is retained for evidence checks only:
-
-```text
-bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh
+```bash
+curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.10-beta/tools/install_bootstrap.sh &&
+printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
+sudo bash ./sls-bootstrap.sh 0.1.10-beta
 ```
 
-The former invocation `sls-bootstrap.sh 0.1.9-beta` is withdrawn; do not run it. A checksum or publisher signature authenticates old bytes and does not make the withdrawn installer suitable for use. Updated installation commands will accompany a newly qualified signed release.
+Planned existing-installation upgrade or repair, **also unavailable until publication**:
 
-Candidate H previously passed 423 isolated suites, four native install/rollback cases and three installed journal profiles. Those bounded historical results did not cover the reported target recovery blockers and do not qualify a replacement release. Earlier G 423/18/360 results remain historical as well.
+```bash
+curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.10-beta/tools/install_bootstrap.sh &&
+printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
+sudo bash ./sls-bootstrap.sh 0.1.10-beta --upgrade
+```
+
+The unchanged bootstrap supports the new version's generic `v` tag. `--upgrade` authenticates against existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. An eligible unattended Lite installation needs explicit `--lite` (after `--upgrade` when upgrading). Review the limits below before selecting it.
+
+The candidate implements strict preservation of consumed MFA counters and the associated operator-access revision during recovery. Separate durable targets preserve that progress without replacing original evidence or accepting unrelated settings edits. **207 focused cases across seven isolated suites passed**; the full 424-suite gate and corrected native recovery remain pending.
+
+The reported LiteNet history still has 22 baseline records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary recovery must return exit 4 without matching evidence; no administrator has accepted the missing history. MFA handling does not waive this gate. See [recovery operations](docs/INSTALLER_OPERATIONS.md) and the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+
+Historical H passed 423 isolated suites, four native install/rollback cases and three installed journal profiles before withdrawal. Those results and earlier G 423/18/360 evidence do not qualify 0.1.10-beta or establish recovery of the reported target.
 
 ## Requirements
 
@@ -41,7 +55,7 @@ The locked speech runtime requires an x86-64-v2 CPU on every CPU available to th
 
 **Standard is the default.** If usable RAM falls below its baseline, the installer checks whether Lite can run, explains its limits and asks before installing it. Ordinary kernel reservations on a nominal 4 GiB system are allowed. Declining the Lite prompt cancels installation.
 
-For a future corrected release, unattended Lite installation will require explicit selection. The withdrawn bootstrap command is suspended along with the Standard installation commands above.
+For the unpublished 0.1.10-beta candidate, unattended Lite installation requires explicit selection. Its command examples above remain unavailable until qualification and publication.
 
 Lite allows one speech renderer, two waiting speech jobs, four simultaneous desktop streams, one Weather/Lightning delivery worker and two Weather.gov fetch workers. It retains core notifications, scheduling and local operator authentication. Saved Enterprise configuration is retained but disabled. Hosts that meet Standard requirements cannot select Lite.
 
@@ -77,7 +91,7 @@ These commands manage SLL; they do not reboot the PBX or restart Asterisk. Add `
 
 ## Repair and recovery
 
-Installer-driven repair and upgrade remain suspended pending a corrected signed release. Follow the evidence-preservation guidance in the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the recovery path printed by a failed installer; do not delete it, replace live settings or alter history to bypass a check.
+Installer-driven repair and upgrade await a qualified, published 0.1.10-beta release. Follow the evidence-preservation guidance in the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the exact recovery path printed by a failed installer; do not delete it, reset MFA state or alter history to bypass a check.
 
 Export configuration under **General Settings > Config Backup**. Keep the export passphrase separately. Native FreePBX backups also include module recovery data; protect the whole backup archive. See [backup and restore](docs/RECOVERY.md).
 

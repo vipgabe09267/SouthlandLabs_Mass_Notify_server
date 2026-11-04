@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -235,6 +238,7 @@ def record_configuration_intent(recovery, original_hash, before, after):
     before_hash, after_hash = (hashlib.sha256(body).hexdigest() for body in (before, after))
     if previous != before_hash or len(value['writes']) >= 8:
         raise TransactionError('Configuration no longer matches this installer write transaction')
+    configuration_image(Path(recovery), 'configuration-intent-', after)
     value['writes'].append({'before_sha256': before_hash, 'after_sha256': after_hash})
     atomic(Path(recovery) / 'configuration-intents.json', value)
 
@@ -252,6 +256,278 @@ def assert_configuration_recoverable(recovery, original_hash, current_hash,
             raise TransactionError('Pending settings changed after the failed installation; preserve both versions for review')
     elif pending_state == 'absent' and current_pending_hash != 'absent':
         raise TransactionError('New pending settings appeared after the failed installation; preserve them for review')
+
+
+def configuration_image(recovery, prefix, body):
+    """Publish exact root-private ciphertext before its authorizing journal."""
+    if prefix not in ('configuration-intent-', 'configuration-mfa-') or not isinstance(body, bytes) or not 0 < len(body) <= 16 * 1024 * 1024:
+        raise TransactionError('Invalid configuration recovery image')
+    name = prefix + hashlib.sha256(body).hexdigest() + '.snapshot'
+    parent = directory(recovery)
+    temporary = None; descriptor = -1
+    try:
+        if stat.S_IMODE(os.fstat(parent).st_mode) != 0o700:
+            raise TransactionError('Configuration recovery directory is not root-private')
+        try: existing = read(recovery / name, 16 * 1024 * 1024)
+        except FileNotFoundError: existing = None
+        if existing is None:
+            temporary = '.configuration-image-' + os.urandom(12).hex()
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+            view = memoryview(body)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0: raise TransactionError('Incomplete configuration recovery image')
+                view = view[written:]
+            os.fsync(descriptor)
+            if read(recovery / temporary, 16 * 1024 * 1024) != body:
+                raise TransactionError('Configuration staging image changed')
+            libc = ctypes.CDLL(None, use_errno=True)
+            rename = libc.renameat2
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            if rename(parent, temporary.encode(), parent, name.encode(), 1):
+                number = ctypes.get_errno()
+                if number != errno.EEXIST:
+                    raise OSError(number, 'Atomic configuration image publication failed')
+            else:
+                temporary = None
+        if read(recovery / name, 16 * 1024 * 1024) != body:
+            raise TransactionError('Configuration recovery image conflicts with retained evidence')
+        published = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try: os.fsync(published)
+        finally: os.close(published)
+        os.fsync(parent)
+    finally:
+        try:
+            if temporary is not None and descriptor >= 0:
+                try:
+                    staged = os.stat(temporary, dir_fd=parent, follow_symlinks=False)
+                    opened = os.fstat(descriptor)
+                    if (staged.st_dev, staged.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise TransactionError('Configuration staging identity changed; preserve evidence')
+                    os.unlink(temporary, dir_fd=parent)
+                except FileNotFoundError: pass
+        finally:
+            if descriptor >= 0: os.close(descriptor)
+            os.close(parent)
+    return recovery / name
+
+
+def configuration_canonical(value):
+    # JSON equality is type-sensitive: Python considers True == 1 == 1.0.
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True, allow_nan=False)
+
+
+def configuration_revisions(settings):
+    value = settings.get('immediate_config_revisions', {})
+    if value == []: value = {}  # PHP encodes an empty revision map as [].
+    if (type(value) is not dict or len(value) > 256 or any(
+            not isinstance(key, str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,79}', key)
+            or key == 'immediate_config_revisions' or type(revision) is not int
+            or not 0 <= revision <= 2 ** 63 - 2 for key, revision in value.items())):
+        raise TransactionError('Invalid immediate configuration revisions')
+    return value
+
+
+def configuration_mfa_delta(before, after, *, require_progress=True):
+    """Permit only counter consumption for otherwise identical enrolled logins."""
+    left, right = copy.deepcopy(before), copy.deepcopy(after)
+    if type(left) is not dict or type(right) is not dict:
+        raise TransactionError('Invalid protected settings object')
+    old_revisions, new_revisions = configuration_revisions(left), configuration_revisions(right)
+    left.pop('immediate_config_revisions', None); right.pop('immediate_config_revisions', None)
+    a, b = left.get('operator_access'), right.get('operator_access')
+    if type(a) is not dict or type(b) is not dict or type(a.get('accounts')) is not list or type(b.get('accounts')) is not list or len(a['accounts']) != len(b['accounts']) or len(a['accounts']) > 100:
+        raise TransactionError('Operator accounts changed during configuration recovery')
+    counters = {}; progressed = False; identities = set()
+    for old, new in zip(a['accounts'], b['accounts']):
+        if type(old) is not dict or type(new) is not dict or not isinstance(old.get('id'), str) or not old['id'] or old['id'] in identities or old.get('id') != new.get('id'):
+            raise TransactionError('Operator account identity or order changed')
+        identities.add(old['id'])
+        old_auth, new_auth = old.get('auth'), new.get('auth')
+        if type(old_auth) is not dict or type(new_auth) is not dict:
+            continue  # Unchanged non-portal account data is compared below.
+        if 'totp_last_counter' not in old_auth and 'totp_last_counter' not in new_auth:
+            continue
+        previous, current = old_auth.get('totp_last_counter'), new_auth.get('totp_last_counter')
+        if type(previous) is not int or type(current) is not int or not -1 <= previous <= current <= 2 ** 63 - 2:
+            raise TransactionError('MFA consumption counters are invalid or decreased')
+        if current > previous:
+            secret = old_auth.get('totp_secret_enc')
+            if a.get('portal_enabled') is not True or old.get('source') != 'portal' or old.get('enabled') is not True or not isinstance(secret, str) or not re.fullmatch(r'op1:[A-Za-z0-9+/]{80}', secret):
+                raise TransactionError('MFA consumption is not bound to an enrolled enabled portal account')
+            progressed = True
+        counters[old['id']] = current
+        new_auth['totp_last_counter'] = previous
+    old_other, new_other = dict(old_revisions), dict(new_revisions)
+    old_revision, new_revision = old_other.pop('operator_access', 0), new_other.pop('operator_access', 0)
+    if (configuration_canonical(left) != configuration_canonical(right)
+            or configuration_canonical(old_other) != configuration_canonical(new_other)
+            or (new_revision <= old_revision if progressed else configuration_canonical(old_revisions) != configuration_canonical(new_revisions))
+            or require_progress and not progressed):
+        raise TransactionError('Settings changed beyond monotonic MFA consumption and its associated revision')
+    return {'counters': counters, 'revision': new_revision}
+
+
+def configuration_mfa_join(settings, states):
+    result = copy.deepcopy(settings)
+    for account in result['operator_access']['accounts']:
+        auth = account.get('auth')
+        if type(auth) is dict and 'totp_last_counter' in auth:
+            auth['totp_last_counter'] = max([auth['totp_last_counter']] + [state['counters'].get(account['id'], auth['totp_last_counter']) for state in states])
+    revisions = dict(configuration_revisions(result))
+    revisions['operator_access'] = max([revisions.get('operator_access', 0)] + [state['revision'] for state in states])
+    result['immediate_config_revisions'] = revisions
+    return result
+
+
+def prepare_configuration_recovery(recovery, original_hash, active_snapshot, active_path,
+                                   pending_state, pending_hash, pending_snapshot, pending_path):
+    """Derive durable rollback bytes without changing original transaction evidence.
+
+    Caller holds the existing central-settings mutex and has passed history
+    recovery admission. No observed hash becomes blanket recovery authority.
+    """
+    try:
+        return _prepare_configuration_recovery(Path(recovery), original_hash, active_snapshot, active_path,
+                                               pending_state, pending_hash, pending_snapshot, pending_path)
+    except TransactionError:
+        raise
+    except Exception as error:
+        raise TransactionError('Protected MFA configuration recovery could not be proved; preserve all settings and evidence') from error
+
+
+def _prepare_configuration_recovery(recovery, original_hash, active_snapshot, active_path,
+                                    pending_state, pending_hash, pending_snapshot, pending_path):
+    active_path = Path(active_path)
+    if (active_path.parent / '.sls-immediate-settings-transaction.json').exists() or (active_path.parent / '.sls-immediate-settings-transaction.json').is_symlink():
+        raise TransactionError('An unresolved immediate-settings transaction requires coordinated recovery')
+    crypto_path = Path(__file__).with_name('sls_config_crypto.py')
+    crypto = None
+    def decoder():
+        nonlocal crypto
+        if crypto is None:
+            crypto = types.ModuleType('sll_recovery_config_crypto'); crypto.__file__ = str(crypto_path)
+            exec(compile(crypto_path.read_bytes(), str(crypto_path), 'exec'), crypto.__dict__)
+        return crypto
+    def live(path):
+        if not path.exists() and not path.is_symlink(): return None
+        return decoder()._read_protected(path, 16 * 1024 * 1024)
+    def digest(body): return hashlib.sha256(body).hexdigest() if body is not None else 'absent'
+    if pending_state == '':
+        # Preparation can stop before a pending snapshot exists. It grants no
+        # semantic merge authority and must retain the original strict check.
+        active = live(active_path)
+        assert_configuration_recoverable(recovery, original_hash, digest(active), '', '', 'absent')
+        if original_hash and digest(read(Path(active_snapshot), 16 * 1024 * 1024)) != original_hash:
+            raise TransactionError('Original active configuration snapshot changed')
+        return {'active_snapshot': str(active_snapshot), 'active_sha256': original_hash or 'absent',
+                'pending_snapshot': '', 'pending_sha256': 'absent'}
+    pending_path = Path(pending_path)
+    if active_path.parent != pending_path.parent:
+        raise TransactionError('Pending configuration does not share the protected settings directory')
+    active, pending = live(active_path), live(pending_path)
+    if pending_state not in ('present', 'absent') or pending_state == 'absent' and pending is not None:
+        raise TransactionError('Pending configuration appeared or disappeared after the failed installation')
+    fallback = {'active_snapshot': str(active_snapshot), 'active_sha256': original_hash or 'absent',
+                'pending_snapshot': str(pending_snapshot), 'pending_sha256': pending_hash if pending_state == 'present' else 'absent'}
+    intents = configuration_intents(recovery, original_hash) if original_hash else {'writes': []}
+    approved = {original_hash, 'absent'} | {item['after_sha256'] for item in intents['writes']}
+    journal_path = recovery / 'configuration-mfa-recovery.json'
+    saved = None
+    if journal_path.exists() or journal_path.is_symlink():
+        saved = decode_json(read(journal_path))
+        expected = {'schema', 'recovery', 'original_sha256', 'pending_state', 'pending_original_sha256', 'active', 'pending'}
+        if type(saved) is not dict or set(saved) != expected or type(saved['schema']) is not int or saved['schema'] != 1 or saved['recovery'] != str(recovery) or saved['original_sha256'] != original_hash or saved['pending_state'] != pending_state or saved['pending_original_sha256'] != pending_hash:
+            raise TransactionError('MFA recovery evidence is not bound to this transaction')
+    original = read(Path(active_snapshot), 16 * 1024 * 1024) if original_hash else None
+    if original_hash and digest(original) != original_hash:
+        raise TransactionError('Original active configuration snapshot changed')
+    original_pending = read(Path(pending_snapshot), 16 * 1024 * 1024) if pending_state == 'present' else None
+    if original_pending is not None and digest(original_pending) != pending_hash:
+        raise TransactionError('Original pending configuration snapshot changed')
+    # A fresh installation can create active settings after recording prior
+    # absence. With no original snapshot there is no active rollback authority:
+    # preserve those live bytes without treating their hash as approved data.
+    unchanged_or_no_active_authority = (digest(active) in approved
+                                       or not original_hash and not active_snapshot)
+    if not saved and unchanged_or_no_active_authority and (digest(pending) == fallback['pending_sha256'] or pending_state == 'present' and pending is None):
+        return fallback
+    if pending_state == 'present' and pending is None:
+        raise TransactionError('Missing pending settings cannot supply a provable paired MFA update')
+    if not original_hash:
+        raise TransactionError('MFA recovery lacks an authenticated original configuration')
+    base = decoder().decode_config(original)
+    staged = decoder().decode_config(original_pending) if original_pending is not None else None
+    if staged is not None and configuration_canonical(staged.get('operator_access')) != configuration_canonical(base.get('operator_access')):
+        raise TransactionError('Staged operator policy differs from active policy; automatic MFA recovery is not applicable')
+    states = []; stored = {}; known_active = set(approved); known_pending = {pending_hash, 'absent'}
+    if saved:
+        for label, before in [('active', base), ('pending', staged)]:
+            item = saved[label]
+            if before is None:
+                if item is not None: raise TransactionError('Unexpected pending MFA recovery target')
+                continue
+            if type(item) is not dict or set(item) != {'snapshot', 'sha256'} or not isinstance(item['sha256'], str) or not SHA256.fullmatch(item['sha256']) or item['snapshot'] != 'configuration-mfa-' + item['sha256'] + '.snapshot':
+                raise TransactionError('Invalid MFA recovery target identity')
+            raw = read(recovery / item['snapshot'], 16 * 1024 * 1024)
+            if digest(raw) != item['sha256']: raise TransactionError('MFA recovery target changed')
+            decoded = decoder().decode_config(raw)
+            states.append(configuration_mfa_delta(before, decoded)); stored[label] = (raw, decoded)
+            (known_active if label == 'active' else known_pending).add(item['sha256'])
+        if staged is not None and (configuration_canonical(stored['active'][1]['operator_access']) != configuration_canonical(stored['pending'][1]['operator_access']) or configuration_revisions(stored['active'][1]).get('operator_access') != configuration_revisions(stored['pending'][1]).get('operator_access')):
+            raise TransactionError('Paired MFA recovery targets disagree')
+    candidates = [original]
+    for item in intents['writes']:
+        path = recovery / ('configuration-intent-' + item['after_sha256'] + '.snapshot')
+        if path.exists() or path.is_symlink():
+            raw = read(path, 16 * 1024 * 1024)
+            if digest(raw) != item['after_sha256']: raise TransactionError('Approved configuration afterimage changed')
+            candidates.append(raw)
+    current = {}; prior_states = list(states)
+    for label, raw, before, known, options in [('active', active, base, known_active, candidates), ('pending', pending, staged, known_pending, [original_pending])]:
+        if raw is None:
+            if label == 'pending' and staged is None or label == 'active' and digest(raw) in known: continue
+            raise TransactionError('Configuration vanished during MFA recovery')
+        decoded = decoder().decode_config(raw); current[label] = (raw, decoded)
+        if digest(raw) in known:
+            # Known before/after states may survive a crash between two restores.
+            continue
+        matched = None
+        for option in options:
+            try:
+                candidate = decoder().decode_config(option)
+                if configuration_canonical(candidate.get('operator_access')) != configuration_canonical(base.get('operator_access')):
+                    raise TransactionError('Approved installer settings changed operator authentication')
+                candidate = configuration_mfa_join(candidate, prior_states) if prior_states else candidate
+                # A crash can leave the exact approved installer semantics
+                # plus the already-durable MFA cursor, before target restore.
+                matched = configuration_mfa_delta(candidate, decoded, require_progress=not bool(prior_states))
+                break
+            except TransactionError:
+                continue
+        if matched is None:
+            raise TransactionError('Live settings differ beyond provable monotonic MFA consumption')
+        states.append(matched)
+    if not states:
+        raise TransactionError('Configuration changes lack MFA consumption evidence')
+    if staged is not None and ('active' not in current or 'pending' not in current or configuration_canonical(current['active'][1]['operator_access']) != configuration_canonical(current['pending'][1]['operator_access']) or configuration_revisions(current['active'][1]).get('operator_access') != configuration_revisions(current['pending'][1]).get('operator_access')):
+        if not saved or digest(active) not in known_active or digest(pending) not in known_pending:
+            raise TransactionError('Active and pending MFA consumption are not a consistent commit')
+    targets = {}; result = {}
+    for label, before in [('active', base), ('pending', staged)]:
+        if before is None:
+            targets[label] = None; result[label + '_snapshot'] = ''; result[label + '_sha256'] = 'absent'; continue
+        settings = configuration_mfa_join(before, states)
+        raw = next((body for body, decoded in list(current.values()) + list(stored.values()) if configuration_canonical(decoded) == configuration_canonical(settings)), None)
+        if raw is None: raw = decoder().encode_config(settings)
+        path = configuration_image(recovery, 'configuration-mfa-', raw)
+        targets[label] = {'snapshot': path.name, 'sha256': digest(raw)}
+        result[label + '_snapshot'] = str(path); result[label + '_sha256'] = digest(raw)
+    atomic(journal_path, {'schema': 1, 'recovery': str(recovery), 'original_sha256': original_hash,
+                         'pending_state': pending_state, 'pending_original_sha256': pending_hash,
+                         'active': targets['active'], 'pending': targets['pending']})
+    return result
 
 
 def state(path):
@@ -419,6 +695,13 @@ def update(path, phase, settings, stage=None, *, preserve_recovery_evidence=Fals
             'schema': 1, 'reason': 'Manual authenticated interrupted installation recovery',
             'retained_at': max(0, int(time.time())),
             'original_artifacts': _original_artifact_binding(path), 'original_evidence_preserved': True}
+    mfa_binding = _mfa_evidence_binding(path, settings) if phase == 'rolled_back' else None
+    if phase == 'rolled_back' and mfa_binding is not None:
+        if not preserve_recovery_evidence:
+            raise TransactionError('Verified MFA recovery requires retained original authentication evidence')
+        if value.get('mfa_recovery') is not None and configuration_canonical(value['mfa_recovery']) != configuration_canonical(mfa_binding):
+            raise TransactionError('Completed MFA recovery evidence cannot be replaced')
+        value['mfa_recovery'] = mfa_binding
     value['settings'] = dict(settings)
     value['phase'] = phase; value['updated_at'] = max(int(time.time()),value['created_at'],value['updated_at'])
     if stage is not None:
@@ -776,6 +1059,60 @@ def _original_artifact_binding(path):
     return binding
 
 
+def _mfa_evidence_binding(path, settings):
+    """Passive archive binding; never grants permission to restore settings."""
+    try:
+        return _read_mfa_evidence_binding(path, settings)
+    except TransactionError:
+        raise
+    except Exception as error:
+        raise TransactionError('MFA preservation archive is incomplete or changed; preserve the entire transaction') from error
+
+
+def _read_mfa_evidence_binding(path, settings):
+    location = settings.get('RECOVERY_DIR')
+    if not location: return None
+    recovery = Path(location); receipt = recovery / 'configuration-mfa-recovery.json'
+    if not receipt.exists() and not receipt.is_symlink(): return None
+    if recovery.parent != path or not re.fullmatch(r'sls-mass-notify-recovery\.[A-Za-z0-9]{6}', recovery.name):
+        raise TransactionError('MFA recovery evidence is outside its original transaction')
+    body = read(receipt); document = decode_json(body)
+    if (type(document) is not dict or set(document) != {'schema', 'recovery', 'original_sha256', 'pending_state', 'pending_original_sha256', 'active', 'pending'}
+            or type(document['schema']) is not int or document['schema'] != 1
+            or document['recovery'] != location or document['original_sha256'] != settings.get('CONFIG_HASH_BEFORE')
+            or document['pending_state'] != settings.get('PENDING_CONFIG_STATE')
+            or document['pending_original_sha256'] != settings.get('PENDING_CONFIG_HASH')):
+        raise TransactionError('MFA preservation receipt does not bind the original transaction')
+    binding = {'schema': 1, 'kind': 'preserved_monotonic_mfa_consumption', 'recovery': location,
+               'journal_sha256': hashlib.sha256(body).hexdigest()}
+    for label, field, name, original_hash in [
+            ('active', 'CONFIG_SNAPSHOT', 'config.snapshot', document['original_sha256']),
+            ('pending', 'PENDING_CONFIG_SNAPSHOT', 'pending.snapshot', document['pending_original_sha256'])]:
+        present = label == 'active' or document['pending_state'] == 'present'
+        if not present:
+            if document[label] is not None: raise TransactionError('Unexpected pending MFA preservation evidence')
+            binding[label + '_sha256'] = 'absent'; binding['original_' + label + '_sha256'] = 'absent'; continue
+        if settings.get(field) != str(path / name) or hashlib.sha256(read(path / name, 16 * 1024 * 1024)).hexdigest() != original_hash:
+            raise TransactionError('Original configuration evidence changed after MFA preservation')
+        target = document[label]
+        if type(target) is not dict or set(target) != {'snapshot', 'sha256'} or not isinstance(target['sha256'], str) or not SHA256.fullmatch(target['sha256']) or target['snapshot'] != 'configuration-mfa-' + target['sha256'] + '.snapshot':
+            raise TransactionError('Invalid retained MFA target')
+        if hashlib.sha256(read(recovery / target['snapshot'], 16 * 1024 * 1024)).hexdigest() != target['sha256']:
+            raise TransactionError('Retained MFA target changed')
+        binding[label + '_sha256'] = target['sha256']; binding['original_' + label + '_sha256'] = original_hash
+    intentions = configuration_intents(recovery, document['original_sha256'])
+    intents = recovery / 'configuration-intents.json'
+    binding['intent_chain_sha256'] = hashlib.sha256(read(intents)).hexdigest() if intents.exists() or intents.is_symlink() else 'absent'
+    binding['intent_images'] = {}
+    for item in intentions['writes']:
+        image = recovery / ('configuration-intent-' + item['after_sha256'] + '.snapshot')
+        digest = hashlib.sha256(read(image, 16 * 1024 * 1024)).hexdigest() if image.exists() or image.is_symlink() else 'absent'
+        if digest not in ('absent', item['after_sha256']):
+            raise TransactionError('Retained installer configuration afterimage changed')
+        binding['intent_images'][item['after_sha256']] = digest
+    return binding
+
+
 def _recovery_retention(value):
     marker = value.get('recovery_evidence')
     if marker is None:
@@ -815,6 +1152,13 @@ def preserve_completed_evidence(value):
     """Manual recoveries and accepted historical losses keep every original."""
     path = Path(value['directory'])
     manual_recovery = _recovery_retention(value)
+    if value['phase'] in TERMINAL:
+        binding = _mfa_evidence_binding(path, value['settings'])
+        if (value.get('mfa_recovery') is not None or binding is not None) and (
+                binding is None or type(value.get('mfa_recovery')) is not dict
+                or configuration_canonical(value['mfa_recovery']) != configuration_canonical(binding)
+                or not manual_recovery):
+            raise TransactionError('MFA preservation archive binding or original authentication evidence changed')
     target = path / HISTORY_APPROVAL
     if not target.exists() and not target.is_symlink():
         if value.get('history_loss') is not None:

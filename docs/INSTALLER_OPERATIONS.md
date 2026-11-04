@@ -1,8 +1,8 @@
 # Installer diagnostics, recovery and qualification
 
-The V0.1.9-beta release is withdrawn and its downloads have been removed. The source candidate is unpublished; 0.1.8-beta remains the available published prerelease. Installation, repair and upgrade commands await a corrected signed release. Preserve any existing failed transaction; the generic recovery examples below document the protocol and do not authorize executing withdrawn assets.
+The replacement 0.1.10-beta candidate, planned tag `v0.1.10-beta`, is unpublished. Its [checksum-pinned command examples](../README.md#install-or-update) remain unavailable pending qualification and publication. The available published prerelease remains 0.1.8-beta. V0.1.9-beta is withdrawn, its downloads removed and its immutable tag retired. Preserve existing failed transactions; the generic examples below document the protocol and do not authorize executing withdrawn assets.
 
-The reported actual LiteNet recovery has 22 baseline records, 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history recovery must continue to refuse with exit 4; no loss acceptance exists. Separately, changes limited to `totp_last_counter` and the `operator_access` revision trigger the configuration hash guard. Do not overwrite live settings, mask those changes, replace history or manually approve loss to force completion. No successful target recovery or replacement fix is established. See [qualification boundaries](QUALIFICATION_MATRIX.md).
+The reported actual LiteNet recovery has 22 baseline records, 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history recovery must continue to refuse with exit 4; no loss acceptance exists. The candidate implements a separate strict correction for `totp_last_counter` and the associated operator-access revision, with 207 focused cases across seven isolated suites passed. The full 424-suite gate, corrected native recovery and publication remain pending. Do not overwrite settings, reset MFA or replace history to force completion. See [qualification boundaries](QUALIFICATION_MATRIX.md).
 
 Activation reloads Apache and each independently qualified PHP-FPM version. This
 refreshes their separate opcode caches without changing PHP settings or restarting
@@ -170,7 +170,8 @@ Recovery authenticates the saved installer, package and executable helpers
 against publisher evidence. The withdrawn H `0.1.9-beta` installer historically supplied recovery
 helpers for earlier unfinished transactions, including an earlier withdrawn package
 with the same version. That history does not authorize its use for the currently
-blocked target; a corrected carrier remains pending. Carrier installer and package are authenticated separately and
+blocked target. The unpublished `0.1.10-beta` candidate supplies corrected recovery logic;
+its carrier remains unavailable until qualification and publication. Carrier installer and package are authenticated separately and
 retained in a private `recovery-carrier.*` directory. The original signed
 artifacts, approvals and operational baseline remain the restoration authority.
 The journal does not approve live file hashes. It does not restore operational
@@ -184,12 +185,57 @@ permissions still stop admission with a specific diagnostic.
 
 Recovery checks active and pending settings before restoring anything. It
 accepts the original configuration or a change whose exact encoded hash was
-recorded durably before an installer profile/branding write. Later administrator
-edits are preserved and reported for review. The reported target shows that
-normal MFA replay-counter and operator-access revision changes can also reach
-this guard; distinguishing those semantics safely remains unresolved. Do not
-replace the live settings merely to get past this check; retain both the live
-file and original snapshot.
+recorded durably before an installer profile/branding write. The replacement
+also proves the limited MFA delta below. Unrelated administrator edits remain
+preserved conflicts; retain live settings and original snapshots together.
+
+### MFA consumption during recovery
+
+History admission runs first. Unexplained missing phone rows still return exit 4
+before MFA-target preparation or configuration/runtime restoration. This source
+correction does not supply missing evidence or record administrator acceptance.
+
+While holding the existing central settings mutex, the candidate authenticates
+and decodes the protected inputs and permits only increasing integer TOTP
+counters for otherwise unchanged enabled, enrolled portal accounts, together
+with their associated operator-access revision. Comparison remains type-exact
+for every other setting: account IDs/order, permissions, passwords, auth versions,
+secrets, recovery codes/state, passkeys and other revision sections. A revision
+change alone is not an exception. Existing pending settings can mirror that MFA
+progress while retaining unrelated staged values; divergent staged operator
+policy remains a conflict. An MFA merge does not invent pending files. Ordinary
+exactly approved missing-file restoration retains its existing recovery path.
+
+The original `config.snapshot`, pending snapshot, hashes and
+`configuration-intents.json` chain remain unchanged. Future installer writes
+first retain their exact ciphertext in protected
+`configuration-intent-<sha256>.snapshot` evidence, fsync it, then publish the hash
+intention before replacing live settings. This proves an approved intermediate
+configuration plus later MFA progress. A legacy hash-only transaction can still
+prove a pure MFA delta against its original snapshot; an intermediate without
+its corresponding bytes is refused rather than reconstructed by guessing an
+encryption nonce or ignoring changed settings.
+
+The derived targets are separate root-private
+`configuration-mfa-<sha256>.snapshot` files and a transaction-bound
+`configuration-mfa-recovery.json`. Bytes are staged privately, fsynced and
+published atomically without replacing a contradictory existing image. Strict
+ownership, modes, link counts, no-follow reads, bounds and stable identity checks
+remain mandatory. Every restore and final configuration check uses the validated
+target. A crash can resume before or between restores, and another valid MFA
+login after a failed attempt advances the retained cursor monotonically.
+
+An existing `.sls-immediate-settings-transaction.json` blocks this merge before
+configuration mutation. Preserve that journal and both settings files for
+coordinated recovery; never delete it or reset a counter to bypass refusal.
+
+Verified rollback records a distinct `mfa_recovery` receipt and retains original
+settings, intention ciphertexts, derived targets, publisher artifacts and carrier
+authentication evidence. Later transaction creation/pruning must preserve those
+bytes and refuse tampering. This archive is not an administrator-accepted
+history-loss receipt and grants no permission to restore delivery history or
+approve unrelated configuration changes. These behaviors have focused fixture
+coverage; corrected native recovery remains pending.
 
 ### Phone history during installation
 
@@ -445,7 +491,7 @@ Earlier installers can stop with `Previous runtime changed after preflight; no a
 
 Current installers recognize completed or partially completed quarantine only when the protected `runtime-cache-recovery/inventory.json` matches the original approval and the saved cache bytes match their recorded hashes. Each check still verifies authenticated source files and rejects unknown runtime files, unsafe recovery entries and changed caches. Quarantined bytecode never receives execution or rollback approval. Completed quarantine evidence is left intact.
 
-Keep the publisher-authenticated installer and package recorded in the retained transaction. The corrected `0.1.9-beta` authenticated repair installer can supply its own separately verified recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace the older signed evidence or approve current live files. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
+Keep the publisher-authenticated installer and package recorded in the retained transaction. Once qualified and published, the separate `0.1.10-beta` repair installer can supply its own authenticated recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace older signed evidence or approve arbitrary live files. Do not substitute withdrawn 0.1.9-beta downloads while that publication is pending. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
 
 ## Included offline removal
 

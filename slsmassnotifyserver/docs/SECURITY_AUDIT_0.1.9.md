@@ -1,6 +1,10 @@
 # 0.1.9-beta security and reliability audit
 
-Historical status at review: unpublished prerelease candidate, 2026-10-27. The later V0.1.9-beta release was withdrawn on 2026-11-03; its actual target recovery remains blocked. See [qualification boundaries](QUALIFICATION_MATRIX.md) for the current unpublished status, reported history/MFA blockers and bounded historical H evidence. This dated review retains its original evidence and limits.
+Historical status at review: unpublished prerelease candidate, 2026-10-27. The later V0.1.9-beta release was withdrawn on 2026-11-03 and its tag is retired. This dated review retains its original evidence and limits. See [qualification boundaries](QUALIFICATION_MATRIX.md) for the separate unpublished 0.1.10-beta candidate, reported history loss and bounded historical H/G evidence.
+
+**2026-11-03 replacement addendum:** 0.1.10-beta, planned tag `v0.1.10-beta`, implements strict monotonic TOTP-counter and associated revision preservation during recovery. It retains exact future installer ciphertext before write intentions, derives separate durable targets without changing original snapshots/hashes, and carries validated MFA progress through crash retry and later advancement. Other account/credential/settings edits and unresolved immediate-settings transactions remain conflicts. Verified recovery retains a separate MFA receipt plus original configuration, intention and authenticated carrier evidence; this is not missing-history acceptance.
+
+The replacement has passed **207 focused cases across seven isolated suites**. The full 424-suite gate, corrected native recovery and publication remain pending; the available published prerelease remains 0.1.8-beta. The reported 21 missing records still require evidence or a separate explicit administrator decision, with ordinary exit 4 until the history gate is satisfied. Historical results below do not qualify 0.1.10-beta or authorize executing withdrawn downloads.
 
 This record covers the repository candidate, not an installed PBX. The review
 inventoried every tracked file, parsed or linted applicable PHP, Python,

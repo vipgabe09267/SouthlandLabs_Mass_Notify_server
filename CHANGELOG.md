@@ -1,10 +1,22 @@
 # Changelog
 
+## 0.1.10-beta — unpublished candidate, 2026-11-03
+
+Planned release tag: `v0.1.10-beta`. The available published prerelease remains `0.1.8-beta`; the retired `V0.1.9-beta` tag and withdrawn downloads must not be reused. Checksum-pinned command examples target the new candidate only and remain unavailable pending qualification and publication.
+
+- Preserve increasing TOTP replay counters and their associated operator-access revision through existing failed-transaction recovery. Require type-exact equality for every other setting, account order, credential, permission, recovery code and passkey; unrelated edits remain conflicts.
+- Preserve matching active/pending MFA progress without applying unrelated staged values. Refuse divergent staged operator policy, unproved intermediate configurations and unresolved immediate-settings transactions; do not invent pending files during an MFA merge.
+- Keep original snapshots, hashes and installer intention chains unchanged. Future installer settings writes retain their exact ciphertext durably before publishing a hash intention or replacing live settings. Legacy hash-only transactions can use the original snapshot for a pure MFA delta but cannot infer missing intermediate encrypted bytes.
+- Stage and fsync separate root-private recovery targets before atomic publication. Crash retries, partial restoration and later valid MFA advancement retain the highest validated counters. Keep transaction-bound MFA receipts, original settings, intention evidence and authenticated carriers through verified rollback and later pruning; do not classify this as administrator-accepted history loss.
+- Preserve the ordinary history gate: the reported baseline has 22 records, 1 unchanged, 21 missing and 0 with proven expiry. Matching evidence or a separate explicit administrator decision is still required; no acceptance exists for that reported case.
+
+**Verification so far: 207 focused cases across seven isolated suites passed.** These cover real PHP login and replay rejection, configuration reads, protected transactions, interruption/retry, keeper locks, history review and retained-history checks, including signed terminal receipt/pruning fixtures. The full 424-suite gate, corrected native recovery, signed release assets and publication remain pending. Historical H/G results below do not qualify this candidate.
+
 ## 0.1.9-beta — 2026-11-03
 
-**WITHDRAWN — 2026-11-03.** The V0.1.9-beta GitHub release and downloads were removed after the reported actual LiteNet recovery remained blocked. The available published prerelease is 0.1.8-beta; the 0.1.9-beta source candidate is unpublished pending investigation and a new release identity. Do not reuse the withdrawn installer or offline bundle.
+**WITHDRAWN — 2026-11-03.** The V0.1.9-beta GitHub release and downloads were removed after the reported actual LiteNet recovery remained blocked. At withdrawal, 0.1.8-beta remained the available published prerelease and replacement investigation was pending. The retired tag remains historical evidence. Do not reuse the withdrawn installer or offline bundle.
 
-The reported target baseline contains 22 history records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history refusal (exit 4) remains required; there is no administrator acceptance of that loss. An independent active-configuration mismatch is limited to `totp_last_counter` and the `operator_access` revision and still triggers the recovery hash guard. No target recovery or replacement fix is claimed.
+The reported target baseline contained 22 history records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history refusal (exit 4) remained required, with no administrator acceptance of that loss. An independent active-configuration mismatch limited to `totp_last_counter` and the `operator_access` revision triggered the recovery hash guard. These were the blockers at withdrawal; the unpublished replacement work is recorded separately above.
 
 Historical H passed 423/423 isolated suites, four native install/rollback cases and three installed journal profiles; its signed assets, CI, public readback and provenance were verified before withdrawal. Those checks did not establish recovery of this target state. Earlier G 423/18/360 results remain separate historical evidence. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 
@@ -56,7 +68,7 @@ Historical H passed 423/423 isolated suites, four native install/rollback cases 
 
 Prior native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. Those historical results and earlier owner acceptance do not qualify the current correction. See docs/QUALIFICATION_MATRIX.md for evidence and remaining checks.
 
-Historical release identity: `V0.1.9-beta`, software 0.1.9-beta. That immutable tag is retired and cannot be reused. Its earlier checksum-pinned upgrade instructions are withdrawn; replacement version/tag selection and corrected signed installation commands remain pending.
+Historical release identity: `V0.1.9-beta`, software 0.1.9-beta. That immutable tag is retired and cannot be reused. Its earlier checksum-pinned upgrade instructions are withdrawn; the replacement candidate uses the separate 0.1.10-beta identity recorded above.
 
 ### Southland Labs rebrand
 

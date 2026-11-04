@@ -116,18 +116,22 @@ if [ -n "${SLS_MASS_NOTIFY_MODULE:-}" ] \
     "SLS_MASS_NOTIFY_MODULE is fixed to the FreePBX raw module name '$MODULE'; refusing an alternate value." >&2
   exit 2
 fi
-TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.9-beta.tgz}"
+TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.10-beta.tgz}"
 URL="${SLS_MASS_NOTIFY_TGZ_URL:-${1:-}}"
 SHA256="${SLS_MASS_NOTIFY_SHA256:-}"
 TOKEN="${SLS_MASS_NOTIFY_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 LOG_FILE="${SLS_MASS_NOTIFY_INSTALL_LOG:-/tmp/slsmassnotifyserver-install.log}"
-EXPECTED_TGZ_SHA256="c3086abf251ae5c400ee83b52dac42552a16c7ed8ac6df590a623962c0505dbb"
+EXPECTED_TGZ_SHA256="ed167717198282349f89569f39bd7e6b08e3550e9ce8085072caee13d1858d6b"
 DATA_DIR="/var/lib/asterisk/SLS_Mass_Notifications_Plugin"
 CONFIG_FILE="$DATA_DIR/mass-notifications.config"
 CONFIG_SNAPSHOT=""
 CONFIG_HASH_BEFORE=""
 CONFIG_HASH_EXPECTED=""
 CONFIG_EXPECTED_SNAPSHOT=""
+CONFIG_RECOVERY_SNAPSHOT=""
+CONFIG_RECOVERY_HASH=""
+PENDING_RECOVERY_SNAPSHOT=""
+PENDING_RECOVERY_HASH=""
 FRESH_CONFIG_INITIALIZED=0
 FRESH_PHONE_CAPACITY=25
 FRESH_DEPLOYMENT_PROFILE="${REQUESTED_DEPLOYMENT_PROFILE:-standard}"
@@ -1883,21 +1887,24 @@ rollback_module_install() {
 
 verify_recovery_configuration() {
   [ -n "$CONFIG_HASH_BEFORE" ] || [ -n "$PENDING_CONFIG_STATE" ] || return 0
-  local current_hash=absent pending_hash=absent
-  if [ -n "$CONFIG_HASH_BEFORE" ] && { [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; }; then
-    current_hash="$(safe_config_hash "$CONFIG_FILE")" || return 1
-  fi
-  if [ -n "$PENDING_CONFIG_STATE" ] && { [ -e "$PENDING_CONFIG_PATH" ] || [ -L "$PENDING_CONFIG_PATH" ]; }; then
-    pending_hash="$(safe_config_hash "$PENDING_CONFIG_PATH")" || return 1
-  fi
-  /usr/bin/python3 -I - "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" "$current_hash" \
-      "$PENDING_CONFIG_STATE" "$PENDING_CONFIG_HASH" "$pending_hash" <<'PYCONFIGRECOVERY'
+  local targets
+  local -a values=()
+  targets="$(/usr/bin/python3 -I - "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" \
+      "$CONFIG_SNAPSHOT" "$CONFIG_FILE" "$PENDING_CONFIG_STATE" "$PENDING_CONFIG_HASH" \
+      "$PENDING_CONFIG_SNAPSHOT" "$PENDING_CONFIG_PATH" <<'PYCONFIGRECOVERY'
 import pathlib, sys, types
 helper = pathlib.Path(sys.argv[1])
 module = types.ModuleType('sll_configuration_recovery'); module.__file__ = str(helper)
 exec(compile(helper.read_bytes(), str(helper), 'exec'), module.__dict__)
-module.assert_configuration_recoverable(*sys.argv[2:])
+targets = module.prepare_configuration_recovery(*sys.argv[2:])
+for name in ('active_snapshot', 'active_sha256', 'pending_snapshot', 'pending_sha256'):
+    print(targets[name])
 PYCONFIGRECOVERY
+  )" || return 1
+  mapfile -t values <<<"$targets"
+  [ "${#values[@]}" -eq 4 ] || return 1
+  CONFIG_RECOVERY_SNAPSHOT="${values[0]}"; CONFIG_RECOVERY_HASH="${values[1]}"
+  PENDING_RECOVERY_SNAPSHOT="${values[2]}"; PENDING_RECOVERY_HASH="${values[3]}"
 }
 
 guard_config_on_exit() {
@@ -1937,13 +1944,13 @@ guard_config_on_exit() {
   if [ -n "$CONFIG_SNAPSHOT" ] && [ -f "$CONFIG_SNAPSHOT" ]; then
     current_hash="$(safe_config_hash "$CONFIG_FILE" 2>/dev/null || true)"
     if [ "$INSTALL_COMMITTED" -eq 1 ]; then
-      if [ "$current_hash" != "${CONFIG_HASH_EXPECTED:-$CONFIG_HASH_BEFORE}" ]; then
+      if [ "$current_hash" != "${CONFIG_RECOVERY_HASH:-${CONFIG_HASH_EXPECTED:-$CONFIG_HASH_BEFORE}}" ]; then
         log 'CRITICAL: the protected central config changed after post-install verification. Preserve the installer log and configuration backups for review.'
         [ "$status" -ne 0 ] || status=1
       fi
-    elif [ "$current_hash" != "$CONFIG_HASH_BEFORE" ]; then
-      if ensure_data_directory 2>/dev/null && safe_config_restore "$CONFIG_SNAPSHOT" "$CONFIG_FILE" 2>/dev/null; then
-        log "The installer restored the original central config after an interrupted or failed install."
+    elif [ "$current_hash" != "${CONFIG_RECOVERY_HASH:-$CONFIG_HASH_BEFORE}" ]; then
+      if ensure_data_directory 2>/dev/null && safe_config_restore "${CONFIG_RECOVERY_SNAPSHOT:-$CONFIG_SNAPSHOT}" "$CONFIG_FILE" 2>/dev/null; then
+        log "The installer restored the protected recovery configuration after an interrupted or failed install; any proved MFA consumption was preserved."
         [ "$status" -ne 0 ] || status=1
       else
         log "CRITICAL: the installer could not safely restore the protected central config. The root-owned snapshot remains at $CONFIG_SNAPSHOT."
@@ -1954,7 +1961,7 @@ guard_config_on_exit() {
   fi
 
   if [ "$PENDING_CONFIG_STATE" = present ] && ! verify_pending_config_unchanged; then
-    if safe_config_restore "$PENDING_CONFIG_SNAPSHOT" "$PENDING_CONFIG_PATH"; then
+    if safe_config_restore "${PENDING_RECOVERY_SNAPSHOT:-$PENDING_CONFIG_SNAPSHOT}" "$PENDING_CONFIG_PATH"; then
       log 'Restored the original pending settings without applying them.'
       [ "$status" -ne 0 ] || status=1
     else
@@ -1971,9 +1978,16 @@ guard_config_on_exit() {
     rollback_module_install
   fi
 
-  if [ "$ROLLBACK_ATTEMPTED" -eq 1 ] && [ -n "$CONFIG_HASH_BEFORE" ] && [ "$(safe_config_hash "$CONFIG_FILE" 2>/dev/null)" != "$CONFIG_HASH_BEFORE" ]; then
+  if [ "$ROLLBACK_ATTEMPTED" -eq 1 ] && [ -n "$CONFIG_HASH_BEFORE" ] && [ "$(safe_config_hash "$CONFIG_FILE" 2>/dev/null)" != "${CONFIG_RECOVERY_HASH:-$CONFIG_HASH_BEFORE}" ]; then
     rollback_failure "restoration changed the protected configuration"
-    safe_config_restore "$CONFIG_SNAPSHOT" "$CONFIG_FILE" || log "CRITICAL: the original configuration requires manual restoration."
+    safe_config_restore "${CONFIG_RECOVERY_SNAPSHOT:-$CONFIG_SNAPSHOT}" "$CONFIG_FILE" || log "CRITICAL: the original configuration requires manual restoration."
+  fi
+  if [ "$ROLLBACK_ATTEMPTED" -eq 1 ] && ! verify_pending_config_unchanged; then
+    rollback_failure 'restoration changed the protected pending configuration'
+    if [ "$PENDING_CONFIG_STATE" = present ]; then
+      safe_config_restore "${PENDING_RECOVERY_SNAPSHOT:-$PENDING_CONFIG_SNAPSHOT}" "$PENDING_CONFIG_PATH" \
+        || log 'CRITICAL: the pending configuration requires manual restoration.'
+    fi
   fi
 
   if [ "$INSTALL_COMMITTED" -eq 0 ] && ! restore_freepbx_chown_permissions; then
@@ -2002,12 +2016,18 @@ guard_config_on_exit() {
     case "$evidence_status" in
       0) retain_review_evidence=1 ;;
       3) : ;;
-      *) rollback_failure 'history-loss review evidence could not be authenticated for retention; preserve this entire transaction' ;;
+      *) rollback_failure 'recovery evidence could not be authenticated for retention; preserve this entire transaction' ;;
     esac
   fi
   if [ "$ROLLBACK_FAILED" -eq 0 ] && { [ "$INSTALL_COMMITTED" -eq 1 ] || [ "$ROLLBACK_VERIFIED" -eq 1 ] || [ "$STATIC_MUTATION_STARTED" -eq 0 ]; }; then
     if [ "$retain_review_evidence" -eq 1 ]; then
-      log "Administrator-accepted historical loss: all original recovery evidence and the approval receipt are retained at $INSTALL_TRANSACTION_DIR. Archive privately; they are never restored over live delivery state."
+      if [ -n "$RECOVERY_HISTORY_LOSS_APPROVAL" ]; then
+        log "Administrator-accepted historical loss: all original recovery evidence and the approval receipt are retained at $INSTALL_TRANSACTION_DIR. Archive privately; they are never restored over live delivery state."
+      elif [ -n "$CONFIG_RECOVERY_HASH" ] && [ -f "$RECOVERY_DIR/configuration-mfa-recovery.json" ]; then
+        log "Monotonic MFA consumption was preserved. Original configuration snapshots, installer intentions, recovery targets and authenticated carrier evidence are retained at $INSTALL_TRANSACTION_DIR."
+      else
+        log "Authenticated manual recovery completed. Original configuration snapshots and publisher authentication evidence are retained at $INSTALL_TRANSACTION_DIR."
+      fi
     else
     if [ -n "$CONFIG_SNAPSHOT" ] && [ -f "$CONFIG_SNAPSHOT" ]; then
       rm -f "$CONFIG_SNAPSHOT"
@@ -5752,8 +5772,8 @@ verify_tgz() {
       log 'The release archive does not match the explicitly trusted SLS_MASS_NOTIFY_SHA256.'
       return 1
     fi
-  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.9-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
-    log "$TGZ does not match the current slsmassnotifyserver-0.1.9-beta package."
+  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.10-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
+    log "$TGZ does not match the current slsmassnotifyserver-0.1.10-beta package."
     log "Expected SHA256: $EXPECTED_TGZ_SHA256"
     log "Actual SHA256:   $actual_sha"
     log "Remove the stale local TGZ or install with SLS_MASS_NOTIFY_TGZ_URL so the current release is downloaded."
@@ -5822,8 +5842,8 @@ with tarfile.open(archive, "r:gz") as handle:
     version = root.findall("version")
     if len(rawname) != 1 or (rawname[0].text or "").strip() != module:
         raise SystemExit("module.xml rawname does not match the requested module")
-    if len(version) != 1 or (version[0].text or "").strip() != "0.1.9-beta":
-        raise SystemExit("module.xml does not contain the expected 0.1.9-beta version")
+    if len(version) != 1 or (version[0].text or "").strip() != "0.1.10-beta":
+        raise SystemExit("module.xml does not contain the expected 0.1.10-beta version")
 PY
 }
 
@@ -5855,7 +5875,7 @@ if match and match.group(1).startswith('V') and match.group(1) != 'V0.1.9-beta':
     match = None
 if url and not match:
     raise SystemExit('Use a signed GitHub release URL or a signed offline package.')
-release_tag, version, package = match.groups() if match else ('V0.1.9-beta', '0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz')
+release_tag, version, package = match.groups() if match else ('v0.1.10-beta', '0.1.10-beta', 'slsmassnotifyserver-0.1.10-beta.tgz')
 public_key = b'-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=\n-----END PUBLIC KEY-----\n'
 try:
     with tempfile.TemporaryDirectory(prefix='sls-release-verification-') as directory:
@@ -6263,7 +6283,7 @@ snapshot_pending_config() {
 
 verify_pending_config_unchanged() {
   if [ "$PENDING_CONFIG_STATE" = present ]; then
-    [ "$(safe_config_hash "$PENDING_CONFIG_PATH" 2>/dev/null || true)" = "$PENDING_CONFIG_HASH" ] || {
+    [ "$(safe_config_hash "$PENDING_CONFIG_PATH" 2>/dev/null || true)" = "${PENDING_RECOVERY_HASH:-$PENDING_CONFIG_HASH}" ] || {
       log 'Pending settings changed during installation; the installer will not apply them.'
       return 1
     }
@@ -6555,6 +6575,9 @@ verify_config_unchanged() {
   local expected_hash expected_snapshot
   expected_hash="${CONFIG_HASH_EXPECTED:-$CONFIG_HASH_BEFORE}"
   expected_snapshot="${CONFIG_EXPECTED_SNAPSHOT:-$CONFIG_SNAPSHOT}"
+  if [ -n "$CONFIG_RECOVERY_HASH" ]; then
+    expected_hash="$CONFIG_RECOVERY_HASH"; expected_snapshot="$CONFIG_RECOVERY_SNAPSHOT"
+  fi
   current_hash="$(safe_config_hash "$CONFIG_FILE" 2>/dev/null || true)"
   if [ "$current_hash" = "$expected_hash" ]; then
     # Later postconditions can still fail. Retire this snapshot only after the
@@ -6568,7 +6591,7 @@ verify_config_unchanged() {
     log "Config drift: the live protected path became missing, non-regular, or unsafe."
   fi
   rm -f "$current_snapshot"
-  if ! ensure_data_directory || ! safe_config_restore "$CONFIG_SNAPSHOT" "$CONFIG_FILE"; then
+  if ! ensure_data_directory || ! safe_config_restore "${CONFIG_RECOVERY_SNAPSHOT:-$CONFIG_SNAPSHOT}" "$CONFIG_FILE"; then
     log "CRITICAL: unable to safely restore the protected central config. The original root-owned snapshot remains at $CONFIG_SNAPSHOT."
     rollback_failure "protected configuration restoration failed after verification"
     exit 1
@@ -6910,7 +6933,7 @@ $module = getenv("SLS_MASS_NOTIFY_MODULE") ?: "slsmassnotifyserver";
 $stmt = \FreePBX::Database()->prepare("SELECT version, enabled FROM modules WHERE modulename = ?");
 $stmt->execute([$module]);
 $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-exit(count($rows) === 1 && ($rows[0]["version"] ?? null) === "0.1.9-beta"
+exit(count($rows) === 1 && ($rows[0]["version"] ?? null) === "0.1.10-beta"
     && in_array($rows[0]["enabled"] ?? null, [1, "1"], true) ? 0 : 1);
 ' >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
 }
@@ -7335,7 +7358,7 @@ except (OSError, ValueError, AssertionError):
 if result.get('ok') is not True or sys.argv[2] != '200':
     missing = [name for name in result['missing'] if name in ('pdo_sqlite','curl','dom','mbstring','posix','openssl','sodium','php_8_2_or_newer','php_security_floor','exec_enabled','proc_open_enabled','posix_geteuid_enabled','posix_getpwnam_enabled','openssl_encrypt_enabled','openssl_decrypt_enabled','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt_enabled','sodium_crypto_pwhash_str_enabled','sem_get_enabled','sem_acquire_enabled','sem_remove_enabled','web_runtime_must_run_as_asterisk')]
     raise SystemExit('The PHP runtime serving Apache is missing: ' + ', '.join(missing) + '. Enable these for the active Apache/FPM PHP version and retry; installing CLI extensions alone does not repair another PHP handler.')
-if result.get('module_version') != '0.1.9-beta':
+if result.get('module_version') != '0.1.10-beta':
     raise SystemExit('The web PHP handler is still serving another SLL release. Review Apache/PHP-FPM reload errors and draining requests, then retry; a CLI file check cannot verify cached web code.')
 print('Served PHP prerequisites verified through the local API route.')
 PY

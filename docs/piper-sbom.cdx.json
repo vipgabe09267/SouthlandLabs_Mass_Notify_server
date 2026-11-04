@@ -1784,7 +1784,7 @@
       ],
       "name": "slsmassnotifyserver",
       "type": "application",
-      "version": "0.1.9-beta"
+      "version": "0.1.10-beta"
     },
     "properties": [
       {
@@ -1809,7 +1809,7 @@
       }
     ]
   },
-  "serialNumber": "urn:uuid:afaefb69-2f26-5319-9850-2f9b70ba8b11",
+  "serialNumber": "urn:uuid:44f39bb0-c8e7-5c48-a030-5e5cbeb7aa2e",
   "specVersion": "1.6",
   "version": 1
 }

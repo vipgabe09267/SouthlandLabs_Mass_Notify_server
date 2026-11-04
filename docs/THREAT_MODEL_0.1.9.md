@@ -1,6 +1,10 @@
 ## Executive summary
 
-This threat model retains source-review findings recorded before the later V0.1.9-beta release, which was withdrawn on 2026-11-03. The current source candidate is unpublished. The [qualification boundaries](QUALIFICATION_MATRIX.md) record historical H evidence and the unresolved actual LiteNet history and MFA-related recovery blockers; this review does not establish their correction.
+This threat model retains source-review findings recorded before the later V0.1.9-beta release, which was withdrawn on 2026-11-03; its tag is retired. The replacement 0.1.10-beta candidate, planned tag `v0.1.10-beta`, is unpublished. The [qualification boundaries](QUALIFICATION_MATRIX.md) distinguish historical H/G evidence from the current source correction and the still-unproved actual LiteNet history loss.
+
+The replacement preserves monotonically consumed MFA counters and their associated revision through separately retained recovery targets, without broadly excluding operator settings from comparison. Original snapshots and intention chains remain immutable; future intention ciphertexts and target publication are durable before restoration. Retries cannot lower the validated cursor, and authenticated terminal receipts preserve original/target/intention evidence against later pruning. Unrelated edits and unfinished immediate-settings journals remain conflicts. These changes address replay-state restoration risk without granting authority to accept missing phone history.
+
+**207 focused cases across seven isolated suites passed** for the replacement. Full 424-suite qualification, corrected native recovery and publication remain pending; 0.1.8-beta remains the available published prerelease. This addendum does not turn the dated threat model or historical H/G results into installed-release qualification.
 
 SLL turns public FreePBX, scoped operator/API and signed external inputs into notifications and optional physical effects. Principal risks are stale authority, duplicate effects, content exposure, shared-PBX availability and privileged maintenance. Confirmed source fixes and remaining limits are distinguished below; ten threat scenarios do not mean ten vulnerabilities. No account bypass or root code execution was demonstrated. Source and installed-generation qualification remain separate.
 
