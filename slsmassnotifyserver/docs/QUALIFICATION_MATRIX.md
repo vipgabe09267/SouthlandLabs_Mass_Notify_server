@@ -1,19 +1,30 @@
 # Qualification boundaries
 
-`0.1.9-beta` is the unpublished corrected candidate L, planned reserved tag `release-0.1.9-beta`. Available published prerelease: `0.1.8-beta`. Commands and new signed assets remain unavailable pending qualification/publication. Retired uppercase V0.1.9-beta and withdrawn v0.1.10-beta evidence below do not qualify the rebuilt candidate or establish recovery of the reported actual target.
+`0.1.9-beta` is the published correction L, immutable reserved tag `release-0.1.9-beta`. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. Historical uppercase V0.1.9-beta and v0.1.10-beta releases remain withdrawn. No entry certifies every FreePBX layout, crash window, sustained load or delivery provider.
 
-## Current reserved-tag 0.1.9-beta correction — 2026-11-04
+## Published reserved-tag 0.1.9-beta correction — 2026-11-04
 
-The user required the software to remain 0.1.9-beta. The correction retains the strict MFA/history recovery changes; no replay counter, credential, key or operational history is reset. New artifacts must bind the reserved tag and exact package/installer hashes because historical uppercase assets have the same module version/package filename. This pass changes naming/package/signature metadata only. Its full isolated build and planned fresh 0.1.9 plus explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS test require their own completed evidence; no automatic updater downgrade is enabled.
+The naming correction retains the tested MFA/history recovery logic. It does not reset replay counters, credentials, keys or operational history. New signed artifacts bind lowercase `release-0.1.9-beta`; historical uppercase assets have the same module-version/package filename but different signed bytes. The updater's version-equality/downgrade protections remain unchanged; the explicit authenticated installer performed the marked-VM naming correction.
 
-The bootstrap now selects lowercase release-0.1.9-beta for new downloads. Its current SHA-256 is `0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6`. Existing-version equality/downgrade protections remain; the manual authenticated installer provides repair while preserving enrolled publisher policy. Exact generated metadata is rebuilt from module.xml and truthful release status.
+Source freeze `ec07a0d3541d246684fda8215b6b5cc14f9e199991a4a354d3b097d1d4617252` contains 3123 files. Release commit: `8d5f8069328768e4292bb0435265e255bad250aa`. The complete 424/424 isolated suite gate, required browser/schema checks and official package reproduction matched the new signed artifacts.
 
-| Current L gate | Status |
+| Exact L native scenario | Observed result |
 | --- | --- |
-| Recovery fixes retained; version/default/document metadata reviewed | Source preparation in progress. |
-| Full isolated build/browser/schema gate | Pending for K. |
-| Fresh 0.1.9 and explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS tests | Pending. |
-| Signed assets, public readback/provenance and publication | Pending; commands unavailable. |
+| `fresh-install-019` | Passed with 16/16 doctor checks. |
+| `authenticated-version-correction-fpm-019` | Passed with 16/16 doctor checks. |
+
+Fresh installation began with absent module/configuration/pending/history and zero native module rows. The second case began with the old 0.1.10 handler actually warmed and cached under PHP-FPM/HTTPS8443 with timestamp validation disabled, then served 0.1.9 after explicit authenticated installation. Active/pending settings, MFA state, key metadata, retained history, unrelated cron/native state and Asterisk process identity were preserved; only source-bounded native cron regeneration is admitted. These are two disposable profiles, not an independent installation of 0.1.9 on the user's target. No notifications were sent, no production PBX was changed by qualification, and the qualification VM was cleanly stopped.
+
+| L artifact | SHA-256 |
+| --- | --- |
+| Package | `ce98a543248bafbd1788ef0fa8b9549206802ca99280bcc79d640bc65f9a7b70` |
+| Installer | `f59231567c08247e43186adf09bd4cc2388d596a46fa29c567f0495b246fdb12` |
+| Manifest | `acfdc40a3f649a0aaacdb6bbff4ea38cc93dc4c490b314c69930acfb29150479` |
+| Manifest signature | `4311c281c99a45fd42d79535fb6d2436c8291615c8899be5b33195861f1d57fe` |
+
+All 9 public assets were read back without GitHub download authentication; tagged bootstrap/installer bytes and the real bootstrap downloader/signature verifier matched without installing. All 4 package/installer/manifest/signature provenance policies matched the exact tag/source/signer commit and hosted runner. Required main/tag validation, tag sensor compilation and release provenance workflows succeeded. [Published release](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/release-0.1.9-beta).
+
+The immutable tag and signed package retain their prepublication documentation snapshot. This published-status update belongs to a separate main documentation commit; it changes no runtime or release bytes and does not move the tag.
 
 ## Historical K — unpublished lower-v candidate
 

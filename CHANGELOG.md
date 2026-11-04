@@ -1,14 +1,14 @@
 # Changelog
 
-## 0.1.9-beta — unpublished reserved-tag correction, 2026-11-04
+## 0.1.9-beta — published reserved-tag correction, 2026-11-04
 
-The software remains `0.1.9-beta`, candidate L, planned new reserved tag `release-0.1.9-beta`. The retired uppercase `V0.1.9-beta` tag remains immutable historical evidence. The available published prerelease is `0.1.8-beta`; this correction's commands/assets remain unavailable pending qualification and publication.
+The software remains `0.1.9-beta`, now published at immutable reserved tag `release-0.1.9-beta`. The uppercase `V0.1.9-beta` and v0.1.10-beta releases remain withdrawn. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. The immutable tag and signed package retain their prepublication documentation snapshot. This published-status update belongs to a separate main documentation commit; it changes no runtime or release bytes and does not move the tag.
 
 The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts.
 
 - Retain the strict monotonic MFA-counter/revision preservation, durable targets and ciphertext evidence, crash/retry behavior, original evidence retention and unexplained-history refusal implemented in J. No MFA/key reset or blanket settings exception is introduced.
 - Restore current runtime/API/XML/package/installer identities and update default release selection to lowercase `release-0.1.9-beta`; historical uppercase signed evidence remains verifiable for recovery. Existing version-equality/downgrade protections remain unchanged.
-- Rebuild generated API/SBOM metadata and signed assets for the corrected version. Current L qualification remains pending. The withdrawn J 424-suite/nine-native evidence below belongs to its exact 0.1.10-beta source and artifacts, not this rebuild.
+- Rebuild generated API/SBOM metadata and signed assets for the corrected version. Current L qualification is recorded separately in the [qualification matrix](docs/QUALIFICATION_MATRIX.md). The withdrawn J 424-suite/nine-native evidence below belongs to its exact 0.1.10-beta source and artifacts, not this rebuild.
 
 ## Historical K — unpublished lower-v candidate, 2026-11-04
 
@@ -22,7 +22,7 @@ K passed its full 424-suite gate and fresh installation with 16/16 doctor checks
 - Preserve matching active/pending MFA progress without applying unrelated staged values. Refuse divergent staged operator policy, unproved intermediate configurations and unresolved immediate-settings transactions; do not invent pending files during an MFA merge.
 - Keep original snapshots, hashes and installer intention chains unchanged. Future installer settings writes retain their exact ciphertext durably before publishing a hash intention or replacing live settings. Legacy hash-only transactions can use the original snapshot for a pure MFA delta but cannot infer missing intermediate encrypted bytes.
 - Stage and fsync separate root-private recovery targets before atomic publication. Crash retries, partial restoration and later valid MFA advancement retain the highest validated counters. Keep transaction-bound MFA receipts, original settings, intention evidence and authenticated carriers through verified rollback and later pruning; do not classify this as administrator-accepted history loss.
-- Preserve the ordinary history gate: the reported baseline has 22 records, 1 unchanged, 21 missing and 0 with proven expiry. Matching evidence or a separate explicit administrator decision is still required; no acceptance exists for that reported case.
+- Preserve the ordinary history gate: the reported baseline has 22 records, 1 unchanged, 21 missing and 0 with proven expiry. At J qualification time, matching evidence or a separate explicit administrator decision was still required and no acceptance had yet been reported; the later user-reported acceptance is recorded above.
 
 **Release verification:** **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. The earlier 207 focused cases across seven isolated suites covered real PHP login/replay, configuration readers, protected transactions, interruptions/retries, locks, history review and retained evidence. Native qualification includes an actual QEMU power loss after durable MFA targets and retry after another real PHP login, plus the bounded profiles in the [qualification matrix](docs/QUALIFICATION_MATRIX.md). At the time of that qualification the reported target was unrecovered; later user-reported success and administrator acceptance are recorded above. Historical H/G findings below remain historical.
 
@@ -82,7 +82,7 @@ Historical H passed 423/423 isolated suites, four native install/rollback cases 
 
 Prior native qualification covered Debian 12 / FreePBX 17, Apache PHP and PHP-FPM, Asterisk 20/22, existing failed-transaction recovery, abrupt VM power loss, repeated repair and the 2 GiB Lite lifecycle. Those historical results and earlier owner acceptance do not qualify the current correction. See docs/QUALIFICATION_MATRIX.md for evidence and remaining checks.
 
-Historical release identity: `V0.1.9-beta`, software 0.1.9-beta. That immutable tag is retired and cannot be reused. Its earlier checksum-pinned upgrade instructions are withdrawn; the replacement candidate uses the separate 0.1.10-beta identity recorded above.
+Historical release identity: `V0.1.9-beta`, software 0.1.9-beta. That immutable tag is retired and cannot be reused. Its earlier checksum-pinned upgrade instructions are withdrawn; at that time the replacement used 0.1.10-beta, which was later withdrawn; the current lowercase release-0.1.9-beta correction is recorded above.
 
 ### Southland Labs rebrand
 

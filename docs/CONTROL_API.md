@@ -1,11 +1,10 @@
 # SLL Mass Notify Server Control API
 
-This document describes the unpublished `0.1.9-beta` correction, planned
-reserved tag `release-0.1.9-beta`. Published availability remains `0.1.8-beta`; uppercase
-V0.1.9-beta and v0.1.10-beta releases are withdrawn. Current qualification and
-publication remain pending. The API contract remains additive: notification payload
-schema **1** and desktop SSE protocol **2** are unchanged. Labs features require
-acceptance with actual devices, providers and clients before operational use.
+This document describes the published `0.1.9-beta` correction, immutable
+reserved tag `release-0.1.9-beta`. Uppercase V0.1.9-beta and v0.1.10-beta releases remain
+withdrawn historical evidence. The API contract remains additive: notification
+payload schema **1** and desktop SSE protocol **2** are unchanged. Labs features
+require acceptance with actual devices, providers and clients before operational use.
 
 The API includes bounded pre-authentication admission and sampled rejection
 auditing. Successful and attributable authenticated operations retain individual
