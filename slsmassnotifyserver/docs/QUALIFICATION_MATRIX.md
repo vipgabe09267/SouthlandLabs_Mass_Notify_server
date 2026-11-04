@@ -1,18 +1,29 @@
 # Qualification boundaries
 
-`0.1.10-beta` is the published replacement prerelease, immutable tag `v0.1.10-beta`. Its signed assets, public readback and exact-tag provenance were verified. **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. No entry certifies every FreePBX layout, sustained load or delivery provider.
+`0.1.9-beta` is the unpublished corrected candidate K, planned lowercase tag `v0.1.9-beta`. Available published prerelease: `0.1.8-beta`. Commands and new signed assets remain unavailable pending qualification/publication. Retired uppercase V0.1.9-beta and withdrawn v0.1.10-beta evidence below do not qualify the rebuilt candidate or establish recovery of the reported actual target.
 
-## Withdrawal and reported actual recovery — 2026-11-03
+## Current lowercase-tag 0.1.9-beta correction — 2026-11-04
 
-The V0.1.9-beta GitHub release and nine downloads were removed; anonymous release and installer requests returned 404 after withdrawal. Public source/tag history remains historical evidence. The immutable tag is retired and must not advertise an installer or be reused. The replacement has the separate published 0.1.10-beta identity and its own signed assets.
+The user required the software to remain 0.1.9-beta. The correction retains the strict MFA/history recovery changes; no replay counter, credential, key or operational history is reset. New artifacts must bind the lowercase tag and exact package/installer hashes because historical uppercase assets have the same module version/package filename. This pass changes naming/package/signature metadata only. Its full isolated build and planned fresh 0.1.9 plus explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS test require their own completed evidence; no automatic updater downgrade is enabled.
 
-The reported LiteNet transaction has **22 baseline closed-history records: 1 unchanged, 21 missing and 0 with proven expiry**. The missing count and age alone cannot establish expiry. Ordinary recovery must continue to refuse unexplained loss with exit 4. No administrator has accepted this loss, and this withdrawal does not authorize acceptance, reconstruction or replacement of the live ledger. **The reported actual LiteNet target has not been recovered.**
+The bootstrap now selects lowercase v0.1.9-beta for new downloads. Its current SHA-256 is `89fb64997bf84ddb427b133effbaf960dd10b847791c4360e9c6749452949c54`. Existing-version equality/downgrade protections remain; the manual authenticated installer provides repair while preserving enrolled publisher policy. Exact generated metadata is rebuilt from module.xml and truthful release status.
 
-An independent active-configuration difference was limited to the TOTP replay counter `totp_last_counter` and the `operator_access` section revision. The replacement proves that limited progress without broadly ignoring operator settings or resetting counters. Separate durable targets preserve it while original snapshots, hashes and intentions remain unchanged. Retain live settings and protected snapshots together. Disposable qualification supplied its own full matching 22-row backup; it does not supply evidence for the reported target.
+| Current K gate | Status |
+| --- | --- |
+| Recovery fixes retained; version/default/document metadata reviewed | Source preparation in progress. |
+| Full isolated build/browser/schema gate | Pending for K. |
+| Fresh 0.1.9 and explicit manual 0.1.10-to-0.1.9 PHP-FPM/HTTPS tests | Pending. |
+| Signed assets, public readback/provenance and publication | Pending; commands unavailable. |
 
-Historical H/G findings below remain historical. Current 0.1.10-beta qualification is recorded separately here.
+## Withdrawals and reported actual target
 
-## Published 0.1.10-beta qualification — 2026-11-04
+The uppercase V0.1.9-beta release/downloads were withdrawn on 2026-11-03. The v0.1.10-beta release/downloads were withdrawn on 2026-11-04 because that version was outside the user's required version. Their immutable tags/source remain historical evidence and must not be reused or moved.
+
+The user subsequently reported that 0.1.10-beta installed successfully: committed exit 0, 16 doctor checks passed, MFA/settings/keys preserved, signatures valid, five managed cron jobs, 92 endpoints and healthy SSE. The administrator explicitly accepted the 21 missing history records. This is a user-reported target result, not an independently repeated target qualification or proof of expiry. The new 0.1.9-beta naming correction has not yet been tested on that target. Ordinary unknown loss on another transaction still refuses until its own matching evidence or valid explicit decision exists. An accepted loss is not a reconstructed ledger or proof of expiry.
+
+## Historical withdrawn J — 0.1.10-beta, 2026-11-04
+
+J was published with immutable tag v0.1.10-beta and verified public downloads/provenance before withdrawal for the version correction. The exact source/commit, hashes and bounded observed results below remain historical evidence only. They are not qualification of candidate K or permission to use withdrawn downloads.
 
 The earlier **207 focused cases across seven isolated suites passed** through the official namespace wrapper. The subsequent exact-release gate passed **424/424 independent isolated suites**, including required browser/UI and schema validation. The official archive reproduced the signed J package. Source freeze `fb3da7bd27f90e3a88db3b17cc65af4bf9bfb92ba28014c0a8e0a119abc39d8e` contains 3123 files; release commit `b3fbafc2d9304732f45643d5892b7cebdc83931e`, immutable tag `v0.1.10-beta`.
 
@@ -45,7 +56,7 @@ Public readback verified all 9 release assets without GitHub download authentica
 
 The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
 
-The unexplained 21-record loss on the reported actual target remains a separate gate. That target still requires its own matching evidence or valid explicit administrator decision. Disposable matching-backup recovery does not authorize accepting that loss or deleting its snapshots.
+At J qualification time, before the later user report, the actual target remained a separate unresolved history gate. The user-reported successful installation and explicit administrator acceptance are recorded above. The disposable matching-backup fixture did not authorize that acceptance or supply the actual target's missing records.
 
 ## Historical withdrawn H — 2026-11-03
 
@@ -111,7 +122,7 @@ Native Framework reload intentionally regenerates schedules and entry positions 
 
 Actual kernel cgroup calculations covered ordinary v2, remounted namespace and bind-root topologies in earlier candidate C. The complete resource helper is byte-identical in G. This is bounded component evidence, not a complete G installation under each constrained resource topology.
 
-The protected `transaction-sequence` file is a counter, never a recovery directory. A real failed transaction beside it still requires recovery. Hash-only history cannot prove why records are missing: matching protected evidence or a separate explicit transaction/artifact-bound administrator decision is required. These historical G tests did not recover the actual LiteNet transaction. The currently reported target recovery remains blocked as described above, with no administrator approval of missing history.
+The protected `transaction-sequence` file is a counter, never a recovery directory. A real failed transaction beside it still requires recovery. Hash-only history cannot prove why records are missing: matching protected evidence or a separate explicit transaction/artifact-bound administrator decision is required. These historical G tests did not recover the actual LiteNet transaction. At the time of those historical G tests the reported target remained blocked. Later user-reported success and administrator acceptance are recorded above; the historical test results are not relabeled.
 
 No production installation or real notifications occurred during qualification. There is no universal-layout, other-OS/architecture, sustained PBX/fleet load, physical handset/provider delivery or every-crash-window claim. Each target PBX still needs read-only inspection, `slsconsole doctor --json` and its own endpoint/provider acceptance.
 

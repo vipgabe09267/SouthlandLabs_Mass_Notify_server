@@ -77,7 +77,7 @@ RETRYABLE_PRE_SUBMISSION_ERRORS = {
     "request_timeout",
     "tls_failure",
 }
-USER_AGENT = "SouthlandLabs-Mass-Notify-Server/0.1.10-beta"
+USER_AGENT = "SouthlandLabs-Mass-Notify-Server/0.1.9-beta"
 DISCORD_HOSTS = {"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"}
 DISCORD_PATH = re.compile(r"^/api/webhooks/[0-9]+/[A-Za-z0-9._~-]+$")
 # Downloaded and bundled artwork; providers retrieve it from this PBX, not

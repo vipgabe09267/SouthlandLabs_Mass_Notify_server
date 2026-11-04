@@ -1,8 +1,8 @@
 # Installer diagnostics, recovery and qualification
 
-The replacement 0.1.10-beta release is published as immutable tag `v0.1.10-beta`. Its [checksum-pinned commands](../README.md#install-or-update) use the unchanged bootstrap and independently verified new assets. V0.1.9-beta remains withdrawn, its downloads removed and its immutable tag retired. Preserve existing failed transactions; the generic examples below document the protocol and never authorize withdrawn assets. The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
+The corrected software remains **0.1.9-beta**, candidate K, with planned lowercase tag `v0.1.9-beta`. It is **unpublished**; its command examples remain unavailable until qualification and publication. The available published prerelease is **0.1.8-beta**. The retired uppercase `V0.1.9-beta` release and the withdrawn `v0.1.10-beta` release must not be reused. Preserve every failed transaction and authenticated original artifact; generic protocol examples below never authorize withdrawn assets.
 
-The reported actual LiteNet recovery has 22 baseline records, 1 unchanged, 21 missing and 0 with proven expiry. Ordinary history recovery must continue to refuse with exit 4; no loss acceptance exists. The published release separately preserves proved `totp_last_counter` and associated operator-access revision advancement. **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. Disposable native recovery used its own complete matching backup and did not recover the reported target. Do not overwrite settings, reset MFA or replace history to force completion. See [qualification boundaries](QUALIFICATION_MATRIX.md).
+The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. The naming correction retains existing MFA/history behavior. Do not overwrite settings, reset MFA or replace the ledger; preserve the recorded administrator decision with the transaction evidence. New K qualification remains pending. See [qualification boundaries](QUALIFICATION_MATRIX.md).
 
 Activation reloads Apache and each independently qualified PHP-FPM version. This
 refreshes their separate opcode caches without changing PHP settings or restarting
@@ -170,8 +170,8 @@ Recovery authenticates the saved installer, package and executable helpers
 against publisher evidence. The withdrawn H `0.1.9-beta` installer historically supplied recovery
 helpers for earlier unfinished transactions, including an earlier withdrawn package
 with the same version. That history does not authorize its use for the currently
-blocked target. The published `0.1.10-beta` installer supplies corrected recovery logic
-through its own independently authenticated carrier. Carrier installer and package are authenticated separately and
+blocked target. The unpublished lowercase-tag `0.1.9-beta` candidate retains corrected recovery logic;
+its carrier remains unavailable pending qualification and publication. Carrier installer and package are authenticated separately and
 retained in a private `recovery-carrier.*` directory. The original signed
 artifacts, approvals and operational baseline remain the restoration authority.
 The journal does not approve live file hashes. It does not restore operational
@@ -236,8 +236,9 @@ bytes and refuse tampering. This archive is not an administrator-accepted
 history-loss receipt and grants no permission to restore delivery history or
 approve unrelated configuration changes. These behaviors have focused fixture
 coverage and signed native crash/retry coverage using a complete matching backup.
-The reported actual target remains unrecovered; its own unexplained history loss
-is a separate admission gate.
+The user later reported successful 0.1.10 installation and explicit acceptance of
+the actual target's missing history. That is separate from this matching-backup
+fixture and does not prove expiry or qualify new 0.1.9 artifacts.
 
 ### Phone history during installation
 
@@ -304,7 +305,7 @@ The protected `history-loss-review.json` binds the original signed artifacts,
 exact transaction directory, original baseline bytes and missing record hashes.
 Review its counts and `review_sha256` before deciding what to do.
 
-No administrator has accepted missing history for the reported LiteNet case.
+The administrator subsequently accepted missing history for the reported LiteNet case, according to the user's successful-installation report. Preserve that decision and its transaction binding; do not apply it to another transaction.
 The following documents the separate explicit loss-decision mechanism; it is
 not an instruction or approval to use it for that target. If no matching
 evidence can be found, an administrator can separately accept
@@ -493,7 +494,7 @@ Earlier installers can stop with `Previous runtime changed after preflight; no a
 
 Current installers recognize completed or partially completed quarantine only when the protected `runtime-cache-recovery/inventory.json` matches the original approval and the saved cache bytes match their recorded hashes. Each check still verifies authenticated source files and rejects unknown runtime files, unsafe recovery entries and changed caches. Quarantined bytecode never receives execution or rollback approval. Completed quarantine evidence is left intact.
 
-Keep the publisher-authenticated installer and package recorded in the retained transaction. The published `0.1.10-beta` repair installer can supply its own authenticated recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace older signed evidence or approve arbitrary live files. Do not substitute withdrawn 0.1.9-beta downloads. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
+Keep the publisher-authenticated installer and package recorded in the retained transaction. After qualification/publication, the lowercase-tag `0.1.9-beta` repair installer can supply its own authenticated recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace older signed evidence or approve arbitrary live files. Do not substitute retired uppercase V0.1.9-beta or withdrawn v0.1.10-beta downloads. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
 
 ## Included offline removal
 

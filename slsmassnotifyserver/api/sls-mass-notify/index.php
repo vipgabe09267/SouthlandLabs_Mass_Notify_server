@@ -34,7 +34,7 @@ if (($_GET['sls_installer_runtime'] ?? '') === '1'
     header('Cache-Control: no-store');
     header('X-Content-Type-Options: nosniff');
     echo json_encode(['probe' => 'sls_served_php_v1', 'ok' => !$missing, 'missing' => $missing,
-        'module_version'=>'0.1.10-beta',
+        'module_version'=>'0.1.9-beta',
         'php_version'=>PHP_VERSION, 'php_sapi'=>PHP_SAPI, 'runtime_account_ok'=>$runtimeAccountOk,
         'extensions'=>$extensions, 'functions'=>$functions]);
     exit;

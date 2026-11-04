@@ -1,8 +1,18 @@
 # Changelog
 
-## 0.1.10-beta — published prerelease, 2026-11-04
+## 0.1.9-beta — unpublished lowercase-tag correction, 2026-11-04
 
-Published immutable release tag: `v0.1.10-beta`. The available published prerelease is `0.1.10-beta`; the retired `V0.1.9-beta` tag and withdrawn downloads must not be reused. Checksum-pinned commands use the new tag and unchanged bootstrap. The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
+The software remains `0.1.9-beta`, candidate K, planned new lowercase tag `v0.1.9-beta`. The retired uppercase `V0.1.9-beta` tag remains immutable historical evidence. The available published prerelease is `0.1.8-beta`; this correction's commands/assets remain unavailable pending qualification and publication.
+
+The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts.
+
+- Retain the strict monotonic MFA-counter/revision preservation, durable targets and ciphertext evidence, crash/retry behavior, original evidence retention and unexplained-history refusal implemented in J. No MFA/key reset or blanket settings exception is introduced.
+- Restore current runtime/API/XML/package/installer identities and update default release selection to lowercase `v0.1.9-beta`; historical uppercase signed evidence remains verifiable for recovery. Existing version-equality/downgrade protections remain unchanged.
+- Rebuild generated API/SBOM metadata and signed assets for the corrected version. Current K qualification remains pending. The withdrawn J 424-suite/nine-native evidence below belongs to its exact 0.1.10-beta source and artifacts, not this rebuild.
+
+## 0.1.10-beta — withdrawn, 2026-11-04
+
+**WITHDRAWN — 2026-11-04.** This release was removed because the user required the software to remain 0.1.9-beta. Immutable tag `v0.1.10-beta`, source commit `b3fbafc2d9304732f45643d5892b7cebdc83931e` and the actual J artifacts/qualification remain historical evidence; their release and downloads must not be reused. The correction below is not relabeled as a completed 0.1.9-beta qualification. The user later reported that this 0.1.10-beta installation succeeded and the administrator accepted the missing history; the new naming correction has no independent target result yet.
 
 - Preserve increasing TOTP replay counters and their associated operator-access revision through existing failed-transaction recovery. Require type-exact equality for every other setting, account order, credential, permission, recovery code and passkey; unrelated edits remain conflicts.
 - Preserve matching active/pending MFA progress without applying unrelated staged values. Refuse divergent staged operator policy, unproved intermediate configurations and unresolved immediate-settings transactions; do not invent pending files during an MFA merge.
@@ -10,7 +20,7 @@ Published immutable release tag: `v0.1.10-beta`. The available published prerele
 - Stage and fsync separate root-private recovery targets before atomic publication. Crash retries, partial restoration and later valid MFA advancement retain the highest validated counters. Keep transaction-bound MFA receipts, original settings, intention evidence and authenticated carriers through verified rollback and later pruning; do not classify this as administrator-accepted history loss.
 - Preserve the ordinary history gate: the reported baseline has 22 records, 1 unchanged, 21 missing and 0 with proven expiry. Matching evidence or a separate explicit administrator decision is still required; no acceptance exists for that reported case.
 
-**Release verification:** **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. The earlier 207 focused cases across seven isolated suites covered real PHP login/replay, configuration readers, protected transactions, interruptions/retries, locks, history review and retained evidence. Native qualification includes an actual QEMU power loss after durable MFA targets and retry after another real PHP login, plus the bounded profiles in the [qualification matrix](docs/QUALIFICATION_MATRIX.md). The reported actual LiteNet target remains unrecovered; unknown history still needs its own matching evidence or a valid explicit administrator decision. Historical H/G findings below remain historical.
+**Release verification:** **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. The earlier 207 focused cases across seven isolated suites covered real PHP login/replay, configuration readers, protected transactions, interruptions/retries, locks, history review and retained evidence. Native qualification includes an actual QEMU power loss after durable MFA targets and retry after another real PHP login, plus the bounded profiles in the [qualification matrix](docs/QUALIFICATION_MATRIX.md). At the time of that qualification the reported target was unrecovered; later user-reported success and administrator acceptance are recorded above. Historical H/G findings below remain historical.
 
 ## 0.1.9-beta — 2026-11-03
 

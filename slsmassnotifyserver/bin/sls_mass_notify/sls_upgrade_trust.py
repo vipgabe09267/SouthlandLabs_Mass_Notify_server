@@ -118,7 +118,7 @@ def sls_release_url(version, name):
     if (not isinstance(version,str) or not SLS_VERSION.fullmatch(version)
             or name not in ('slsmassnotifyserver-'+version+'.tgz','release-manifest.json','release-manifest.sig')):
         raise UpgradeError('Unsupported signed SLL release asset identity')
-    prefix='V' if version=='0.1.9-beta' else ('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.'))) < (0,1,9) else 'v')
+    prefix='slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.'))) < (0,1,9) else 'v'
     return 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/'+prefix+version+'/'+name
 
 

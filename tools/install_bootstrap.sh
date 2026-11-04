@@ -8,7 +8,7 @@ bootstrap_download() {
   /usr/bin/timeout --signal=TERM --kill-after=3 75 /usr/bin/python3 -I - "$1" "$2" <<'PY'
 import os,re,sys,urllib.request,urllib.parse
 from pathlib import Path
-root=Path(sys.argv[1]);version=sys.argv[2];tag='V0.1.9-beta' if version=='0.1.9-beta' else ('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.')))<(0,1,9) else 'v')+version
+root=Path(sys.argv[1]);version=sys.argv[2];tag=('slsmassnotifyserver-' if tuple(map(int,version.removesuffix('-beta').split('.')))<(0,1,9) else 'v')+version
 class Redirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,request,fp,code,message,headers,url):
         target=urllib.parse.urlsplit(url)
@@ -180,8 +180,7 @@ PY
 MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
 -----END PUBLIC KEY-----
 KEY
-  if [ "$version" = 0.1.9-beta ]; then release_tag=V0.1.9-beta
-  elif /usr/bin/python3 -I -c 'import sys; raise SystemExit(0 if tuple(map(int,sys.argv[1].removesuffix("-beta").split("."))) < (0,1,9) else 1)' "$version"; then release_tag="slsmassnotifyserver-$version"
+  if /usr/bin/python3 -I -c 'import sys; raise SystemExit(0 if tuple(map(int,sys.argv[1].removesuffix("-beta").split("."))) < (0,1,9) else 1)' "$version"; then release_tag="slsmassnotifyserver-$version"
   else release_tag="v$version"; fi
   bootstrap_download "$directory" "$version"
   bootstrap_verify "$directory" "$version" "$release_tag" "$existing_mode"

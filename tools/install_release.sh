@@ -116,12 +116,12 @@ if [ -n "${SLS_MASS_NOTIFY_MODULE:-}" ] \
     "SLS_MASS_NOTIFY_MODULE is fixed to the FreePBX raw module name '$MODULE'; refusing an alternate value." >&2
   exit 2
 fi
-TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.10-beta.tgz}"
+TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.9-beta.tgz}"
 URL="${SLS_MASS_NOTIFY_TGZ_URL:-${1:-}}"
 SHA256="${SLS_MASS_NOTIFY_SHA256:-}"
 TOKEN="${SLS_MASS_NOTIFY_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 LOG_FILE="${SLS_MASS_NOTIFY_INSTALL_LOG:-/tmp/slsmassnotifyserver-install.log}"
-EXPECTED_TGZ_SHA256="ed167717198282349f89569f39bd7e6b08e3550e9ce8085072caee13d1858d6b"
+EXPECTED_TGZ_SHA256="3dde84124d3d367f7685624e414eadc335c1f408b5659a40f14cce94f3d92a91"
 DATA_DIR="/var/lib/asterisk/SLS_Mass_Notifications_Plugin"
 CONFIG_FILE="$DATA_DIR/mass-notifications.config"
 CONFIG_SNAPSHOT=""
@@ -5772,8 +5772,8 @@ verify_tgz() {
       log 'The release archive does not match the explicitly trusted SLS_MASS_NOTIFY_SHA256.'
       return 1
     fi
-  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.10-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
-    log "$TGZ does not match the current slsmassnotifyserver-0.1.10-beta package."
+  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.9-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
+    log "$TGZ does not match the current slsmassnotifyserver-0.1.9-beta package."
     log "Expected SHA256: $EXPECTED_TGZ_SHA256"
     log "Actual SHA256:   $actual_sha"
     log "Remove the stale local TGZ or install with SLS_MASS_NOTIFY_TGZ_URL so the current release is downloaded."
@@ -5842,8 +5842,8 @@ with tarfile.open(archive, "r:gz") as handle:
     version = root.findall("version")
     if len(rawname) != 1 or (rawname[0].text or "").strip() != module:
         raise SystemExit("module.xml rawname does not match the requested module")
-    if len(version) != 1 or (version[0].text or "").strip() != "0.1.10-beta":
-        raise SystemExit("module.xml does not contain the expected 0.1.10-beta version")
+    if len(version) != 1 or (version[0].text or "").strip() != "0.1.9-beta":
+        raise SystemExit("module.xml does not contain the expected 0.1.9-beta version")
 PY
 }
 
@@ -5875,7 +5875,7 @@ if match and match.group(1).startswith('V') and match.group(1) != 'V0.1.9-beta':
     match = None
 if url and not match:
     raise SystemExit('Use a signed GitHub release URL or a signed offline package.')
-release_tag, version, package = match.groups() if match else ('v0.1.10-beta', '0.1.10-beta', 'slsmassnotifyserver-0.1.10-beta.tgz')
+release_tag, version, package = match.groups() if match else ('v0.1.9-beta', '0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz')
 public_key = b'-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=\n-----END PUBLIC KEY-----\n'
 try:
     with tempfile.TemporaryDirectory(prefix='sls-release-verification-') as directory:
@@ -6933,7 +6933,7 @@ $module = getenv("SLS_MASS_NOTIFY_MODULE") ?: "slsmassnotifyserver";
 $stmt = \FreePBX::Database()->prepare("SELECT version, enabled FROM modules WHERE modulename = ?");
 $stmt->execute([$module]);
 $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-exit(count($rows) === 1 && ($rows[0]["version"] ?? null) === "0.1.10-beta"
+exit(count($rows) === 1 && ($rows[0]["version"] ?? null) === "0.1.9-beta"
     && in_array($rows[0]["enabled"] ?? null, [1, "1"], true) ? 0 : 1);
 ' >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
 }
@@ -7358,7 +7358,7 @@ except (OSError, ValueError, AssertionError):
 if result.get('ok') is not True or sys.argv[2] != '200':
     missing = [name for name in result['missing'] if name in ('pdo_sqlite','curl','dom','mbstring','posix','openssl','sodium','php_8_2_or_newer','php_security_floor','exec_enabled','proc_open_enabled','posix_geteuid_enabled','posix_getpwnam_enabled','openssl_encrypt_enabled','openssl_decrypt_enabled','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt_enabled','sodium_crypto_pwhash_str_enabled','sem_get_enabled','sem_acquire_enabled','sem_remove_enabled','web_runtime_must_run_as_asterisk')]
     raise SystemExit('The PHP runtime serving Apache is missing: ' + ', '.join(missing) + '. Enable these for the active Apache/FPM PHP version and retry; installing CLI extensions alone does not repair another PHP handler.')
-if result.get('module_version') != '0.1.10-beta':
+if result.get('module_version') != '0.1.9-beta':
     raise SystemExit('The web PHP handler is still serving another SLL release. Review Apache/PHP-FPM reload errors and draining requests, then retry; a CLI file check cannot verify cached web code.')
 print('Served PHP prerequisites verified through the local API route.')
 PY

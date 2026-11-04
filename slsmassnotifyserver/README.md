@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. **0.1.10-beta is the available published prerelease**, tag `v0.1.10-beta`. **0.1.9-beta is withdrawn**; its release and downloads were removed, and the retired `V0.1.9-beta` tag must not be reused.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. The corrected software remains **0.1.9-beta**, candidate K, with planned lowercase tag `v0.1.9-beta`. It is **unpublished**; its command examples remain unavailable until qualification and publication. The available published prerelease is **0.1.8-beta**. The retired uppercase `V0.1.9-beta` release and the withdrawn `v0.1.10-beta` release must not be reused.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,35 +14,35 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-**0.1.10-beta is published with signed assets and verified public downloads/provenance.** The checksum-pinned commands below use its new immutable tag. Never substitute retired `V0.1.9-beta` downloads or an old offline bundle.
+**The following 0.1.9-beta command examples are unavailable pending qualification and publication. Do not run them yet.** They target only the new lowercase `v0.1.9-beta` correction. Never substitute retired uppercase `V0.1.9-beta` downloads, withdrawn `v0.1.10-beta` downloads or an old offline bundle.
 
-Use `--upgrade` for an existing installation so its publisher policy, keys and revocations remain authoritative. Preserve existing settings, publisher trust and every failed transaction directory. The immutable tag and signed package retain their original prepublication documentation snapshot. This published-status update belongs to a separate documentation commit on main; it does not change release bytes or move the tag.
+After publication, use `--upgrade` for an existing installation so its publisher policy, keys and revocations remain authoritative. Preserve settings and every failed transaction directory. The software version remains 0.1.9-beta; the updater does not automatically replace an equal version. The new lowercase tag and signed artifact hashes distinguish this correction from the retired uppercase release.
 
-Fresh installation:
-
-```bash
-curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.10-beta/tools/install_bootstrap.sh &&
-printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
-sudo bash ./sls-bootstrap.sh 0.1.10-beta
-```
-
-Existing-installation upgrade or repair:
+Planned fresh installation, after qualification and publication:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.10-beta/tools/install_bootstrap.sh &&
-printf '%s\n' 'bdf8e32e22a0baeed9a5764f0ade1f6a110fbde686cb8ea5f4f06a026ea1da75  sls-bootstrap.sh' | sha256sum --check &&
-sudo bash ./sls-bootstrap.sh 0.1.10-beta --upgrade
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '89fb64997bf84ddb427b133effbaf960dd10b847791c4360e9c6749452949c54  sls-bootstrap.sh' | sha256sum --check &&
+sudo bash ./sls-bootstrap.sh 0.1.9-beta
 ```
 
-The unchanged bootstrap supports the new version's generic `v` tag. `--upgrade` authenticates against existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. An eligible unattended Lite installation needs explicit `--lite` (after `--upgrade` when upgrading). Review the limits below before selecting it.
+Planned existing-installation upgrade or repair, also unavailable until publication:
 
-The release preserves consumed MFA counters and the associated operator-access revision during recovery. Separate durable targets preserve that progress without replacing original evidence or accepting unrelated settings edits. **424/424 independent isolated suites passed**, including required browser/UI and schema checks; **9 native scenarios passed** in marked disposable QEMU branches. Signed public assets and exact-tag provenance were verified. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md) for the nine scenarios and their limits.
+```bash
+curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.1.9-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '89fb64997bf84ddb427b133effbaf960dd10b847791c4360e9c6749452949c54  sls-bootstrap.sh' | sha256sum --check &&
+sudo bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
+```
 
-The reported LiteNet history still has 22 baseline records: 1 unchanged, 21 missing and 0 with proven expiry. Ordinary recovery must return exit 4 without matching evidence; no administrator has accepted the missing history. MFA handling does not waive this gate. See [recovery operations](docs/INSTALLER_OPERATIONS.md) and the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+The corrected bootstrap selects the new lowercase `v0.1.9-beta` tag by default while retained historical evidence remains verifiable. `--upgrade` authenticates existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. Eligible unattended Lite installation requires explicit `--lite` after `--upgrade` when upgrading.
 
-Historical H passed 423 isolated suites, four native install/rollback cases and three installed journal profiles before withdrawal. Those results and earlier G 423/18/360 evidence do not qualify 0.1.10-beta or establish recovery of the reported target.
+The MFA/history recovery fixes are retained. Only proved monotonic TOTP-counter and associated operator-access revision progress can enter separate durable targets; every other setting remains exact. Original snapshots, write intentions, ciphertext evidence and authenticated carrier records remain protected. Unknown missing history still requires matching evidence or a valid explicit administrator decision. Current K qualification and publication remain pending. The withdrawn J build passed 424 isolated suites and nine bounded native scenarios as 0.1.10-beta; those exact source/artifact results remain historical evidence and do not qualify these rebuilt 0.1.9-beta assets. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+
+The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
+
+Historical H passed 423 isolated suites, four native install/rollback cases and three installed journal profiles before withdrawal. Earlier G 423/18/360 and withdrawn J 424/nine-native results remain separate historical evidence; they do not qualify the new lowercase-tag 0.1.9-beta correction or establish recovery of the reported target.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ The locked speech runtime requires an x86-64-v2 CPU on every CPU available to th
 
 **Standard is the default.** If usable RAM falls below its baseline, the installer checks whether Lite can run, explains its limits and asks before installing it. Ordinary kernel reservations on a nominal 4 GiB system are allowed. Declining the Lite prompt cancels installation.
 
-Unattended Lite installation requires explicit `--lite` selection. The published commands above otherwise select Standard by default; eligible interactive users receive the Lite offer only after its resource checks pass.
+Unattended Lite installation requires explicit `--lite` selection. The candidate commands above remain unavailable until qualification and publication; eligible interactive users receive the Lite offer only after its resource checks pass.
 
 Lite allows one speech renderer, two waiting speech jobs, four simultaneous desktop streams, one Weather/Lightning delivery worker and two Weather.gov fetch workers. It retains core notifications, scheduling and local operator authentication. Saved Enterprise configuration is retained but disabled. Hosts that meet Standard requirements cannot select Lite.
 
@@ -91,7 +91,7 @@ These commands manage SLL; they do not reboot the PBX or restart Asterisk. Add `
 
 ## Repair and recovery
 
-Installer-driven repair and upgrade await a qualified, published 0.1.10-beta release. Follow the evidence-preservation guidance in the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the exact recovery path printed by a failed installer; do not delete it, reset MFA state or alter history to bypass a check.
+Installer-driven repair and upgrade await qualified, published lowercase-tag `v0.1.9-beta` assets. Follow the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Keep the exact failed transaction directory; do not reset MFA, delete evidence or alter history to bypass a check.
 
 Export configuration under **General Settings > Config Backup**. Keep the export passphrase separately. Native FreePBX backups also include module recovery data; protect the whole backup archive. See [backup and restore](docs/RECOVERY.md).
 

@@ -35,7 +35,7 @@ def package(path, name, contents):
 class UpgradeTrustTests(unittest.TestCase):
     def test_previous_release_urls_preserve_legacy_and_current_tag_identities(self):
         self.assertEqual(self.upgrade.sls_release_url('0.1.8-beta','slsmassnotifyserver-0.1.8-beta.tgz'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/slsmassnotifyserver-0.1.8-beta/slsmassnotifyserver-0.1.8-beta.tgz')
-        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.9-beta/release-manifest.json')
+        self.assertEqual(self.upgrade.sls_release_url('0.1.9-beta','release-manifest.json'),'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/v0.1.9-beta/release-manifest.json')
         for version,name in (('../0.1.9','release-manifest.json'),('0.1.9-beta','slsmassnotifyserver-0.1.8-beta.tgz'),('0.1.9-beta','../key')):
             with self.subTest(version=version,name=name),self.assertRaises(self.upgrade.UpgradeError):
                 self.upgrade.sls_release_url(version,name)
@@ -48,6 +48,15 @@ class UpgradeTrustTests(unittest.TestCase):
             client.return_value.open.return_value=response
             self.upgrade.download(url,destination,16)
         self.assertEqual(destination.read_bytes(),b'fixture')
+
+    def test_historical_uppercase_release_download_remains_allowed(self):
+        url='https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/V0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
+        response=io.BytesIO(b'historical signed input');response.headers={'Content-Length':'23'}
+        destination=self.root/'historical-uppercase.tgz'
+        with patch.object(self.upgrade.urllib.request,'build_opener') as client:
+            client.return_value.open.return_value=response
+            self.upgrade.download(url,destination,64)
+        self.assertEqual(destination.read_bytes(),b'historical signed input')
 
     def test_signed_stock_verifies_with_long_persistent_recovery_workspace(self):
         workspace=self.root/('persistent-recovery-'+'x'*100);workspace.mkdir(mode=0o700)
@@ -236,11 +245,11 @@ class UpgradeTrustTests(unittest.TestCase):
             approved=self.original_root_approval(data,self.old,prefix=self.fs)
         self.assertEqual(len(approved['root_jobs']),2)
 
-    def release(self, directory, version, contents):
+    def release(self, directory, version, contents, *, tag=None):
         root = self.root / directory; root.mkdir(mode=0o700)
         archive = root / ('slsmassnotifyserver-' + version + '.tgz'); package(archive, 'slsmassnotifyserver', contents)
         manifest = root / 'release-manifest.json'; signature = root / 'release-manifest.sig'
-        manifest.write_text(json.dumps({'schema': 1, 'version': version, 'tag': 'slsmassnotifyserver-' + version, 'package': archive.name, 'package_sha256': self.trust.digest(archive.read_bytes())}))
+        manifest.write_text(json.dumps({'schema': 1, 'version': version, 'tag': tag or 'slsmassnotifyserver-' + version, 'package': archive.name, 'package_sha256': self.trust.digest(archive.read_bytes())}))
         subprocess.run(['openssl', 'pkeyutl', '-sign', '-rawin', '-inkey', str(self.key), '-in', str(manifest), '-out', str(signature)], check=True, capture_output=True)
         return archive, manifest, signature
 
@@ -561,6 +570,26 @@ class UpgradeTrustTests(unittest.TestCase):
         self.assertNotIn('amp_conf/bin/fwconsole', framework['files'])
         self.assertEqual(framework['files'][self.upgrade.MENU_NAME]['target'], 'admin/views/menu_items.php')
         with patch.object(self.upgrade, 'WEB', self.web): self.upgrade.verify_previous(self.workspace)
+
+    def test_same_version_current_lowercase_release_preserves_historical_uppercase_approval(self):
+        version='0.1.9-beta'
+        xml=b'<module><rawname>slsmassnotifyserver</rawname><version>0.1.9-beta</version></module>'
+        self.old['module.xml']=xml;self.new['module.xml']=xml
+        self.previous=self.release('historical-uppercase',version,self.old,tag='V0.1.9-beta')
+        self.candidate=self.release('current-lowercase',version,self.new,tag='v0.1.9-beta')
+        (self.web/'admin/modules/slsmassnotifyserver/module.xml').write_bytes(xml)
+        self.args.archive,self.args.manifest,self.args.signature=self.candidate
+        keys=('SLS_MASS_NOTIFY_PREVIOUS_TGZ','SLS_MASS_NOTIFY_PREVIOUS_MANIFEST','SLS_MASS_NOTIFY_PREVIOUS_MANIFEST_SIGNATURE')
+        self.environment.update(zip(keys,map(str,self.previous)))
+        self.prepare();self.assert_preserved()
+        approved=json.loads((self.workspace/'previous-web-approval.json').read_bytes())['slsmassnotifyserver']
+        self.assertEqual(approved['version'],version)
+        self.assertEqual(approved['source']['archive_sha256'],self.trust.digest(self.previous[0].read_bytes()))
+        self.args.workspace=self.root/'wrong-same-version-previous'
+        self.environment.update(zip(keys,map(str,self.candidate)))
+        with self.assertRaisesRegex(self.upgrade.UpgradeError,'differs from its signed release'):
+            self.prepare()
+        self.assert_preserved()
 
     def test_changed_stock_version_rebuilds_signed_inventory_and_rejects_unknown_changes(self):
         self.prepare()
