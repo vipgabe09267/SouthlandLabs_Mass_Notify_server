@@ -97,7 +97,10 @@ final class SlsAdvertisedAddress
         }
         $fields = self::fields($settings); $host = self::host($fields['host']);
         $url = self::url('https', $host, $fields['api_port'], '/api/sipnotify/desktop');
-        $targets = SlsLocalWebProbe::targets($host);
+        try { $targets = SlsLocalWebProbe::targets($host); }
+        catch (\RuntimeException $error) {
+            return ['ok' => false, 'message' => _('Local PBX route authority is unavailable. Use the authenticated root-assisted installation check before checking this advertised address. No HTTPS request was sent without route authority.')];
+        }
         $deadline = microtime(true) + 6; $seen = []; $codes = [];
         foreach ($targets as $target) {
             $parts = parse_url($target['connect_url']);

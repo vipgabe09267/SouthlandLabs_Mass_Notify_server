@@ -5,9 +5,145 @@ require_once __DIR__ . '/bin/sls_mass_notify/sls_live_paging.php';
 
 use SLS\MassNotify\LivePagingConfig;
 
+/** Raised only after a successful native inventory query proves a saved object absent. */
+final class SlsDeletedPbxObjectException extends \InvalidArgumentException {}
+
+/** A verified prompt cannot be rendered or supplied at this time. */
+final class SlsPagingPromptUnavailableException extends \RuntimeException
+{
+    private string $capacityDetails = '';
+
+    public static function fromCapacityReport(string $report): self
+    {
+        // Only public filesystem counters and a bounded role can reach the
+        // administrator or the FreePBX log. Never copy renderer output wholesale.
+        preg_match_all('/\b(?:available_bytes|required_bytes|reserve_bytes|reserved_bytes|requested_bytes|used_bytes|limit_bytes|file_count|limit_files|available_inodes|required_inodes|outstanding_reservations|read_only|kernel_errno)=[0-9]{1,22}\b|\brole=(?:data|temporary|web|destination)\b/',
+            substr($report, 0, 512), $fields);
+        $details = implode(' ', array_unique($fields[0]));
+        $error = new self(trim(_('Insufficient capacity to prepare the paging prompt.') . ' ' . $details));
+        $error->capacityDetails = $details;
+        return $error;
+    }
+
+    public function capacityDetails(): string { return $this->capacityDetails; }
+}
+
 /** Internal dial-in live paging; activation uses native FreePBX Apply Config. */
 trait SlsLivePaging
 {
+    private array $pbxReloadWarnings = [];
+
+    private function warnDeletedPbxObjectDuringReload(string $integration): void
+    {
+        if (isset($this->pbxReloadWarnings[$integration])) { return; }
+        $messages = [
+            'pending' => _('SLL Mass Notify Server: staged SLL settings were not activated because a selected PBX extension or IVR was removed. Active SLL settings and staged changes were preserved. Review and re-save the SLL Paging or Triggers selections, then use Apply Config again. FreePBX reload continues.'),
+            'paging' => _('SLL Mass Notify Server: the SLL paging menu was omitted because a selected PBX extension or IVR was removed. Saved settings were preserved. Review and re-save the SLL Paging selections, then use Apply Config again. FreePBX reload continues.'),
+            'panic' => _('SLL Mass Notify Server: an SLL panic shortcut was omitted because a selected caller extension was removed. Saved settings were preserved. Review and re-save that SLL Trigger selection, then use Apply Config again. FreePBX reload continues.'),
+        ];
+        if (!isset($messages[$integration])) { throw new \LogicException('Unknown SLL reload integration.'); }
+        $this->pbxReloadWarnings[$integration] = true;
+        // Logging is observational: no fault email, and a failing log handler
+        // must not turn a safely omitted SLL route into a failed PBX reload.
+        try { @error_log($messages[$integration]); } catch (\Throwable $error) {}
+    }
+
+    private function warnPagingPromptsDuringReload(bool $pending, SlsPagingPromptUnavailableException $error): void
+    {
+        $key = $pending ? 'pending-media' : 'active-media';
+        if (isset($this->pbxReloadWarnings[$key])) { return; }
+        $this->pbxReloadWarnings[$key] = true;
+        $message = $pending
+            ? _('SLL Mass Notify Server: a staged paging or panic prompt is unavailable. The staged settings were preserved. Active settings remain in use. Retry Apply Config when speech and storage are available.')
+            : _('SLL Mass Notify Server: an active paging or panic route was omitted because its prompt is unavailable. Other playable routes remain available. Retry Apply Config when speech and storage are available.');
+        if ($error->capacityDetails() !== '') { $message .= ' ' . $error->capacityDetails(); }
+        try { @error_log($message); } catch (\Throwable $error) {}
+    }
+
+    /** Private witness for legacy audiences removed by inventory normalization. */
+    private function rawSettingsForPbxReload(?array $settings, bool $pending): array
+    {
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $activePath = null; $pendingPath = null;
+            foreach ([self::SETTINGS_JSON, self::LEGACY_SETTINGS_JSON, self::LEGACY_OLD_SETTINGS_JSON] as $candidate) {
+                if ($this->configurationPathMetadata($candidate) !== null) { $activePath = $candidate; break; }
+            }
+            if ($pending) {
+                foreach ([self::PENDING_SETTINGS_JSON, self::LEGACY_PENDING_SETTINGS_JSON, self::LEGACY_OLD_PENDING_SETTINGS_JSON] as $candidate) {
+                    if ($this->configurationPathMetadata($candidate) !== null) { $pendingPath = $candidate; break; }
+                }
+            }
+            if ($activePath === null || ($pending && $pendingPath === null)) {
+                throw new \RuntimeException(_('The protected SLL configuration changed during reload. Try Apply Config again.'));
+            }
+            $before = [$this->settingsCacheFingerprint(self::SETTINGS_JSON), $this->settingsCacheFingerprint(self::PENDING_SETTINGS_JSON),
+                $this->settingsFileFingerprint($activePath), $pending ? $this->settingsFileFingerprint($pendingPath) : null];
+            if (!preg_match('/^[a-f0-9]{64}$/D', $before[2]) || ($pending && !preg_match('/^[a-f0-9]{64}$/D', $before[3]))) {
+                throw new \RuntimeException(_('The protected SLL configuration could not be verified during reload.'));
+            }
+            $activeRaw = $this->loadSettingsFile($activePath);
+            $active = $settings === null ? null : $this->normalizeSettings($activeRaw, $activeRaw);
+            $raw = $activeRaw; $normalized = $active;
+            if ($pending) {
+                $pendingRaw = $this->loadSettingsFile($pendingPath);
+                $normalized = $settings === null ? null : \SLS\MassNotify\ImmediateSettings::reconcile($active, $this->normalizeSettings($pendingRaw, $pendingRaw));
+                $raw = \SLS\MassNotify\ImmediateSettings::reconcile($activeRaw, $pendingRaw);
+            }
+            $after = [$this->settingsCacheFingerprint(self::SETTINGS_JSON), $this->settingsCacheFingerprint(self::PENDING_SETTINGS_JSON),
+                $this->settingsFileFingerprint($activePath), $pending ? $this->settingsFileFingerprint($pendingPath) : null];
+            if ($before === $after && ($settings === null || $normalized === $settings)) { return $raw; }
+        }
+        throw new \RuntimeException(_('The protected SLL configuration changed during reload. Try Apply Config again.'));
+    }
+
+    private function reloadHasLegacyPagingGroups(array $settings): bool
+    {
+        $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
+        return $paging['enabled'] === '1' && (bool)array_filter($paging['groups'], static fn($row) => !LivePagingConfig::isStandalone($row));
+    }
+
+    private function validatePbxReloadReferences(array $settings, array $rawSettings): void
+    {
+        $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
+        $deleted = null;
+        if ($paging['enabled'] === '1') {
+            try { $this->validateLivePagingSelection($paging, $settings, $rawSettings); }
+            catch (SlsDeletedPbxObjectException $error) { $deleted = $error; }
+        }
+        if (method_exists($this, 'getPanicExtensionUsage') && $this->getPanicExtensionUsage(true, $settings)) {
+            try { $this->validatePanicExtensions($settings); }
+            catch (SlsDeletedPbxObjectException $error) { $deleted = $error; }
+        }
+        if ($deleted !== null) { throw $deleted; }
+    }
+
+    private function hasPbxPhoneRoutes(array $settings): bool
+    {
+        return LivePagingConfig::normalize((array)($settings['live_paging'] ?? []))['enabled'] === '1'
+            || (bool)$this->getPanicExtensionUsage(true, $settings);
+    }
+
+    /** False means native media admission failed. Keep only playable active caches on this pass. */
+    private function applyStagedSettingsForPbxReload(bool $dialplanHook): bool
+    {
+        if (PHP_SAPI === 'cli' && getenv('SLS_MASS_NOTIFY_PRESERVE_PENDING') === '1') {
+            $this->requireRuntimeAccount();
+            return true;
+        }
+        if ($this->getPendingSettings() === null) { return true; }
+        try {
+            $this->applyPendingSettingsTransaction(true, $dialplanHook);
+        } catch (SlsDeletedPbxObjectException $error) {
+            $this->warnDeletedPbxObjectDuringReload('pending');
+        } catch (SlsPagingPromptUnavailableException $error) {
+            $this->warnPagingPromptsDuringReload(true, $error);
+            return false;
+        } catch (\Throwable $error) {
+            throw new \RuntimeException(_('Unable to apply settings.'), 0, $error);
+        }
+        return true;
+    }
+
     private function normalizeLivePagingSettings($value)
     {
         if (!is_array($value)) { throw new \InvalidArgumentException(_('Live paging settings must be an object.')); }
@@ -142,29 +278,59 @@ trait SlsLivePaging
         }
     }
 
-    private function validateLivePagingSelection(array $paging, array $settings)
+    private function validateLivePagingSelection(array $paging, array $settings, ?array $rawSettings = null)
     {
+        $legacy = array_filter($paging['groups'], static fn($row) => !LivePagingConfig::isStandalone($row));
+        $rawTargets = [];
+        // Validate the entire selected raw source before classifying any native
+        // deletion; an early removed ID must not hide later malformed data.
+        if ($rawSettings !== null && $legacy) {
+            $groups = $rawSettings['announcement_groups'] ?? [];
+            if (!is_array($groups) || $this->validateAnnouncementGroupFields($groups)) {
+                throw new \InvalidArgumentException(_('The saved legacy paging audiences are malformed. Review the saved groups.'));
+            }
+            $groups = array_column($groups, null, 'id');
+            foreach ($legacy as $row) {
+                $targets = $groups[$row['group_id']]['extensions'] ?? null;
+                if (!is_array($targets) || !$targets) {
+                    throw new \InvalidArgumentException(_('A selected legacy paging group is missing or has no saved phone audience. Review the paging menu.'));
+                }
+                $rawTargets[$row['group_id']] = $targets;
+            }
+        }
+        $deletedMessage = null;
         if ($paging['enabled'] === '1' && ($paging['external_access'] ?? '0') === '1') {
-            $ivrs = array_column($this->getLivePagingIvrs(), null, 'id');
             if (!$paging['external_ivr_ids']) { throw new \InvalidArgumentException(_('Select an IVR before enabling external paging.')); }
             foreach ($paging['external_ivr_ids'] as $id) {
-                if (!isset($ivrs[$id])) { throw new \InvalidArgumentException(_('A selected external paging IVR no longer exists. Review the IVR selection.')); }
-                if (in_array($paging['extension'], $ivrs[$id]['entries'], true)) { throw new \InvalidArgumentException(_('The paging number is already assigned to a key in a selected IVR. Choose another paging number or remove that IVR key first.')); }
+                $ivr = $this->queryLivePagingIvr($id);
+                if ($ivr === null) { $deletedMessage = _('A selected external paging IVR no longer exists. Review the IVR selection.'); continue; }
+                if (in_array($paging['extension'], $ivr['entries'], true)) { throw new \InvalidArgumentException(_('The paging number is already assigned to a key in a selected IVR. Choose another paging number or remove that IVR key first.')); }
             }
         }
         $available = array_fill_keys(array_map('strval', $this->getConfiguredPjsipExtensionNumbers()), true);
-        foreach ($paging['allowed_callers'] as $caller) {
-            if (!isset($available[$caller])) { throw new \InvalidArgumentException(_('An authorized legacy paging extension no longer exists. Update the caller selection.')); }
+        foreach ($legacy ? $paging['allowed_callers'] : [] as $caller) {
+            if (!isset($available[$caller])) { $deletedMessage = _('An authorized legacy paging extension no longer exists. Update the caller selection.'); }
         }
-        foreach (LivePagingConfig::resolvedGroups($paging, (array)($settings['announcement_groups'] ?? [])) as $group) {
-            foreach (['extensions' => _('audio recipient'), 'notify_extensions' => _('text recipient'), 'allowed_callers' => _('authorized caller')] as $field => $label) {
-                foreach ($group[$field] as $target) {
-                    if (!isset($available[$target])) {
-                        throw new \InvalidArgumentException(sprintf(_('A paging %s extension no longer exists. Update the group selection.'), $label));
+        $normalizedGroups = array_column((array)($settings['announcement_groups'] ?? []), null, 'id');
+        foreach ($paging['groups'] as $row) {
+            $targets = $rawTargets[$row['group_id']] ?? null;
+            if ($targets !== null && array_diff($targets, array_keys($available))) {
+                $deletedMessage = _('A legacy paging audio recipient extension no longer exists. Update the group selection.');
+                if (!isset($normalizedGroups[$row['group_id']]) && !array_intersect($targets, array_keys($available))) {
+                    // The authenticated, structurally valid original audience
+                    // lost every native phone. Do not invent a replacement.
+                    continue;
+                }
+            }
+            foreach (LivePagingConfig::resolvedGroups(array_replace($paging, ['groups' => [$row]]), (array)($settings['announcement_groups'] ?? [])) as $group) {
+                foreach (['extensions' => _('audio recipient'), 'notify_extensions' => _('text recipient'), 'allowed_callers' => _('authorized caller')] as $field => $label) {
+                    foreach ($group[$field] as $target) {
+                        if (!isset($available[$target])) { $deletedMessage = sprintf(_('A paging %s extension no longer exists. Update the group selection.'), $label); }
                     }
                 }
             }
         }
+        if ($deletedMessage !== null) { throw new SlsDeletedPbxObjectException($deletedMessage); }
     }
 
     protected function queryLivePagingDialplan($extension)
@@ -253,14 +419,27 @@ trait SlsLivePaging
             'save_result' => $params['save_result'] ?? null, 'csrf_token' => $this->getCsrfToken(), 'hero_image' => self::HERO_IMAGE]);
     }
 
+    private function requiredPagingPromptFiles(array $settings): array
+    {
+        if (LivePagingConfig::normalize((array)($settings['live_paging'] ?? []))['enabled'] === '1') {
+            return LivePagingConfig::promptFiles($settings);
+        }
+        if (!array_filter($settings['automations']['rules'] ?? [], static fn($rule) =>
+            ($rule['kind'] ?? '') === 'panic' && ($rule['enabled'] ?? false) === true && ($rule['dial_extension'] ?? '') !== '')) {
+            return [];
+        }
+        $settings['live_paging'] = LivePagingConfig::defaults();
+        return array_filter(LivePagingConfig::promptFiles($settings), static fn($role) => str_starts_with($role, 'panic_'), ARRAY_FILTER_USE_KEY);
+    }
+
     private function assertLivePagingPromptsReady(array $settings)
     {
-        $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
-        if ($paging['enabled'] !== '1' && !array_filter($settings['automations']['rules'] ?? [], static fn($r)=>($r['kind'] ?? '')==='panic' && !empty($r['enabled']) && ($r['dial_extension'] ?? '')!=='')) { return; }
+        $files = $this->requiredPagingPromptFiles($settings);
+        if (!$files) { return; }
         $message = _('Paging prompts changed or are unavailable. Stage these settings and use Apply Config before activating them.');
         $account = function_exists('posix_getpwnam') ? posix_getpwnam('asterisk') : false;
         if (!is_array($account)) { throw new \DomainException($message); }
-        foreach (LivePagingConfig::promptFiles($settings) as $relative) {
+        foreach ($files as $relative) {
             $path = self::SOUNDS_DIR . '/paging/' . basename($relative) . '.wav';
             clearstatcache(true, $path);
             $before = @lstat($path);
@@ -274,21 +453,29 @@ trait SlsLivePaging
         }
     }
 
-    private function ensureLivePagingPrompts(array $settings)
+    private function ensureLivePagingPrompts(array $settings, bool $cachedOnly = false)
     {
-        $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
-        if ($paging['enabled'] !== '1' && !array_filter($settings['automations']['rules'] ?? [], static fn($r)=>($r['kind'] ?? '')==='panic' && !empty($r['enabled']) && ($r['dial_extension'] ?? '')!=='')) { return; }
+        $files = $this->requiredPagingPromptFiles($settings);
+        if (!$files) { return; }
         $directory = self::SOUNDS_DIR . '/paging';
-        if (is_link($directory)) {
-            throw new \RuntimeException(_('The live paging prompt directory is unavailable.'));
+        $native = function_exists('posix_getpwnam') ? posix_getpwnam('asterisk') : false;
+        if (!is_array($native) || is_link($directory)) {
+            throw new \RuntimeException(_('The live paging prompt directory or PBX account is unavailable.'));
         }
-        $this->ensureOwnedDirectory($directory, 0750);
-        $texts = LivePagingConfig::promptTexts($paging, (array)($settings['announcement_groups'] ?? []), (array)($settings['automations'] ?? []));
-        $files = LivePagingConfig::promptFiles($settings);
-        $voiceSettings = $settings;
-        // Menu construction must not silently truncate a caller's choices.
-        $voiceSettings['tts_max_seconds'] = 600;
-        $voiceSettings['_tts_prompt_only'] = true;
+        if ($cachedOnly) {
+            clearstatcache(true, $directory);
+            $info = @lstat($directory);
+            if ($info === false) {
+                throw new SlsPagingPromptUnavailableException(_('The saved paging prompts have not been prepared.'));
+            }
+            if (realpath($directory) !== $directory || ($info['mode'] & 0177777) !== 0040750
+                || $info['uid'] !== $native['uid'] || $info['gid'] !== $native['gid']) {
+                throw new \RuntimeException(_('The live paging prompt directory failed its ownership check. Run protected repair.'));
+            }
+        } else {
+            $this->ensureOwnedDirectory($directory, 0750);
+        }
+        $texts = null;
         foreach ($files as $key => $relative) {
             $destination = $directory . '/' . basename($relative) . '.wav';
             clearstatcache(true, $destination); $destinationBefore = @lstat($destination);
@@ -297,64 +484,75 @@ trait SlsLivePaging
                 throw new \RuntimeException(_('A live paging prompt path is unsafe. Run protected repair.'));
             }
             if ($destinationBefore !== false && is_readable($destination) && $destinationBefore['size'] > 44) {
-                try { $valid = $this->isValidAnnouncementAudioCache($destination); }
-                catch (\RuntimeException $error) { $valid = false; }
-                if ($valid) {
-                    $this->setPrivateOwnership($destination);
+                if ($this->isValidAnnouncementAudioCache($destination)) {
+                    if (!$cachedOnly) { $this->setPrivateOwnership($destination); }
                     clearstatcache(true, $destination); $secured = @lstat($destination);
                     if (!is_array($secured) || $secured['dev'] !== $destinationBefore['dev']
                         || $secured['ino'] !== $destinationBefore['ino'] || $secured['nlink'] !== 1
-                        || ($secured['mode'] & 0777) !== 0640) {
+                        || ($secured['mode'] & 0177777) !== 0100640 || $secured['uid'] !== $native['uid'] || $secured['gid'] !== $native['gid']) {
                         throw new \RuntimeException(_('A live paging prompt changed while its ownership was secured. Run protected repair.'));
                     }
                     continue;
                 }
             }
-            $generated = $this->generateAnnouncementTtsFile($texts[$key], $voiceSettings);
-            if ($generated === '' || !preg_match('/^[A-Za-z0-9_-]+$/D', $generated)) {
-                throw new \RuntimeException(sprintf(_('Unable to generate the live paging %s prompt. Check Piper voice readiness.'), $key));
+            if ($cachedOnly) {
+                throw new SlsPagingPromptUnavailableException(_('The saved paging prompt is unavailable. Apply the SLL paging settings to prepare it.'));
             }
-            $source = self::TTS_DIR . '/' . $generated . '.wav';
-            clearstatcache(true, $source); $sourceIdentity = @lstat($source);
-            $temporary = $directory . '/.prompt-' . bin2hex(random_bytes(16));
-            $temporaryIdentity = null;
-            try {
-                $bytes = $this->readNativeBackupFile($source, 64 * 1024 * 1024, _('Unable to read the generated paging prompt safely.'));
-                clearstatcache(true, $source); $sourceAfterRead = @lstat($source);
-                if (!is_array($sourceIdentity) || !is_array($sourceAfterRead)
-                    || $sourceAfterRead['dev'] !== $sourceIdentity['dev'] || $sourceAfterRead['ino'] !== $sourceIdentity['ino']
-                    || substr($bytes, 0, 4) !== 'RIFF' || substr($bytes, 8, 4) !== 'WAVE') {
-                    throw new \RuntimeException(_('The generated paging prompt is not a valid WAV file.'));
-                }
-                $this->writeNativeSnapshotFile($temporary, $bytes, 0600);
-                clearstatcache(true, $temporary); $temporaryIdentity = @lstat($temporary);
-                if (!is_array($temporaryIdentity) || !$this->isValidAnnouncementAudioCache($temporary)) {
-                    throw new \RuntimeException(_('The generated paging prompt is not a valid WAV file.'));
-                }
-                $this->setPrivateOwnership($temporary);
-                clearstatcache(true, $temporary); $staged = @lstat($temporary);
-                clearstatcache(true, $destination); $destinationAtCommit = @lstat($destination);
-                if (!is_array($staged) || $staged['dev'] !== $temporaryIdentity['dev'] || $staged['ino'] !== $temporaryIdentity['ino']
-                    || (($destinationBefore === false) !== ($destinationAtCommit === false))
-                    || ($destinationBefore !== false && ($destinationBefore['dev'] !== $destinationAtCommit['dev']
-                        || $destinationBefore['ino'] !== $destinationAtCommit['ino']))
-                    || !rename($temporary, $destination)) {
-                    throw new \RuntimeException(_('Unable to activate a live paging prompt.'));
-                }
-                clearstatcache(true, $destination); $committed = @lstat($destination);
-                if (!is_array($committed) || $committed['dev'] !== $temporaryIdentity['dev']
-                    || $committed['ino'] !== $temporaryIdentity['ino'] || $committed['nlink'] !== 1) {
-                    throw new \RuntimeException(_('The activated live paging prompt changed unexpectedly. Run protected repair.'));
-                }
-                $directoryHandle = fopen($directory, 'r');
-                if ($directoryHandle === false) { throw new \RuntimeException(_('Unable to persist the live paging prompt directory.')); }
-                try {
-                    if (function_exists('fsync') && !fsync($directoryHandle)) { throw new \RuntimeException(_('Unable to persist the live paging prompt directory.')); }
-                } finally { fclose($directoryHandle); }
-                $this->unlinkNamedFileIfIdentity($source, $sourceIdentity);
-            } finally { $this->unlinkNamedFileIfIdentity($temporary, $temporaryIdentity); }
+            if ($texts === null) {
+                $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
+                $texts = LivePagingConfig::promptTexts($paging['enabled'] === '1' ? $paging : LivePagingConfig::defaults(),
+                    (array)($settings['announcement_groups'] ?? []), (array)($settings['automations'] ?? []));
+            }
+            $this->renderPagingPrompt($texts[$key], $settings, $destination, $destinationBefore);
+            clearstatcache(true, $destination);
+            if (!$this->isValidAnnouncementAudioCache($destination)) {
+                throw new \RuntimeException(_('The published paging prompt could not be verified.'));
+            }
         }
-        $this->pruneLivePagingPrompts($settings);
+        if (!$cachedOnly) { $this->pruneLivePagingPrompts($settings); }
+    }
+
+    private function renderPagingPrompt(string $text, array $settings, string $destination, $previous): void
+    {
+        $helper = self::RUNTIME_DIR . '/sls_render_paging_prompt.py';
+        $info = @lstat($helper);
+        $native = function_exists('posix_getpwnam') ? posix_getpwnam('asterisk') : false;
+        $uid = function_exists('posix_geteuid') ? posix_geteuid() : -1;
+        if (!is_array($info) || ($info['mode'] & 0170022) !== 0100000 || $info['uid'] !== 0 || $info['nlink'] !== 1
+            || !is_array($native) || ($native['uid'] ?? 0) <= 0 || ($uid !== 0 && $uid !== $native['uid'])) {
+            throw new \RuntimeException(_('The protected paging renderer or its PBX account could not be verified. Run Repair Installation.'));
+        }
+        $model = (string)($settings['announcement_piper_voice'] ?? $settings['piper_voice'] ?? self::PIPER_VOICE);
+        $previousId = is_array($previous) ? $previous['dev'] . ':' . $previous['ino'] : 'missing';
+        $volume = (string)$this->normalizeTtsVolume($settings['announcement_tts_volume'] ?? 25, 25);
+        $command = array_merge($uid === 0 ? ['/usr/sbin/runuser', '-u', 'asterisk', '--'] : [],
+            ['/usr/bin/timeout', '--kill-after=2', '1000', '/usr/bin/python3', '-I', '-B', $helper,
+             basename($destination), $model, $previousId, $volume]);
+        // Both CLI and web handlers pass an open descriptor to the native renderer.
+        // No root-owned named speech workspace has to be opened by Asterisk.
+        $input = tmpfile();
+        if ($input === false) { throw new SlsPagingPromptUnavailableException(_('A private paging input file could not be created.')); }
+        try {
+            if (strlen($text) > 65536 || fwrite($input, $text) !== strlen($text) || !rewind($input)) {
+                throw new SlsPagingPromptUnavailableException(_('The paging prompt text could not be staged.'));
+            }
+            $process = proc_open($command, [0 => $input, 1 => ['pipe', 'w'], 2 => ['file', '/dev/null', 'w']],
+                $pipes, '/', ['PATH' => '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG' => 'C.UTF-8', 'LC_ALL' => 'C.UTF-8']);
+            if (!is_resource($process)) { throw new SlsPagingPromptUnavailableException(_('The native paging renderer could not start.')); }
+            $detail = stream_get_contents($pipes[1], 512);
+            fclose($pipes[1]);
+            $status = proc_close($process);
+        } finally {
+            fclose($input);
+        }
+        if ($status === 0) { return; }
+        if ($status === 73) {
+            throw SlsPagingPromptUnavailableException::fromCapacityReport((string)$detail);
+        }
+        if (in_array($status, [65, 69, 74, 75, 124, 137], true)) {
+            throw new SlsPagingPromptUnavailableException(sprintf(_('Paging prompt rendering did not finish (exit %d). Review the speech queue, prompt duration and voice readiness.'), $status));
+        }
+        throw new \RuntimeException(sprintf(_('The paging renderer refused its configuration, voice or protected file paths (exit %d). Run Help diagnostics.'), $status));
     }
 
     private function pruneLivePagingPrompts(array $prospective)
@@ -380,7 +578,7 @@ trait SlsLivePaging
                 foreach (LivePagingConfig::promptFiles($state) as $relative) { $keep[basename($relative) . '.wav'] = true; }
             }
             $refresh = [];
-            foreach (LivePagingConfig::promptFiles($prospective) as $relative) { $refresh[] = basename($relative) . '.wav'; }
+            foreach ($this->requiredPagingPromptFiles($prospective) as $relative) { $refresh[] = basename($relative) . '.wav'; }
             $manifest = json_encode(['keep' => array_keys($keep), 'refresh' => $refresh], JSON_THROW_ON_ERROR);
         } catch (\Throwable $ignored) { return; }
 
@@ -449,6 +647,22 @@ PY;
         } catch (\Throwable $error) { return []; }
     }
 
+    /** Query selected IDs exactly; UI inventory failures/truncation are not deletion evidence. */
+    protected function queryLivePagingIvr(string $id): ?array
+    {
+        $db = $this->FreePBX->Database();
+        $statement = $db->prepare('SELECT id FROM ivr_details WHERE id = ? LIMIT 2');
+        if ($statement->execute([$id]) !== true) { throw new \RuntimeException(_('The PBX IVR inventory could not be read.')); }
+        $rows = $statement->fetchAll(\PDO::FETCH_COLUMN);
+        if (!$rows) { return null; }
+        if (count($rows) !== 1 || (string)$rows[0] !== $id) { throw new \RuntimeException(_('The PBX IVR inventory is invalid.')); }
+        $statement = $db->prepare('SELECT selection FROM ivr_entries WHERE ivr_id = ? LIMIT 1001');
+        if ($statement->execute([$id]) !== true) { throw new \RuntimeException(_('The PBX IVR entries could not be read.')); }
+        $entries = $statement->fetchAll(\PDO::FETCH_COLUMN);
+        if (count($entries) > 1000) { throw new \RuntimeException(_('The selected PBX IVR exceeds the supported entry limit.')); }
+        return ['id' => $id, 'entries' => array_map('strval', $entries)];
+    }
+
     public function getLivePagingExternalDestinations(): array
     {
         $settings = $this->getPendingSettings() ?? $this->getActiveSettings();
@@ -462,14 +676,31 @@ PY;
     public function doDialplanHook(&$ext, $engine, $priority)
     {
         if ($engine !== 'asterisk') { return; }
-        // Generate the same revision that postReload will activate after Apply Config.
-        $settings = $this->getPendingSettings() ?? $this->getActiveSettings();
-        if (method_exists($this,'addPanicDialplan')) { $this->addPanicDialplan($ext,$settings); }
+        // Only a committed revision can authorize calls to the AGIs. Activation
+        // and prompt preparation complete before the first route is published.
+        $cachedOnly = !$this->applyStagedSettingsForPbxReload(true);
+        $settings = $this->getActiveSettings();
+        $rawSettings = $this->reloadHasLegacyPagingGroups($settings) ? $this->rawSettingsForPbxReload($settings, false) : $settings;
+        if (method_exists($this,'addPanicDialplan')) { $this->addPanicDialplan($ext, $settings, $cachedOnly); }
         $paging = LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
         if ($paging['enabled'] !== '1') { return; }
-        $this->validateLivePagingSelection($paging, $settings);
+        try { $this->validateLivePagingSelection($paging, $settings, $rawSettings); }
+        catch (SlsDeletedPbxObjectException $error) {
+            // The AGI reads unchanged saved settings, so omit the entire menu
+            // rather than publish an authorization projection it cannot use.
+            $this->warnDeletedPbxObjectDuringReload('paging');
+            return;
+        }
         $this->assertLivePagingExtensionAvailable($paging['extension']);
-        $this->ensureLivePagingPrompts($settings);
+        // Panic shortcuts use their own confirmation audio. Their media
+        // availability cannot invalidate the separately authorized paging menu.
+        $menu = $settings;
+        if (isset($menu['automations']['rules'])) { $menu['automations']['rules'] = []; }
+        try { $this->ensureLivePagingPrompts($menu, $cachedOnly); }
+        catch (SlsPagingPromptUnavailableException $error) {
+            $this->warnPagingPromptsDuringReload(false, $error);
+            return;
+        }
         // A raw local AGI entry intentionally avoids FreePBX's optional FastAGI
         // rewriting: this protected executable reads its own standard AGI pipe.
         $ext->add('sls-live-paging', $paging['extension'], '', new \ext_setvar('AGISIGHUP', 'no'));

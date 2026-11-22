@@ -35,6 +35,7 @@ CONFIGURED_AMI_SECRET_HASH=""
 RECOVERY_DECODER_DIR=""
 RECOVERY_CONFIG_DECODER="/usr/local/bin/sls_mass_notify/sls_config_crypto.php"
 RECOVERY_AMI_OWNERSHIP_HELPER=""
+RECOVERY_COLLECTOR_HELPER=""
 UNINSTALL_MAINTENANCE_LOCK_FD=""
 STOCK_RESTORE_LOG_PATH="/tmp/slsmassnotifyserver-uninstall-stock-modules.log"
 MODULE_UNINSTALL_LOG_PATH="/tmp/slsmassnotifyserver-uninstall-module.log"
@@ -44,9 +45,559 @@ STOCK_RESTORE_LOG_FD=""
 MODULE_UNINSTALL_LOG_FD=""
 MODULE_REGISTRY_PRESENT=0
 PBX_RUNNING=0
+UNINSTALL_AMI_CLASSIFICATION=pending_unverified
 UNINSTALL_WORKER_PID=""
+declare -a UNINSTALL_WORKER_LEASE_FDS=()
 
-run_as_asterisk() (
+sls_native_completion_record() {
+  /usr/bin/python3 -I - "$@" <<'PYSLSNATIVEACK'
+import json, os, re, stat, sys, tempfile, secrets
+
+def completion_directory(name):
+    if os.geteuid() != 0 or not re.fullmatch(r'/run/sls-native-command-[a-z0-9_]{8}', name):
+        raise ValueError('Invalid root native completion directory')
+    run = os.open('/run', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        parent = os.fstat(run)
+        if parent.st_uid != 0 or parent.st_mode & 0o022: raise ValueError('Unprotected native completion parent')
+        descriptor = os.open(name.rsplit('/', 1)[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=run)
+    finally: os.close(run)
+    info = os.fstat(descriptor)
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(descriptor); raise ValueError('Unprotected native completion directory')
+    return descriptor
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def read_record(directory, name):
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_nlink != 1 or not 0 < before.st_size <= 2048): raise ValueError('Unsafe native completion record')
+        body = os.read(descriptor, 2049)
+        if (len(body) != before.st_size or identity(before) != identity(os.fstat(descriptor))
+                or identity(before) != identity(os.stat(name, dir_fd=directory, follow_symlinks=False))):
+            raise ValueError('Native completion record changed')
+        return json.loads(body)
+    finally: os.close(descriptor)
+
+def write_record(directory, name, value):
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+    try:
+        body = memoryview((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode())
+        while body:
+            count = os.write(descriptor, body)
+            if count <= 0: raise OSError('Native completion publication failed')
+            body = body[count:]
+        os.fsync(descriptor)
+    finally: os.close(descriptor)
+
+def scope_record(directory, nonce):
+    value = read_record(directory, 'scope.json')
+    fields = {'schema','magic','nonce','forked','waiter_pid','waiter_start','supervisor_pid','supervisor_start'}
+    if (not isinstance(value, dict) or set(value) != fields or type(value['schema']) is not int or value['schema'] != 1
+            or value['magic'] != 'sls-native-scope-v1' or value['nonce'] != nonce or type(value['forked']) is not bool
+            or any(type(value[key]) is not int or value[key] <= 0 for key in ('waiter_pid','waiter_start'))):
+        raise ValueError('Invalid native scope binding')
+    if value['forked']:
+        if (any(type(value[key]) is not int or value[key] <= 0 for key in ('supervisor_pid','supervisor_start'))
+                or value['waiter_pid'] == value['supervisor_pid']): raise ValueError('Invalid forked native scope')
+    elif (type(value['supervisor_pid']) is not int or value['supervisor_pid'] != 0
+            or type(value['supervisor_start']) is not int or value['supervisor_start'] != 0):
+        raise ValueError('Invalid refused native scope')
+    return value
+
+def completion_record(directory, nonce):
+    scope = scope_record(directory, nonce)
+    value = read_record(directory, 'completed.json')
+    if (not isinstance(value, dict) or set(value) != {'schema','magic','nonce','status','pid'}
+            or type(value['schema']) is not int or value['schema'] != 1 or value['magic'] != 'sls-native-completion-v1'
+            or value['nonce'] != nonce or type(value['status']) is not int or not 0 <= value['status'] <= 255
+            or type(value['pid']) is not int or value['pid'] <= 0 or value['pid'] not in (scope['waiter_pid'],scope['supervisor_pid'])
+            or (not scope['forked'] and value['status'] == 0)):
+        raise ValueError('Invalid native completion binding')
+    return value['status']
+
+def complete(directory, nonce, status):
+    try: return completion_record(directory, nonce)
+    except FileNotFoundError: pass
+    write_record(directory, 'completed.json', {'schema':1,'magic':'sls-native-completion-v1',
+        'nonce':nonce,'status':status,'pid':os.getpid()})
+    return completion_record(directory, nonce)
+
+try:
+    if os.geteuid() != 0: raise ValueError('Root native completion metadata is required')
+    operation, *arguments = sys.argv[1:]
+    if operation == 'prepare' and not arguments:
+        parent = os.open('/run', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(parent)
+            if info.st_uid != 0 or info.st_mode & 0o022: raise ValueError('Unprotected native completion parent')
+        finally: os.close(parent)
+        name = tempfile.mkdtemp(prefix='sls-native-command-', dir='/run')
+        descriptor = completion_directory(name); os.close(descriptor)
+        print(name); print(secrets.token_hex(32))
+    elif operation in ('verify', 'cancel') and len(arguments) in ((2,3) if operation == 'verify' else (3,)):
+        name, nonce, *extra = arguments
+        if not re.fullmatch(r'[a-f0-9]{64}', nonce): raise ValueError('Invalid native invocation binding')
+        descriptor = completion_directory(name)
+        try:
+            if operation == 'verify':
+                status = completion_record(descriptor, nonce)
+                if extra and (not re.fullmatch(r'[0-9]{1,3}',extra[0]) or status != int(extra[0])): raise ValueError('Native completion status changed')
+                print(status)
+            else:
+                if extra[0] not in ('1','2','15'): raise ValueError('Invalid native cancellation signal')
+                # One Bash owner sends requests synchronously. Preserve its
+                # first accepted cancellation as an immutable record so a
+                # repeated signal cannot invalidate an active strict reader.
+                try: existing = read_record(descriptor, 'cancel.json')
+                except FileNotFoundError:
+                    temporary = 'cancel-' + secrets.token_hex(12)
+                    write_record(descriptor, temporary, {'schema':1,'magic':'sls-native-cancel-v1','nonce':nonce,'signal':int(extra[0])})
+                    os.replace(temporary, 'cancel.json', src_dir_fd=descriptor, dst_dir_fd=descriptor)
+                else:
+                    if (not isinstance(existing, dict) or set(existing) != {'schema','magic','nonce','signal'}
+                            or type(existing['schema']) is not int or existing['schema'] != 1
+                            or existing['magic'] != 'sls-native-cancel-v1' or existing['nonce'] != nonce
+                            or type(existing['signal']) is not int or existing['signal'] not in (1,2,15)):
+                        raise ValueError('Invalid retained native cancellation binding')
+        finally: os.close(descriptor)
+    else: raise ValueError('Invalid fixed native completion operation')
+except (OSError, ValueError, RuntimeError, TypeError):
+    sys.exit(1)
+PYSLSNATIVEACK
+}
+
+sls_cancel_native_scope() {
+  native_cancel_signal="$1"
+  if [ -n "${native_completion_directory:-}" ]; then
+    sls_native_completion_record cancel "$native_completion_directory" "$native_completion_nonce" "$1" || true
+  fi
+}
+
+sls_bounded_native_command() {
+  # Only these immutable root stages retain lease copies. Actual mutable
+  # FreePBX/PHP children receive none through Popen(close_fds=True).
+  /usr/bin/python3 -I /dev/fd/3 "${native_completion_directory:?}" "${native_completion_nonce:?}" "$@" 3<<'PYSLSBOUNDEDNATIVE'
+import ctypes, errno, fcntl, json, math, os, re, select, signal, socket, stat, subprocess, sys, time
+
+import json, os, re, stat, sys, tempfile, secrets
+
+def completion_directory(name):
+    if os.geteuid() != 0 or not re.fullmatch(r'/run/sls-native-command-[a-z0-9_]{8}', name):
+        raise ValueError('Invalid root native completion directory')
+    run = os.open('/run', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        parent = os.fstat(run)
+        if parent.st_uid != 0 or parent.st_mode & 0o022: raise ValueError('Unprotected native completion parent')
+        descriptor = os.open(name.rsplit('/', 1)[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=run)
+    finally: os.close(run)
+    info = os.fstat(descriptor)
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(descriptor); raise ValueError('Unprotected native completion directory')
+    return descriptor
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def read_record(directory, name):
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_nlink != 1 or not 0 < before.st_size <= 2048): raise ValueError('Unsafe native completion record')
+        body = os.read(descriptor, 2049)
+        if (len(body) != before.st_size or identity(before) != identity(os.fstat(descriptor))
+                or identity(before) != identity(os.stat(name, dir_fd=directory, follow_symlinks=False))):
+            raise ValueError('Native completion record changed')
+        return json.loads(body)
+    finally: os.close(descriptor)
+
+def write_record(directory, name, value):
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+    try:
+        body = memoryview((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode())
+        while body:
+            count = os.write(descriptor, body)
+            if count <= 0: raise OSError('Native completion publication failed')
+            body = body[count:]
+        os.fsync(descriptor)
+    finally: os.close(descriptor)
+
+def scope_record(directory, nonce):
+    value = read_record(directory, 'scope.json')
+    fields = {'schema','magic','nonce','forked','waiter_pid','waiter_start','supervisor_pid','supervisor_start'}
+    if (not isinstance(value, dict) or set(value) != fields or type(value['schema']) is not int or value['schema'] != 1
+            or value['magic'] != 'sls-native-scope-v1' or value['nonce'] != nonce or type(value['forked']) is not bool
+            or any(type(value[key]) is not int or value[key] <= 0 for key in ('waiter_pid','waiter_start'))):
+        raise ValueError('Invalid native scope binding')
+    if value['forked']:
+        if (any(type(value[key]) is not int or value[key] <= 0 for key in ('supervisor_pid','supervisor_start'))
+                or value['waiter_pid'] == value['supervisor_pid']): raise ValueError('Invalid forked native scope')
+    elif (type(value['supervisor_pid']) is not int or value['supervisor_pid'] != 0
+            or type(value['supervisor_start']) is not int or value['supervisor_start'] != 0):
+        raise ValueError('Invalid refused native scope')
+    return value
+
+def completion_record(directory, nonce):
+    scope = scope_record(directory, nonce)
+    value = read_record(directory, 'completed.json')
+    if (not isinstance(value, dict) or set(value) != {'schema','magic','nonce','status','pid'}
+            or type(value['schema']) is not int or value['schema'] != 1 or value['magic'] != 'sls-native-completion-v1'
+            or value['nonce'] != nonce or type(value['status']) is not int or not 0 <= value['status'] <= 255
+            or type(value['pid']) is not int or value['pid'] <= 0 or value['pid'] not in (scope['waiter_pid'],scope['supervisor_pid'])
+            or (not scope['forked'] and value['status'] == 0)):
+        raise ValueError('Invalid native completion binding')
+    return value['status']
+
+def complete(directory, nonce, status):
+    try: return completion_record(directory, nonce)
+    except FileNotFoundError: pass
+    write_record(directory, 'completed.json', {'schema':1,'magic':'sls-native-completion-v1',
+        'nonce':nonce,'status':status,'pid':os.getpid()})
+    return completion_record(directory, nonce)
+
+
+cancel_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+cancelled_number = 0
+def cancelled(number, frame):
+    global cancelled_number
+    if not cancelled_number: cancelled_number = number
+for number in cancel_signals: signal.signal(number, cancelled)
+
+completion_name, completion_nonce = sys.argv[1:3]
+if not re.fullmatch(r'[a-f0-9]{64}', completion_nonce): raise ValueError('Invalid native invocation binding')
+completion_fd = completion_directory(completion_name)
+def start_tick(pid):
+    with open('/proc/%d/stat' % pid, 'rb') as stream: return int(stream.read(65536).rsplit(b')', 1)[1].split()[19])
+def own_children(descriptor):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw = os.read(descriptor, 262145)
+    if len(raw) > 262144 or any(not item.isdigit() for item in raw.split()): raise RuntimeError('Native child inventory is unavailable')
+    return {int(item) for item in raw.split()}
+def diagnostic(body):
+    channel = None
+    descriptor = None
+    try:
+        mode = os.fstat(2).st_mode
+        if stat.S_ISSOCK(mode):
+            channel = socket.socket(fileno=os.dup(2))
+            channel.send(body, socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
+        else:
+            descriptor = os.dup(2) if stat.S_ISREG(mode) else os.open('/proc/self/fd/2',
+                os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+            os.write(descriptor, body)
+    except OSError: pass
+    finally:
+        if channel is not None: channel.close()
+        if descriptor is not None: os.close(descriptor)
+
+try:
+    duration, grace = map(float, sys.argv[3:5])
+    if not (math.isfinite(duration) and 0 < duration <= 1200 and math.isfinite(grace) and 0 < grace <= 5):
+        raise ValueError('Invalid fixed native command budget')
+    scope_deadline = time.monotonic() + duration
+    caller_pidfd = os.pidfd_open(os.getppid())
+    library = ctypes.CDLL(None, use_errno=True)
+    if os.getsid(0) != os.getpid(): os.setsid()
+    waiter_pid = os.getpid()
+    waiter_start = start_tick(waiter_pid)
+    waiter_children = os.open('/proc/self/task/%d/children' % os.getpid(), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    waiter_baseline = own_children(waiter_children)
+    if library.prctl(36, 1, 0, 0, 0) != 0: raise OSError(ctypes.get_errno(), 'Native waiter adoption is unavailable')
+
+    read_gate, write_gate = os.pipe2(os.O_CLOEXEC)
+    supervisor_pid = os.fork()
+except (OSError, ValueError, RuntimeError):
+    write_record(completion_fd, 'scope.json', {'schema':1,'magic':'sls-native-scope-v1','nonce':completion_nonce,
+        'forked':False,'waiter_pid':os.getpid(),'waiter_start':start_tick(os.getpid()),'supervisor_pid':0,'supervisor_start':0})
+    diagnostic(b'Native root supervision is unavailable before admission; no mutable command was started.\n')
+    sys.exit(complete(completion_fd, completion_nonce, 1))
+
+def cancellation_record(directory, nonce):
+    try: value = read_record(directory, 'cancel.json')
+    except FileNotFoundError: return 0
+    if (not isinstance(value, dict) or set(value) != {'schema','magic','nonce','signal'}
+            or type(value['schema']) is not int or value['schema'] != 1 or value['magic'] != 'sls-native-cancel-v1'
+            or value['nonce'] != nonce or type(value['signal']) is not int or value['signal'] not in cancel_signals):
+        raise ValueError('Invalid native cancellation binding')
+    return value['signal']
+
+def retire_waiter_children():
+    while True:
+        try:
+            owned = own_children(waiter_children) - waiter_baseline
+            if not owned: return
+            for pid in owned:
+                try: descriptor = os.pidfd_open(pid)
+                except ProcessLookupError: continue
+                try:
+                    if pid not in own_children(waiter_children) - waiter_baseline: continue
+                    try: signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    try: os.waitpid(pid, 0)
+                    except ChildProcessError: pass
+                finally: os.close(descriptor)
+        except (OSError, ValueError, RuntimeError): time.sleep(.05)
+
+def contain_scope():
+    # No mutable writer can obtain this root-only completion capability. Keep
+    # the independent root leases if a valid semantic result is unavailable.
+    diagnostic(('CRITICAL: Native completion is unverified; independent root waiter %d retains leases. Preserve %s and transaction evidence.\n' % (os.getpid(), completion_name)).encode())
+    for number in cancel_signals: signal.signal(number, signal.SIG_IGN)
+    while True: time.sleep(1)
+
+if supervisor_pid:
+    os.close(read_gate)
+    child_pidfd = None
+    try:
+        child_pidfd = os.pidfd_open(supervisor_pid)
+        if supervisor_pid not in own_children(waiter_children) - waiter_baseline: raise RuntimeError('Native supervisor parentage changed')
+        scope = {'schema':1,'magic':'sls-native-scope-v1','nonce':completion_nonce,'forked':True,
+            'waiter_pid':waiter_pid,'waiter_start':waiter_start,
+            'supervisor_pid':supervisor_pid,'supervisor_start':start_tick(supervisor_pid)}
+        write_record(completion_fd, 'scope.json', scope)
+        requested = cancelled_number or cancellation_record(completion_fd, completion_nonce)
+        if not requested and select.select([caller_pidfd], [], [], 0)[0]: requested = signal.SIGTERM
+        os.write(write_gate, ('cancel:%d\n' % requested).encode() if requested else b'go\n')
+        os.close(write_gate); write_gate = None
+        sent = 0
+        while True:
+            waited, raw = os.waitpid(supervisor_pid, os.WNOHANG)
+            if waited: break
+            requested = cancelled_number or cancellation_record(completion_fd, completion_nonce)
+            if not requested and select.select([caller_pidfd], [], [], 0)[0]: requested = signal.SIGTERM
+            if requested and requested != sent:
+                try: signal.pidfd_send_signal(child_pidfd, requested)
+                except ProcessLookupError: pass
+                sent = requested
+            # The inner stage owns the nominal deadline and TERM grace. This
+            # independent watchdog retires it if that same total bound fails.
+            if time.monotonic() >= scope_deadline + grace:
+                try: signal.pidfd_send_signal(child_pidfd, signal.SIGKILL)
+                except ProcessLookupError: pass
+            time.sleep(.01)
+        try: result = completion_record(completion_fd, completion_nonce)
+        except FileNotFoundError:
+            retire_waiter_children()
+            result = complete(completion_fd, completion_nonce, os.waitstatus_to_exitcode(raw) if os.WIFEXITED(raw) and os.WEXITSTATUS(raw) else (128 + os.WTERMSIG(raw) if os.WIFSIGNALED(raw) else 1))
+        if result: retire_waiter_children()
+        os.close(child_pidfd); child_pidfd = None
+        os.close(waiter_children); os.close(caller_pidfd); os.close(completion_fd)
+        sys.exit(result)
+    except (OSError, ValueError, RuntimeError):
+        retire_waiter_children()
+        contain_scope()
+    finally:
+        if write_gate is not None: os.close(write_gate)
+        if child_pidfd is not None: os.close(child_pidfd)
+else:
+    os.close(write_gate)
+    # The inherited descriptor belongs to the ancestor, not this fork role.
+    # The supervisor below opens its own child inventory and baseline.
+    os.close(waiter_children)
+    gate = os.read(read_gate, 64)
+    os.close(read_gate)
+    if gate != b'go\n':
+        try: scope_record(completion_fd, completion_nonce)
+        except FileNotFoundError:
+            write_record(completion_fd, 'scope.json', {'schema':1,'magic':'sls-native-scope-v1','nonce':completion_nonce,'forked':True,
+                'waiter_pid':waiter_pid,'waiter_start':waiter_start,'supervisor_pid':os.getpid(),'supervisor_start':start_tick(os.getpid())})
+        number = int(gate[7:-1]) if re.fullmatch(rb'cancel:(?:1|2|15)\n', gate) else 0
+        sys.exit(complete(completion_fd, completion_nonce, 128 + number if number else 125))
+
+import ctypes, errno, fcntl, math, os, signal, socket, stat, subprocess, sys, time
+
+cancel_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+cancelled_number = globals().get("cancelled_number", 0)
+def cancelled(number, frame):
+    global cancelled_number
+    if not cancelled_number: cancelled_number = number
+
+class Output:
+    def __init__(self, target):
+        self.socket = None
+        mode = os.fstat(target).st_mode
+        if stat.S_ISSOCK(mode):
+            self.socket = socket.socket(fileno=os.dup(target))
+            self.fd = self.socket.fileno()
+        elif stat.S_ISREG(mode):
+            # Share the original file offset; reopening an ordinary log file
+            # could let the shell overwrite output after this command returns.
+            self.fd = os.dup(target)
+        else:
+            # A separate open description avoids changing the shell's flags.
+            self.fd = os.open('/proc/self/fd/%d' % target,
+                os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+        self.pending = bytearray()
+    def write(self, body):
+        try:
+            if self.socket is not None:
+                return self.socket.send(body, socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
+            return os.write(self.fd, body)
+        except BlockingIOError: return 0
+    def flush(self):
+        if not self.pending: return False
+        count = self.write(self.pending[:65536])
+        if count: del self.pending[:count]
+        return bool(count)
+    def close(self):
+        if self.socket is not None: self.socket.close()
+        else: os.close(self.fd)
+
+library = ctypes.CDLL(None, use_errno=True)
+previous = ctypes.c_int()
+if library.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), 'Native child supervision is unavailable')
+children_fd = os.open('/proc/self/task/%d/children' % os.getpid(), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+def children():
+    os.lseek(children_fd, 0, os.SEEK_SET)
+    raw = os.read(children_fd, 262145)
+    if len(raw) > 262144 or any(not value.isdigit() for value in raw.split()):
+        raise RuntimeError('Native child inventory is unavailable')
+    return {int(value) for value in raw.split()}
+baseline = children()
+if library.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), 'Native child adoption is unavailable')
+for number in cancel_signals: signal.signal(number, cancelled)
+process = None
+outputs = []
+pipes = []
+status = 1
+cleanup = True
+try:
+    duration, grace = map(float, sys.argv[3:5])
+    if not (math.isfinite(duration) and 0 < duration <= 1200
+            and math.isfinite(grace) and 0 < grace <= 5):
+        raise ValueError('Invalid fixed native command budget')
+    # Start before the privilege transition, including runuser/PAM startup.
+    deadline = scope_deadline
+    outputs = [Output(1), Output(2)]
+    process = subprocess.Popen(sys.argv[5:], stdin=None, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, close_fds=True, start_new_session=True, cwd='/')
+    for stream, output in zip((process.stdout, process.stderr), outputs):
+        os.set_blocking(stream.fileno(), False)
+        pipes.append([stream, output, None])
+    expired = None
+    draining = False
+    while True:
+        now = time.monotonic()
+        if not cancelled_number: cancelled_number = cancellation_record(completion_fd, completion_nonce)
+        if not cancelled_number and select.select([caller_pidfd], [], [], 0)[0]: cancelled_number = signal.SIGTERM
+        if cancelled_number: break
+        result = process.poll()
+        if now >= deadline and expired is None:
+            expired = now
+            status = 124
+            if result is None:
+                # Popen's unreaped session leader anchors this owned group.
+                descriptor = os.pidfd_open(process.pid)
+                try:
+                    if process.pid in children() - baseline:
+                        try: os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError: pass
+                finally: os.close(descriptor)
+        if expired is not None and now >= expired + grace:
+            if result is None: status = 137
+            break
+        if result is not None and not draining:
+            if expired is None: status = 128 - result if result < 0 else result
+            draining = True
+            # A successful service may outlive the CLI. Drain only bytes
+            # already bounded by each actual pipe capacity, then close the
+            # read ends. Such services are not explicitly killed on success.
+            for pipe in pipes: pipe[2] = fcntl.fcntl(pipe[0].fileno(), fcntl.F_GETPIPE_SZ)
+        progress = False
+        for pipe in list(pipes):
+            stream, output, remaining = pipe
+            available = 131072 - len(output.pending)
+            if available:
+                count = min(65536, available, remaining if remaining is not None else 65536)
+                try: body = os.read(stream.fileno(), count) if count else b''
+                except BlockingIOError: body = None
+                if body:
+                    output.pending.extend(body)
+                    if remaining is not None: pipe[2] -= len(body)
+                    progress = True
+                elif body == b'' or draining:
+                    stream.close(); pipes.remove(pipe)
+            progress = output.flush() or progress
+        for output in outputs: progress = output.flush() or progress
+        if draining and not pipes and not any(output.pending for output in outputs): break
+        if expired is not None and result is not None and not progress: break
+        if not progress: time.sleep(.01)
+    cleanup = status != 0
+except (OSError, ValueError, RuntimeError):
+    status = 1
+    cleanup = True
+    if len(outputs) == 2:
+        try: outputs[1].write(b'Native PBX command supervision failed; preserve transaction evidence.\n')
+        except OSError: pass
+finally:
+    # A record-only handler cannot escape this boundary. Capture signals
+    # pending before finalization, then make owned retirement noninterruptible.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, cancel_signals)
+    pending = signal.sigpending()
+    cancellation = cancelled_number or next((number for number in cancel_signals if number in pending), 0)
+    if cancellation:
+        status = 128 + cancellation
+        cleanup = True
+    for number in cancel_signals: signal.signal(number, signal.SIG_IGN)
+    if cleanup:
+        # Reap only this invocation's adopted descendants, including setsid
+        # hooks. Keep root leases fenced if retirement cannot be confirmed.
+        reported = False
+        while True:
+            try:
+                owned = children() - baseline
+                if not owned: break
+                for pid in owned:
+                    try: descriptor = os.pidfd_open(pid)
+                    except ProcessLookupError: continue
+                    try:
+                        if pid not in children() - baseline: continue
+                        try: signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                        except ProcessLookupError: pass
+                        try: os.waitpid(pid, 0)
+                        except ChildProcessError: pass
+                    finally: os.close(descriptor)
+            except (OSError, ValueError, RuntimeError):
+                status = status or 1
+                if not reported and len(outputs) == 2:
+                    try: outputs[1].write(b'Native cleanup is incomplete; root worker leases remain held until owned children are reaped.\n')
+                    except OSError: pass
+                    reported = True
+                time.sleep(.05)
+    for stream in (getattr(process, 'stdout', None), getattr(process, 'stderr', None)):
+        if stream is not None: stream.close()
+    for output in outputs: output.close()
+    os.close(children_fd)
+    if library.prctl(36, previous.value, 0, 0, 0) != 0:
+        status = 1
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+status = complete(completion_fd, completion_nonce, status)
+os.close(caller_pidfd); os.close(completion_fd)
+sys.exit(status)
+PYSLSBOUNDEDNATIVE
+}
+
+run_as_asterisk() ( run_runtime_account bounded "$@"; )
+run_supervised_as_asterisk() ( run_runtime_account supervised "$@"; )
+run_bounded_as_asterisk() ( run_runtime_account bounded "$@"; )
+
+run_runtime_account() (
+  local mode="$1"; shift
+  case "$mode" in bounded|supervised) ;; *) return 64 ;; esac
+  local uid gid
+  uid="$(id -u asterisk 2>/dev/null)" || { log 'The asterisk service account is missing.'; return 1; }
+  [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ne 0 ] || { log 'The asterisk service account must have a nonzero UID.'; return 1; }
+  gid="$(id -g asterisk 2>/dev/null)" || { log 'The asterisk primary group is unavailable.'; return 1; }
+  [[ "$gid" =~ ^[0-9]+$ ]] && [ "$gid" -ne 0 ] || { log 'The asterisk service account must have a nonzero primary GID.'; return 1; }
   local -a child_environment=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "LANG=C.UTF-8"
@@ -54,7 +605,7 @@ run_as_asterisk() (
   )
   while [ "$#" -gt 0 ] && [[ "$1" == *=* ]]; do
     case "$1" in
-      SLS_MODULE_NAME=*|SLS_CONFIG=*|SLS_UNINSTALL_CONFIG_DECODER=*|SLS_CONFIGURED_AMI_USERNAME=*|SLS_AMI_SECRET_HASH=*|SLS_AMI_OWNERSHIP_HELPER=*|SLS_DATA_DIR=*|SLS_VERIFY_MODULE=*)
+      SLS_MODULE_NAME=*|SLS_CONFIG=*|SLS_UNINSTALL_CONFIG_DECODER=*|SLS_CONFIGURED_AMI_USERNAME=*|SLS_AMI_SECRET_HASH=*|SLS_AMI_OWNERSHIP_HELPER=*|SLS_FILE_AMI_USERNAME=*|SLS_DATA_DIR=*|SLS_VERIFY_MODULE=*)
         child_environment+=("$1")
         ;;
       *)
@@ -65,15 +616,76 @@ run_as_asterisk() (
     shift
   done
   [ "$#" -gt 0 ] || return 64
-  close_inherited_maintenance_lock_fds
-  if [ -n "${UNINSTALL_WORKER_PIPE:-}" ]; then
-    exec {UNINSTALL_WORKER_PIPE}>&-
-  fi
   cd / || return 1
-  /usr/bin/env -i "${child_environment[@]}" /usr/sbin/runuser -u asterisk -- "$@"
+  local -a native_deadline=()
+  if [ "$mode" = bounded ]; then native_deadline=(/usr/bin/timeout --signal=TERM --kill-after=5 1200); fi
+  local -a native_operation=("${native_deadline[@]}" "$@")
+  [ "${native_operation[0]:-}" = /usr/bin/timeout ] && \
+    [ "${native_operation[1]:-}" = --signal=TERM ] && \
+    [[ "${native_operation[2]:-}" = --kill-after=* ]] || return 64
+  run_without_uninstall_worker_descriptors sls_bounded_native_command \
+    "${native_operation[3]}" "${native_operation[2]#--kill-after=}" \
+    /usr/bin/env -i "${child_environment[@]}" /usr/sbin/runuser -u asterisk -- \
+    "${native_operation[@]}"
 )
-asterisk() { run_as_asterisk /usr/sbin/asterisk "$@"; }
+
+run_without_uninstall_worker_descriptors() (
+  # Keep a root waiter alive with the shared worker descriptions while the
+  # actual native hook runs. Mutable PHP gets no unlock-capable descriptor.
+  local native_completion_directory="" native_completion_nonce="" native_cancel_signal=0
+  if [ "${1:-}" = sls_bounded_native_command ]; then
+    local details
+    local -a completion_fields=()
+    trap 'sls_cancel_native_scope 15' TERM
+    trap 'sls_cancel_native_scope 2' INT
+    trap 'sls_cancel_native_scope 1' HUP
+    details="$(sls_native_completion_record prepare)" || return 1
+    mapfile -t completion_fields <<<"$details"
+    [ "${#completion_fields[@]}" -eq 2 ] || return 1
+    native_completion_directory="${completion_fields[0]}"
+    native_completion_nonce="${completion_fields[1]}"
+    if [ "$native_cancel_signal" -ne 0 ]; then sls_cancel_native_scope "$native_cancel_signal"; fi
+  else
+    trap ':' TERM INT HUP
+  fi
+  (
+    trap - TERM INT HUP
+    if [ -z "$native_completion_directory" ]; then
+      close_inherited_maintenance_lock_fds
+      close_inherited_uninstall_worker_fds
+    fi
+    if [ -n "${UNINSTALL_WORKER_PIPE:-}" ]; then exec {UNINSTALL_WORKER_PIPE}>&-; fi
+    if [ -n "${UNINSTALL_WORKER_RESPONSE_FD:-}" ]; then exec {UNINSTALL_WORKER_RESPONSE_FD}<&-; fi
+    "$@"
+  ) <&0 &
+  child=$!; status=0
+  while true; do
+    if wait "$child"; then status=0; break; else status=$?; fi
+    kill -0 "$child" 2>/dev/null || break
+  done
+  if [ -n "$native_completion_directory" ]; then
+    local completed_status warned=0
+    while true; do
+      if completed_status="$(sls_native_completion_record verify "$native_completion_directory" "$native_completion_nonce")"; then
+        # Semantic completion, not an intermediate waiter's exit, governs
+        # progress. A dead root waiter must not start rollback prematurely.
+        status="$completed_status"
+        rm -f -- "$native_completion_directory/completed.json" "$native_completion_directory/scope.json" "$native_completion_directory/cancel.json"
+        rmdir -- "$native_completion_directory" 2>/dev/null || true
+        break
+      fi
+      if [ "$warned" -eq 0 ]; then
+        printf 'CRITICAL: Native completion is unverified; root waiter PID %s retains leases and will not begin recovery. Preserve %s and transaction/log evidence.\n' "$BASHPID" "$native_completion_directory" >&2
+        warned=1
+      fi
+      sleep .05
+    done
+  fi
+  exit "$status"
+)
+asterisk() { run_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/sbin/asterisk "$@"; }
 UNINSTALL_WORKER_PIPE=""
+UNINSTALL_WORKER_RESPONSE_FD=""
 UNINSTALL_GUARD_REQUIRED=0
 
 # Open only a root-owned regular file through trusted directories. Creation is
@@ -196,7 +808,7 @@ require_freepbx() {
     log "/etc/freepbx.conf is missing or unreadable."
     exit 1
   }
-  run_as_asterisk /usr/bin/php -d pcre.jit=0 -r '
+  run_bounded_as_asterisk /usr/bin/php -d pcre.jit=0 -r '
 $bootstrap_settings = ["freepbx_auth" => false, "skip_astman" => true];
 require "/etc/freepbx.conf";
 \FreePBX::Database()->query("SELECT 1");
@@ -445,7 +1057,7 @@ snapshot_local_signer() {
     chown root:asterisk "$RECOVERY_DECODER_DIR" && chmod 0750 "$RECOVERY_DECODER_DIR" || return 1
     /usr/bin/python3 -I - "$UNINSTALL_APPROVED_SOURCE/bin/sls_mass_notify/sls_module_trust.py" "$UNINSTALL_APPROVED_SOURCE" "$RECOVERY_SIGNER_DIR" "$RECOVERY_DECODER_DIR" <<'PYAPPROVEDSNAPSHOT' || return 1
 from pathlib import Path
-import os, pwd, re, sys, types
+import ast, os, pwd, re, sys, types
 path, source, target, decoder = map(Path, sys.argv[1:])
 module = types.ModuleType('sls_uninstall_snapshot_trust'); module.__file__ = str(path)
 exec(compile(path.read_bytes(), str(path), 'exec'), module.__dict__)
@@ -506,10 +1118,38 @@ fd = os.open(decoder / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLO
 with os.fdopen(fd, 'wb') as output:
     os.fchown(output.fileno(), 0, pwd.getpwnam('asterisk').pw_gid)
     output.write(body); output.flush(); os.fsync(output.fileno())
+# Older signed generations have no stop-only admission command. Their source
+# may establish an already-offline result, but must never perform this write.
+admission = 'bin/sls_mass_notify/sls_phone_admission.py'
+entry = data['files'].get(admission)
+if entry is not None:
+    body = module.read(source / admission, 2 * 1024 * 1024, protected=True)
+    if module.digest(body) != entry['sha256']:
+        raise SystemExit('Signed phone admission helper changed')
+    supported = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'add_argument' and node.args
+                    and isinstance(node.args[0], ast.Constant) and node.args[0].value == '--retire-stopped-collector'
+                    for node in ast.walk(ast.parse(body)))
+    if supported:
+        for filename in ('sls_phone_admission.py', 'sls_nws_delivery_claims.py', 'sls_cluster_guard.py',
+                         'sls_config_crypto.py', 'sls_atomic_json.py'):
+            name = 'bin/sls_mass_notify/' + filename
+            source_entry = data['files'].get(name)
+            if not source_entry: raise SystemExit('Missing signed collector teardown input: ' + name)
+            contents = module.read(source / name, 2 * 1024 * 1024, protected=True)
+            if module.digest(contents) != source_entry['sha256']:
+                raise SystemExit('Changed signed collector teardown input: ' + name)
+            fd = os.open(decoder / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
+            with os.fdopen(fd, 'wb') as output:
+                os.fchown(output.fileno(), 0, pwd.getpwnam('asterisk').pw_gid)
+                output.write(contents); output.flush(); os.fsync(output.fileno())
 PYAPPROVEDSNAPSHOT
     RECOVERY_SIGNER="$RECOVERY_SIGNER_DIR/sign_sls_mass_notify_local_sig.sh"
     RECOVERY_CONFIG_DECODER="$RECOVERY_DECODER_DIR/sls_config_crypto.php"
     RECOVERY_AMI_OWNERSHIP_HELPER="$RECOVERY_DECODER_DIR/AmiUserOwnership.php"
+    if [ -f "$RECOVERY_DECODER_DIR/sls_phone_admission.py" ]; then
+      RECOVERY_COLLECTOR_HELPER="$RECOVERY_DECODER_DIR/sls_phone_admission.py"
+    fi
     bash -n "$RECOVERY_SIGNER" || return 1
     return 0
   fi
@@ -589,6 +1229,7 @@ cleanup_recovery_signer() {
     find "$RECOVERY_DECODER_DIR" -depth -delete 2>/dev/null || true
   fi
   RECOVERY_DECODER_DIR=""
+  RECOVERY_COLLECTOR_HELPER=""
 }
 
 release_uninstall_workers() {
@@ -603,19 +1244,83 @@ release_uninstall_workers() {
     wait "$UNINSTALL_WORKER_PID" 2>/dev/null || true
     UNINSTALL_WORKER_PID=""
   fi
+  if [ -n "${UNINSTALL_WORKER_RESPONSE_FD:-}" ]; then
+    exec {UNINSTALL_WORKER_RESPONSE_FD}<&-
+    UNINSTALL_WORKER_RESPONSE_FD=""
+  fi
+  # Closing only this caller's descriptions cannot unlock an actual native
+  # writer still protected by its own root waiter. Never use LOCK_UN here.
+  close_inherited_uninstall_worker_fds
+}
+
+close_inherited_uninstall_worker_fds() {
+  local descriptor
+  for descriptor in "${UNINSTALL_WORKER_LEASE_FDS[@]}"; do exec {descriptor}>&-; done
+  UNINSTALL_WORKER_LEASE_FDS=()
+}
+
+prepare_uninstall_worker_descriptors() {
+  local helper="$1" prepare_pid prepare_input prepare_output response mapping descriptor remote status=0
+  local -a remote_fds=()
+  coproc SLS_UNINSTALL_WORKER_PREPARE {
+    exec /usr/bin/python3 -I "$helper" --data "$DATA_DIR" --timeout 120 prepare
+  }
+  prepare_pid="${SLS_UNINSTALL_WORKER_PREPARE_PID:-}"
+  prepare_input="${SLS_UNINSTALL_WORKER_PREPARE[1]:-}"; prepare_output="${SLS_UNINSTALL_WORKER_PREPARE[0]:-}"
+  if [ -z "$prepare_pid" ] || [ -z "$prepare_input" ] || [ -z "$prepare_output" ] \
+    || ! exec {prepare_input}>&"$prepare_input" || ! exec {prepare_output}<&"$prepare_output"; then
+    status=1
+  elif ! IFS= read -r -t 120 response <&"$prepare_output" || [[ "$response" != 'prepared '* ]]; then
+    status=1
+  else
+    mapping="$(/usr/bin/python3 -I - "$prepare_pid" "${response#prepared }" <<'PYPREPAREUNINSTALLFDS'
+import json, sys
+if len(sys.argv[2]) > 16384: raise SystemExit('Prepared descriptor response exceeds bound')
+value=json.loads(sys.argv[2])
+if (type(value) is not dict or set(value)!={'schema','pid','fds'} or type(value['schema']) is not int or value['schema']!=1
+        or type(value['pid']) is not int or value['pid']!=int(sys.argv[1]) or type(value['fds']) is not list
+        or not 1<=len(value['fds'])<=1100 or any(type(fd) is not int or not 3<=fd<=9999999 for fd in value['fds'])
+        or len(set(value['fds']))!=len(value['fds'])):
+    raise SystemExit('Invalid prepared worker descriptor inventory')
+for fd in value['fds']: print(fd)
+PYPREPAREUNINSTALLFDS
+    )" || status=1
+    if [ "$status" -eq 0 ]; then
+      mapfile -t remote_fds <<<"$mapping"
+      for remote in "${remote_fds[@]}"; do
+        if ! exec {descriptor}<"/proc/$prepare_pid/fd/$remote"; then status=1; break; fi
+        UNINSTALL_WORKER_LEASE_FDS+=("$descriptor")
+      done
+    fi
+  fi
+  if [ -n "$prepare_input" ]; then
+    ( trap '' PIPE; printf 'release\n' >&"$prepare_input" ) 2>/dev/null || true
+    exec {prepare_input}>&-
+  fi
+  if [ -n "$prepare_output" ]; then exec {prepare_output}<&-; fi
+  [ -z "$prepare_pid" ] || wait "$prepare_pid" 2>/dev/null || status=1
+  if [ "$status" -ne 0 ]; then
+    close_inherited_uninstall_worker_fds
+    log 'The authenticated uninstall guard could not prepare retained worker descriptors; older helpers are not an unfenced fallback. No teardown was started.'
+    return 1
+  fi
 }
 
 assert_uninstall_workers() {
+  local status
   [ "$UNINSTALL_GUARD_REQUIRED" != 1 ] || {
-    [ -n "$UNINSTALL_WORKER_PID" ] && kill -0 "$UNINSTALL_WORKER_PID" 2>/dev/null || {
-      log 'The protected uninstall worker guard exited. Teardown stopped; preserve the signed recovery evidence and retry when SLL workers are idle.'
+    [ -n "$UNINSTALL_WORKER_PID" ] && [ -n "$UNINSTALL_WORKER_PIPE" ] \
+      && [ -n "$UNINSTALL_WORKER_RESPONSE_FD" ] && kill -0 "$UNINSTALL_WORKER_PID" 2>/dev/null \
+      && ( trap '' PIPE; printf 'check\n' >&"$UNINSTALL_WORKER_PIPE" ) 2>/dev/null \
+      && IFS= read -r -t 5 status <&"$UNINSTALL_WORKER_RESPONSE_FD" && [ "$status" = checked ] || {
+      log 'The protected uninstall worker lease could not be confirmed. Teardown stopped; preserve the signed recovery evidence and review changed locks or unsafe parent metadata.'
       return 1
     }
   }
 }
 
 acquire_uninstall_workers() {
-  local guard_input guard_output status helper="$RECOVERY_SIGNER_DIR/sls_install_guard.py"
+  local guard_input guard_output status inherited helper="$RECOVERY_SIGNER_DIR/sls_install_guard.py"
   UNINSTALL_GUARD_REQUIRED=0
   if [ -e "$DATA_DIR" ] || [ -L "$DATA_DIR" ]; then
     # The optional narrow migration uses authenticated retained sources and
@@ -625,14 +1330,17 @@ acquire_uninstall_workers() {
         --approval "$RECOVERY_SIGNER_DIR/uninstall-approval.json" repair || return 1
     fi
     UNINSTALL_GUARD_REQUIRED=1
+    prepare_uninstall_worker_descriptors "$helper" || return 1
+    inherited="$(IFS=,; printf '%s' "${UNINSTALL_WORKER_LEASE_FDS[*]}")"
     coproc SLS_UNINSTALL_GUARD {
-      /usr/bin/python3 -I "$helper" --data "$DATA_DIR" --timeout 120 hold
+      exec /usr/bin/python3 -I "$helper" --data "$DATA_DIR" --timeout 120 --inherited-fds "$inherited" hold
     }
     UNINSTALL_WORKER_PID="${SLS_UNINSTALL_GUARD_PID:-}"
     guard_input="${SLS_UNINSTALL_GUARD[1]:-}"; guard_output="${SLS_UNINSTALL_GUARD[0]:-}"
     if [ -z "$UNINSTALL_WORKER_PID" ] || [ -z "$guard_input" ] || [ -z "$guard_output" ] \
       || ! exec {UNINSTALL_WORKER_PIPE}>&"$guard_input" \
-      || ! IFS= read -r -t 125 status <&"$guard_output" || [ "$status" != ready ]; then
+      || ! exec {UNINSTALL_WORKER_RESPONSE_FD}<&"$guard_output" \
+      || ! IFS= read -r -t 125 status <&"$UNINSTALL_WORKER_RESPONSE_FD" || [ "$status" != ready ]; then
       release_uninstall_workers
       log 'Unable to drain SLL workers safely. Wait for announcements/pages to finish, stop external SLL supervisors and review the named unsafe lock before retrying. No teardown was started.'
       return 1
@@ -710,17 +1418,16 @@ close_inherited_maintenance_lock_fds() {
 }
 
 run_fwconsole() (
-  # The parent uninstaller or maintenance worker retains the transaction lock;
-  # descendants must not inherit it and accidentally extend its lifetime.
-  close_inherited_maintenance_lock_fds
+  # Immutable root stages retain the maintenance and worker lease copies.
+  # Their Popen(close_fds=True) keeps mutable vendor children descriptor-free.
   if [ -n "${UNINSTALL_WORKER_PIPE:-}" ]; then exec {UNINSTALL_WORKER_PIPE}>&-; fi
   # PCRE JIT allocation can be denied by otherwise healthy unprivileged LXC
   # containers. Limit this compatibility override to the uninstall process.
-  run_as_asterisk /usr/bin/php -d pcre.jit=0 /usr/sbin/fwconsole "$@"
+  run_bounded_as_asterisk /usr/bin/php -d pcre.jit=0 /usr/sbin/fwconsole "$@"
 )
 
 module_registry_exists() {
-  run_as_asterisk "SLS_MODULE_NAME=$MODULE" /usr/bin/php -d pcre.jit=0 -r '
+  run_bounded_as_asterisk "SLS_MODULE_NAME=$MODULE" /usr/bin/php -d pcre.jit=0 -r '
 $bootstrap_settings = ["freepbx_auth" => false, "skip_astman" => true];
 require "/etc/freepbx.conf";
 $statement = \FreePBX::Database()->prepare("SELECT COUNT(*) FROM modules WHERE modulename = ?");
@@ -754,7 +1461,7 @@ remove_module_registration() {
   inspect_module_registry || return 1
   if [ "$MODULE_REGISTRY_PRESENT" = 1 ]; then
     log "FreePBX left the $MODULE registry row behind; removing that single stale row before deleting module files."
-    run_as_asterisk "SLS_MODULE_NAME=$MODULE" /usr/bin/php -d pcre.jit=0 -r '
+    run_bounded_as_asterisk "SLS_MODULE_NAME=$MODULE" /usr/bin/php -d pcre.jit=0 -r '
 $bootstrap_settings = ["freepbx_auth" => false, "skip_astman" => true];
 require "/etc/freepbx.conf";
 $statement = \FreePBX::Database()->prepare("DELETE FROM modules WHERE modulename = ?");
@@ -781,7 +1488,7 @@ capture_signing_fingerprint() {
 capture_pbx_running_state() {
   local response=""
   PBX_RUNNING=0
-  if response="$(run_as_asterisk /usr/bin/timeout --signal=TERM 10 /usr/sbin/asterisk -rx 'core show uptime' 2>/dev/null)" \
+  if response="$(asterisk -rx 'core show uptime' 2>/dev/null)" \
     && grep -Fq 'System uptime:' <<<"$response"; then
     PBX_RUNNING=1
   fi
@@ -789,11 +1496,11 @@ capture_pbx_running_state() {
 
 reload_removed_pbx_integration() {
   if [ "$PBX_RUNNING" != 1 ]; then
-    log "SLL removal was verified. Asterisk is stopped or its control socket is unavailable; run fwconsole reload after PBX service is available. No PBX service was started."
+    log "SLL software removal checks passed. Asterisk is stopped or its control socket is unavailable; run fwconsole reload after PBX service is available. No PBX service was started."
     return 0
   fi
   if ! run_fwconsole reload >>"$MODULE_UNINSTALL_LOG" 2>&1; then
-    log "SLL removal was verified, but the PBX integration reload failed. Review $MODULE_UNINSTALL_LOG_PATH, resolve the PBX reload error, and run fwconsole reload."
+    log "SLL software removal checks passed, but the PBX integration reload failed. Review $MODULE_UNINSTALL_LOG_PATH, resolve the PBX reload error, and run fwconsole reload."
   fi
 }
 
@@ -962,7 +1669,7 @@ handle_uninstall_exit() {
 
 rewrite_managed_text_file() {
   local path="$1" operation="$2" name="${3:-}" action="${4:-apply}"
-  run_as_asterisk /usr/bin/python3 -I - "$path" "$operation" "$name" "$action" <<'PYREWRITE'
+  run_as_asterisk /usr/bin/python3 -I - "$path" "$operation" "$name" "$action" "${RECOVERY_AMI_OWNERSHIP_HELPER:-}" "${CONFIGURED_AMI_USERNAME:-}" "${CONFIGURED_AMI_SECRET_HASH:-}" <<'PYREWRITE'
 import fcntl
 import os
 import pwd
@@ -971,11 +1678,12 @@ import secrets
 import stat
 import sys
 
-path, operation, name, action = sys.argv[1:]
+path, operation, name, action, ami_helper, configured, proof = sys.argv[1:]
+ami_block = operation == 'managed-block' and name == 'SLS Mass Notifications AMI'
 parts = path.split('/')[1:]
 if (not path.startswith('/') or not parts or any(part in ('', '.', '..') for part in parts)
         or operation not in ('menu', 'legacy-dashboard', 'managed-block')
-        or action not in ('apply', 'check')):
+        or action not in ('apply', 'check', 'ami-name') or action == 'ami-name' and not ami_block):
     raise SystemExit('Invalid managed text rewrite request')
 account = pwd.getpwnam('asterisk')
 directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -1024,19 +1732,18 @@ try:
         raise RuntimeError('managed text file is not valid UTF-8')
 
     if operation == 'menu':
-        updated = re.sub(
-            r"\t// SLS Mass Notifications menu placement:.*?(?=\telse if \(\$a == 'other'\)\n\t\treturn (?:1|true);\n)",
-            "", data, flags=re.S)
-        for label in ('mass notifications', 'mass notify'):
-            for block in (
-                f"\telse if ($a == '{label}' && $b == 'other')\n\t\treturn -1;\n",
-                f"\telse if ($a == 'other' && $b == '{label}')\n\t\treturn 1;\n",
-                f"\telse if ($a == '{label}' && $b == 'user panel')\n\t\treturn 1;\n",
-                f"\telse if ($a == 'user panel' && $b == '{label}')\n\t\treturn -1;\n",
-                f"\telse if ($a == '{label}')\n\t\treturn 1;\n",
-                f"\telse if ($b == '{label}')\n\t\treturn -1;\n",
-            ):
-                updated = updated.replace(block, '')
+        # Retired SLL releases added this exact 695-byte ASCII block. Refuse
+        # partial/edited markers and leave unmarked site PHP untouched.
+        import hashlib
+        marker = "\t// SLS Mass Notifications menu placement:"
+        updated = data
+        if marker in data:
+            start = data.index(marker)
+            block = data[start:start + 695]
+            if (data.count(marker) != 1 or hashlib.sha256(block.encode('utf-8')).hexdigest()
+                    != 'b95a902541a9d115b06ef70ccb9fd7557db5c011d3838ee0f381bdc11987b257'):
+                raise RuntimeError('The previous SLL menu integration was edited. Preserve the Framework file for review.')
+            updated = data[:start] + data[start + len(block):]
     elif operation == 'legacy-dashboard':
         updated = re.sub(
             r"\n\s*\$final\[\$i\]\s*=\s*\$this->checkSlsMassNotify\(\);\s*"
@@ -1051,6 +1758,17 @@ try:
             raise RuntimeError('invalid managed block name')
         updated = data
         def remove_complete_block(value, start_marker, end_marker):
+            opened = False
+            for line in value.splitlines():
+                if start_marker in line or end_marker in line:
+                    if line == start_marker and not opened:
+                        opened = True
+                    elif line == end_marker and opened:
+                        opened = False
+                    else:
+                        raise RuntimeError('managed block has malformed, nested or unmatched markers; preserve the file for review')
+            if opened:
+                raise RuntimeError('managed block has an unmatched beginning; preserve the file for review')
             pattern = (r'(?m)^' + re.escape(start_marker) + r'\r?\n'
                        + r'(?s:.*?)^' + re.escape(end_marker) + r'(?:\r?\n|\Z)')
             return re.sub(pattern, '', value)
@@ -1060,7 +1778,19 @@ try:
         updated = remove_complete_block(
             updated, ';-- BEGIN ' + name + ' --', ';-- END ' + name + ' --')
 
-    if updated == data:
+    if ami_block and action in ('apply', 'ami-name') and updated != data:
+        import subprocess
+        checker = r'''require $argv[1];
+$name=\SLS\MassNotify\AmiUserOwnership::fileAccount(stream_get_contents(STDIN),$argv[2],$argv[3]);
+if ($name === null || $name !== $argv[2]) { exit(1); } echo $name;'''
+        if not os.path.isabs(ami_helper) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}', configured) or not re.fullmatch(r'[a-f0-9]{64}', proof):
+            raise RuntimeError('The protected configured AMI identity is needed to verify its managed file section')
+        result = subprocess.run(['/usr/bin/php', '-d', 'display_errors=0', '-r', checker, ami_helper, configured, proof],
+                                input=body, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+        if result.returncode or result.stdout != configured.encode('ascii'):
+            raise RuntimeError('The managed AMI file identity, credential or policy could not be verified; preserve the file')
+        if action == 'ami-name': print(configured)
+    if updated == data or action == 'ami-name':
         raise SystemExit(0)
     encoded = updated.encode('utf-8')
     temporary = '.sls-uninstall-rewrite-' + secrets.token_hex(12)
@@ -1156,10 +1886,103 @@ restore_uninstall_collector() {
   log 'Uninstall stopped before removing module files; the previously active collector was restored without changing its enablement.'
 }
 
+verify_legacy_collector_offline() {
+  /usr/bin/python3 -I -B - "$RECOVERY_SIGNER_DIR/sls_install_idle.py" "$DATA_DIR" "$1" <<'PYLEGACYCOLLECTOR'
+import fcntl, importlib.util, os, pathlib, pwd, stat, sys
+source, data, phase = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+if phase not in ('before-stop', 'stopped'): raise SystemExit(1)
+spec = importlib.util.spec_from_file_location('signed_uninstall_idle', source)
+idle = importlib.util.module_from_spec(spec); spec.loader.exec_module(idle)
+try:
+    parent = idle.directory(data)
+except FileNotFoundError:
+    raise SystemExit(0)
+failure = 'The approved prior release cannot retire ambiguous or still-active collector evidence. Preserve history and use an authenticated upgrade before uninstalling.'
+try:
+    def present(name):
+        try: os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError: return False
+        return True
+    ledger = 'phone-admission.json'
+    display = 'phone-collector-display.json'
+    if present(ledger):
+        state = idle.read_collector_json(data / ledger, 'phone-admission.lock', private=True)
+        if state.get('collector') is not None: raise ValueError()
+    elif any(present(name) for name in ('.phone-admission-required', display, 'phone-collector-heartbeat.json')):
+        raise ValueError()
+    if present(display):
+        view = idle.read_collector_json(data / display, display + '.lock', 1024, private=True)
+        if view.get('connected') is not False: raise ValueError()
+    if phase == 'stopped' and present('phone-events.lock'):
+        fd = os.open('phone-events.lock', os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            info = os.fstat(fd); account = pwd.getpwnam('asterisk')
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size
+                    or info.st_uid not in (0, account.pw_uid) or info.st_gid not in (0, account.pw_gid)
+                    or stat.S_IMODE(info.st_mode) not in (0o600, 0o640, 0o644)): raise ValueError()
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not os.path.samestat(info, os.stat('phone-events.lock', dir_fd=parent, follow_symlinks=False)):
+                raise ValueError()
+        finally: os.close(fd)
+except (AttributeError, OSError, ValueError, RuntimeError):
+    raise SystemExit(failure) from None
+finally: os.close(parent)
+PYLEGACYCOLLECTOR
+}
+
+retire_stopped_uninstall_collector() {
+  if [ -n "$RECOVERY_COLLECTOR_HELPER" ]; then
+    run_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/python3 -I -B \
+      "$RECOVERY_COLLECTOR_HELPER" --retire-stopped-collector
+  else
+    verify_legacy_collector_offline stopped
+  fi
+}
+
+uninstall_collector_property() {
+  local value status=0
+  value="$(/usr/bin/timeout --kill-after=2 10 /usr/bin/systemctl show --property="$1" --value sls-mass-notify-phone-events.service)" || status=$?
+  # Some systemd versions return LSB 4 for a missing unit but still report
+  # its state. Accept that result only for the explicit absent state values.
+  if [ "$status" != 0 ]; then
+    [ "$status" = 4 ] || return 1
+    case "$1:$value" in LoadState:not-found|ActiveState:inactive) ;; *) return 1 ;; esac
+  fi
+  printf '%s\n' "$value"
+}
+
+absent_uninstall_collector_is_stopped() {
+  local unit="$1" load active fragment dropins
+  load="$(uninstall_collector_property LoadState)" || return 1
+  active="$(uninstall_collector_property ActiveState)" || return 1
+  if [ "$load:$active" = not-found:inactive ]; then return 0; fi
+  # Retry interruption between unlinking the signed fragment and daemon-reload.
+  # A foreign, active, overridden or recreated definition is preserved.
+  if [ "$load:$active" = loaded:inactive ]; then
+    fragment="$(uninstall_collector_property FragmentPath)" || return 1
+    dropins="$(uninstall_collector_property DropInPaths)" || return 1
+    if [ "$fragment" = "$unit" ] && [ -z "$dropins" ] && [ ! -e "$unit" ] && [ ! -L "$unit" ]; then
+      /usr/bin/timeout --kill-after=2 10 /usr/bin/systemctl daemon-reload || return 1
+      load="$(uninstall_collector_property LoadState)" || return 1
+      active="$(uninstall_collector_property ActiveState)" || return 1
+      if [ "$load:$active" = not-found:inactive ] && [ ! -e "$unit" ] && [ ! -L "$unit" ]; then return 0; fi
+    fi
+  fi
+  log 'The managed collector unit file is absent but systemd cannot certify it is unloaded and inactive. Check the loaded unit and its overrides before retrying.'
+  return 1
+}
+
 remove_phone_collector_service() {
   local unit="/etc/systemd/system/sls-mass-notify-phone-events.service" active_state previous_state fragment dropins enabled_state
-  [ -e "$unit" ] || [ -L "$unit" ] || return 0
+  if [ ! -e "$unit" ] && [ ! -L "$unit" ]; then
+    absent_uninstall_collector_is_stopped "$unit" || return 1
+    assert_uninstall_workers && inspect_uninstall_idle && retire_stopped_uninstall_collector
+    return $?
+  fi
   verify_uninstall_collector_unit "$unit" || return 1
+  if [ -z "$RECOVERY_COLLECTOR_HELPER" ]; then
+    verify_legacy_collector_offline before-stop || return 1
+  fi
   previous_state="$(/usr/bin/timeout --kill-after=2 10 /usr/bin/systemctl show --property=ActiveState --value sls-mass-notify-phone-events.service)" || return 1
   fragment="$(/usr/bin/timeout --kill-after=2 10 /usr/bin/systemctl show --property=FragmentPath --value sls-mass-notify-phone-events.service)" || return 1
   dropins="$(/usr/bin/timeout --kill-after=2 10 /usr/bin/systemctl show --property=DropInPaths --value sls-mass-notify-phone-events.service)" || return 1
@@ -1180,7 +2003,7 @@ remove_phone_collector_service() {
   case "$active_state" in inactive|failed) ;; *) log "The phone collector has not stopped; its service file was preserved."; restore_uninstall_collector "$unit" "$previous_state" "$enabled_state" || true; return 1 ;; esac
   # Confirm shutdown did not leave a last voicemail call. Keep the service
   # definition and all runtime/history available if this final check fails.
-  if ! assert_uninstall_workers || ! inspect_uninstall_idle; then
+  if ! assert_uninstall_workers || ! inspect_uninstall_idle || ! retire_stopped_uninstall_collector; then
     restore_uninstall_collector "$unit" "$previous_state" "$enabled_state" || true
     return 1
   fi
@@ -1343,7 +2166,7 @@ preflight_uninstall_integrations() {
 }
 
 remove_freepbx_manager_users() {
-  run_as_asterisk "SLS_CONFIGURED_AMI_USERNAME=$CONFIGURED_AMI_USERNAME" "SLS_AMI_SECRET_HASH=$CONFIGURED_AMI_SECRET_HASH" "SLS_AMI_OWNERSHIP_HELPER=$RECOVERY_AMI_OWNERSHIP_HELPER" /usr/bin/php -d pcre.jit=0 <<'PHP'
+  run_bounded_as_asterisk "SLS_CONFIGURED_AMI_USERNAME=$CONFIGURED_AMI_USERNAME" "SLS_AMI_SECRET_HASH=$CONFIGURED_AMI_SECRET_HASH" "SLS_AMI_OWNERSHIP_HELPER=$RECOVERY_AMI_OWNERSHIP_HELPER" /usr/bin/php -d pcre.jit=0 <<'PHP'
 <?php
 $bootstrap_settings = ['freepbx_auth' => false, 'skip_astman' => true];
 require '/etc/freepbx.conf';
@@ -1362,41 +2185,13 @@ PHP
 remove_bundled_system_recordings() {
   run_as_asterisk "SLS_DATA_DIR=$DATA_DIR" /usr/bin/php -d pcre.jit=0 <<'PHP'
 <?php
-$bootstrap_settings = ['freepbx_auth' => false, 'skip_astman' => true];
-require '/etc/freepbx.conf';
-$dataDir = rtrim((string)getenv('SLS_DATA_DIR'), '/');
-$recordings = [
-    ['custom/SLS_Mass_Notify_Paging_Tone_Opening', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Opening.wav', $dataDir . '/sounds/tones/opening_Paging_Tone_Opening.wav', 'SLL Mass Notify Server - Paging Tone Opening', 'Default Southland Labs regular announcement opening tone.'],
-    ['custom/SLS_Mass_Notify_Paging_Tone_Closing', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Closing.wav', $dataDir . '/sounds/tones/closing_Paging_Tone_Closing.wav', 'SLL Mass Notify Server - Paging Tone Closing', 'Default Southland Labs regular announcement closing tone.'],
-    ['custom/SLS_Mass_Notify_NWS_Alert', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_NWS_Alert.wav', $dataDir . '/sounds/tones/opening_NWS_alert.wav', 'SLL Mass Notify Server - NWS Alert', 'Default Southland Labs NWS alert opening tone.'],
-    ['custom/SLS_Mass_Notify_Lightning_Alert', '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Lightning_Alert.wav', $dataDir . '/sounds/tones/opening_Lightning_alert.wav', 'SLL Mass Notify Server - Lightning Alert', 'Default Southland Labs cloud-to-ground lightning warning opening tone.'],
-];
-$database = \FreePBX::Database();
-$tables = $database->query("SHOW TABLES LIKE 'recordings'");
-if ($tables->fetchColumn() === false) { exit(0); }
-$lookup = $database->prepare('SELECT displayname, description FROM recordings WHERE filename = ? LIMIT 1');
-$delete = $database->prepare('DELETE FROM recordings WHERE filename = ?');
-foreach ($recordings as [$filename, $path, $tone, $name, $description]) {
-    $fileExists = is_file($path) && !is_link($path);
-    $toneHash = is_file($tone) ? @hash_file('sha256', $tone) : false;
-    $fileHash = $fileExists ? @hash_file('sha256', $path) : false;
-    $fileOwned = is_string($toneHash) && $toneHash !== '' && is_string($fileHash) && hash_equals($toneHash, $fileHash);
-    $lookup->execute([$filename]);
-    $row = $lookup->fetch(PDO::FETCH_ASSOC);
-    $rowOwned = is_array($row) && (
-        (hash_equals($name, (string)($row['displayname'] ?? ''))
-            && hash_equals($description, (string)($row['description'] ?? '')))
-        || (hash_equals(str_replace('SLL Mass Notify Server - ', 'SLS Mass Notify - ', $name), (string)($row['displayname'] ?? ''))
-            && hash_equals(str_replace('Default Southland Labs ', 'Default Southland Servers ', $description), (string)($row['description'] ?? ''))));
-    if ($rowOwned && (!$fileExists || $fileOwned)) {
-        $delete->execute([$filename]);
-    }
-    if ($fileOwned && (!is_array($row) || $rowOwned)) {
-        @unlink($path);
-    }
-}
+// Native recording IDs and audio can be shared by IVRs, ring groups, compound
+// recordings and other modules. Labels and matching audio hashes do not prove
+// exclusive ownership. Preserve the native rows/audio; SLL references are removed
+// with its module/configuration rather than guessing a complete usage graph.
 exit(0);
 PHP
+  log "Preserved native System Recordings and audio for any independent PBX references."
 }
 
 verify_freepbx_cleanup() {
@@ -1405,7 +2200,7 @@ verify_freepbx_cleanup() {
     log "Uninstall verification failed; the $MODULE FreePBX registry row remains."
     return 1
   fi
-  run_as_asterisk "SLS_CONFIGURED_AMI_USERNAME=$CONFIGURED_AMI_USERNAME" "SLS_AMI_SECRET_HASH=$CONFIGURED_AMI_SECRET_HASH" "SLS_AMI_OWNERSHIP_HELPER=$RECOVERY_AMI_OWNERSHIP_HELPER" /usr/bin/php -d pcre.jit=0 <<'PHP'
+  run_bounded_as_asterisk "SLS_CONFIGURED_AMI_USERNAME=$CONFIGURED_AMI_USERNAME" "SLS_AMI_SECRET_HASH=$CONFIGURED_AMI_SECRET_HASH" "SLS_AMI_OWNERSHIP_HELPER=$RECOVERY_AMI_OWNERSHIP_HELPER" /usr/bin/php -d pcre.jit=0 <<'PHP'
 <?php
 $bootstrap_settings = ['freepbx_auth' => false, 'skip_astman' => true];
 require '/etc/freepbx.conf';
@@ -1415,16 +2210,9 @@ if ($configured !== '') { $candidates[] = $configured; }
 $candidates = array_values(array_unique(array_filter($candidates)));
 $database = \FreePBX::Database();
 require_once (string)getenv('SLS_AMI_OWNERSHIP_HELPER');
-$statement = $database->prepare('SELECT * FROM manager WHERE name = ?');
-foreach ($candidates as $username) {
-    if ($username === (string)\FreePBX::Config()->get('AMPMGRUSER')) { continue; }
-    $statement->execute([$username]);
-    $row = $statement->fetch(PDO::FETCH_ASSOC);
-    if (is_array($row) && \SLS\MassNotify\AmiUserOwnership::matches($row, $username, (string)getenv('SLS_AMI_SECRET_HASH'))) {
-        file_put_contents("php://stderr", "FreePBX AMI user remains after uninstall: {$username}\n");
-        exit(1);
-    }
-}
+$remaining = \SLS\MassNotify\AmiUserOwnership::ownedNames($database, $candidates,
+    (string)getenv('SLS_AMI_SECRET_HASH'), (string)\FreePBX::Config()->get('AMPMGRUSER'));
+if ($remaining) { fwrite(STDERR, "An owned FreePBX AMI user remains after uninstall.\n"); exit(1); }
 exit(0);
 PHP
   local stock_module
@@ -1481,7 +2269,7 @@ SLSMANAGEDFILES
 
 verify_stock_module() {
   local stock_module="$1"
-  run_as_asterisk "SLS_VERIFY_MODULE=$stock_module" /usr/bin/php -d pcre.jit=0 -r '
+  run_bounded_as_asterisk "SLS_VERIFY_MODULE=$stock_module" /usr/bin/php -d pcre.jit=0 -r '
 $bootstrap_settings = ["freepbx_auth" => false, "skip_astman" => true];
 require "/etc/freepbx.conf";
 $gpg = \FreePBX::GPG();
@@ -1502,17 +2290,35 @@ locally_sign_stock_module() {
   local stock_module="$1"
 
   if [ -n "$RECOVERY_SIGNER" ]; then
-    [ -f "$RECOVERY_SIGNER" ] && [ ! -L "$RECOVERY_SIGNER" ] && [ -x "$RECOVERY_SIGNER" ] || {
+    [ -f "$RECOVERY_SIGNER" ] && [ ! -L "$RECOVERY_SIGNER" ] || {
       log "The protected uninstall signer snapshot is missing or unsafe."
       return 1
     }
-    if ! ( if [ -n "${UNINSTALL_WORKER_PIPE:-}" ]; then exec {UNINSTALL_WORKER_PIPE}>&-; fi
-      SLS_LOCAL_SIGN_HOME="$SIGN_HOME" \
-      SLS_LOCAL_SIGN_LOCK="/run/lock/sls-mass-notify-signing.lock" \
-      SLS_LOCAL_TRUST_HELPER="$RECOVERY_SIGNER_DIR/sls_module_trust.py" \
-      SLS_LOCAL_TRUST_MODE="uninstalled" \
-      /usr/bin/timeout --signal=TERM 360 "$RECOVERY_SIGNER" "$stock_module" \
-        >>"$STOCK_RESTORE_LOG" 2>&1 ); then
+    /usr/bin/python3 -I - "$RECOVERY_SIGNER" "$RECOVERY_SIGNER_DIR" <<'PYSIGNERSOURCE' || return 1
+import os, stat, sys
+from pathlib import Path
+path, directory = map(Path, sys.argv[1:])
+if path != directory / 'sign_sls_mass_notify_local_sig.sh' or not path.is_absolute():
+    raise SystemExit('The retained uninstall signer path differs from its protected snapshot.')
+for item in (path, *path.parents):
+    info = item.lstat()
+    expected = stat.S_ISREG if item == path else stat.S_ISDIR
+    if (not expected(info.st_mode) or info.st_uid != 0
+            or info.st_mode & 0o022 and not (item != path and info.st_mode & stat.S_ISVTX)):
+        raise SystemExit('The retained uninstall signer is not root-protected.')
+info = path.lstat()
+if info.st_nlink != 1 or not 0 < info.st_size <= 1048576 or directory.lstat().st_mode & 0o077:
+    raise SystemExit('The retained uninstall signer is not bounded root-private source.')
+PYSIGNERSOURCE
+    /bin/bash -n "$RECOVERY_SIGNER" || return 1
+    if ! run_without_uninstall_worker_descriptors sls_bounded_native_command 360 5 \
+      /usr/bin/timeout --signal=TERM --kill-after=5 360 /usr/bin/env \
+      "SLS_LOCAL_SIGN_HOME=$SIGN_HOME" \
+      'SLS_LOCAL_SIGN_LOCK=/run/lock/sls-mass-notify-signing.lock' \
+      "SLS_LOCAL_TRUST_HELPER=$RECOVERY_SIGNER_DIR/sls_module_trust.py" \
+      'SLS_LOCAL_TRUST_MODE=uninstalled' \
+      /bin/bash "$RECOVERY_SIGNER" "$stock_module" \
+        >>"$STOCK_RESTORE_LOG" 2>&1; then
       log "The protected local signer could not verify the cleaned $stock_module module."
       return 1
     fi
@@ -1908,7 +2714,6 @@ remove_runtime_files() {
   remove_managed_path /var/www/html/mass-notify
   remove_managed_path /var/www/html/sls_mass_notify
   if [ "$PURGE_CONFIG" = 1 ]; then
-    remove_managed_path "$DATA_DIR"
     remove_managed_path /var/log/sls_mass_notify.log
     remove_managed_path /var/log/sls_mass_notify_events.jsonl
     remove_managed_path /var/log/sls_mass_notify_push.log
@@ -1916,6 +2721,13 @@ remove_runtime_files() {
   # Leave downloaded installers and unrelated recovery directories untouched;
   # remove only the obsolete SLL weather-poller timestamp.
   remove_managed_path /var/tmp/nws_last_clear.ts
+}
+
+purge_uninstall_data() {
+  # Keep named worker anchors available for every native verification and
+  # final lease check. Explicit purge runs only once those writers are done;
+  # no missing-directory exception weakens earlier admission.
+  if [ "$PURGE_CONFIG" = 1 ]; then remove_managed_path "$DATA_DIR"; fi
 }
 
 uninstall_cron_action() {
@@ -1967,7 +2779,7 @@ restore_stock_modules() {
 }
 
 refresh_dashboard_hook_index() {
-  run_as_asterisk /usr/bin/php -d pcre.jit=0 <<'PHP'
+  run_bounded_as_asterisk /usr/bin/php -d pcre.jit=0 <<'PHP'
 <?php
 $bootstrap_settings = ['freepbx_auth' => false, 'skip_astman' => true];
 require '/etc/freepbx.conf';
@@ -2006,19 +2818,19 @@ remove_trusted_signing_key() {
     return 0
   }
   local home
-  local user
-  local command
+  local -a root_native_deadline=(/usr/bin/timeout --signal=TERM --kill-after=5 1200)
   for home in /root/.gnupg /home/asterisk/.gnupg /var/lib/asterisk/.gnupg; do
     [ -d "$home" ] || continue
     if [ "$home" = "/root/.gnupg" ]; then
-      GNUPGHOME="$home" gpg --batch --yes --delete-key "$SIGNING_FINGERPRINT" >/dev/null 2>&1 || true
-      printf '%s:2:\n' "$SIGNING_FINGERPRINT" | GNUPGHOME="$home" gpg --import-ownertrust >/dev/null 2>&1 || true
+      run_without_uninstall_worker_descriptors sls_bounded_native_command \
+        "${root_native_deadline[3]}" "${root_native_deadline[2]#--kill-after=}" \
+        "${root_native_deadline[@]}" /usr/bin/env "GNUPGHOME=$home" /usr/bin/gpg --batch --yes --delete-key "$SIGNING_FINGERPRINT" >/dev/null 2>&1 || true
+      printf '%s:2:\n' "$SIGNING_FINGERPRINT" | run_without_uninstall_worker_descriptors sls_bounded_native_command \
+        "${root_native_deadline[3]}" "${root_native_deadline[2]#--kill-after=}" \
+        "${root_native_deadline[@]}" /usr/bin/env "GNUPGHOME=$home" /usr/bin/gpg --import-ownertrust >/dev/null 2>&1 || true
     else
-      user="asterisk"
-      command="GNUPGHOME=$(printf '%q' "$home") gpg --batch --yes --delete-key $(printf '%q' "$SIGNING_FINGERPRINT") >/dev/null 2>&1 || true"
-      su -s /bin/bash "$user" -c "$command" || true
-      command="printf '%s:2:\\n' $(printf '%q' "$SIGNING_FINGERPRINT") | GNUPGHOME=$(printf '%q' "$home") gpg --import-ownertrust >/dev/null 2>&1 || true"
-      su -s /bin/bash "$user" -c "$command" || true
+      run_as_asterisk /usr/bin/env "GNUPGHOME=$home" /usr/bin/gpg --batch --yes --delete-key "$SIGNING_FINGERPRINT" >/dev/null 2>&1 || true
+      printf '%s:2:\n' "$SIGNING_FINGERPRINT" | run_as_asterisk /usr/bin/env "GNUPGHOME=$home" /usr/bin/gpg --import-ownertrust >/dev/null 2>&1 || true
     fi
   done
   rm -rf "$SIGN_HOME"
@@ -2117,7 +2929,8 @@ refresh_uninstall_stock_approvals() {
   local trust="$RECOVERY_SIGNER_DIR/sls_module_trust.py"
   for module in dashboard framework; do
     if /usr/bin/python3 -I "$trust" --root /var/lib/sls-mass-notify-trust check --module "$module" --web-root /var/www/html >/dev/null 2>&1 \
-      || /usr/bin/python3 -I "$trust" --root /var/lib/sls-mass-notify-trust check --module "$module" --web-root /var/www/html --uninstalled >/dev/null 2>&1; then
+      || /usr/bin/python3 -I "$trust" --root /var/lib/sls-mass-notify-trust check --module "$module" --web-root /var/www/html --uninstalled >/dev/null 2>&1 \
+      || /usr/bin/python3 -I "$trust" --root /var/lib/sls-mass-notify-trust check --module "$module" --web-root /var/www/html --uninstalling >/dev/null 2>&1; then
       continue
     fi
     [ -f "$helper" ] && [ ! -L "$helper" ] || return 0
@@ -2150,22 +2963,263 @@ verify_uninstall_inventories() {
     if /usr/bin/python3 -I "$helper" --root /var/lib/sls-mass-notify-trust check --module "$reviewed_module" --web-root /var/www/html >/dev/null 2>&1; then
       continue
     fi
-    /usr/bin/python3 -I "$helper" --root /var/lib/sls-mass-notify-trust check --module "$reviewed_module" --web-root /var/www/html --uninstalled || {
+    /usr/bin/python3 -I "$helper" --root /var/lib/sls-mass-notify-trust check --module "$reviewed_module" --web-root /var/www/html --uninstalling || {
       log "The $reviewed_module files match neither their approved installed nor approved uninstall inventory. Preserve local changes for independent review."
       return 1
     }
   done
 }
 
+uninstall_ami_evidence() {
+  /usr/bin/python3 -I /dev/fd/3 "$@" 3<<'PYUNINSTALLAMIEVIDENCE'
+import errno, hashlib, json, os, re, stat, sys, time
+from pathlib import Path
+ROOT=Path('/var/lib/sls-mass-notify-uninstaller')
+TRUST=Path('/var/lib/sls-mass-notify-trust')
+PLAN='ami-removal-plan.json'; RESULT='ami-revocation.json'
+STATES={'verified_absent','daemon_absent','pending_unverified'}
+def canonical(value):return (json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode()
+def decode(raw):
+    def unique(pairs):
+        result={}
+        for key,value in pairs:
+            if key in result:raise ValueError('Duplicate evidence field')
+            result[key]=value
+        return result
+    return json.loads(raw,object_pairs_hook=unique)
+def identity(s):return (s.st_dev,s.st_ino,s.st_uid,s.st_gid,s.st_mode,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+def directory(path):
+    path=Path(path)
+    if path.resolve()!=path:raise ValueError('Noncanonical evidence directory')
+    fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        for part in path.parts[1:]:
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+            os.close(fd);fd=child;s=os.fstat(fd)
+            if s.st_uid!=0 or s.st_mode&0o022 and not s.st_mode&stat.S_ISVTX:raise ValueError('Unprotected evidence directory')
+        return fd
+    except BaseException:os.close(fd);raise
+def transaction(path):
+    path=Path(path)
+    if path.parent!=ROOT or not re.fullmatch(r'sls-uninstall-transaction\.[A-Za-z0-9_-]{6,16}',path.name):raise ValueError('Exact retained uninstall transaction required')
+    fd=directory(path)
+    try:
+        if stat.S_IMODE(os.fstat(fd).st_mode)!=0o700:raise ValueError('Transaction is not root-private')
+    finally:os.close(fd)
+    return path
+def read(path,maximum=262144):
+    parent=directory(path.parent)
+    try:
+        fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
+        try:
+            s=os.fstat(fd)
+            if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_nlink!=1 or s.st_mode&0o077 or s.st_size>maximum:raise ValueError('Unsafe evidence file')
+            with os.fdopen(os.dup(fd),'rb') as stream:raw=stream.read(maximum+1)
+            if len(raw)!=s.st_size or identity(s)!=identity(os.fstat(fd)) or identity(s)!=identity(os.stat(path.name,dir_fd=parent,follow_symlinks=False)):raise ValueError('Evidence changed')
+            return raw
+        finally:os.close(fd)
+    finally:os.close(parent)
+def write_new(path,value):
+    parent=directory(path.parent)
+    try:
+        fd=os.open(path.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
+        with os.fdopen(fd,'wb') as stream:stream.write(canonical(value));stream.flush();os.fsync(stream.fileno())
+        os.fsync(parent)
+    finally:os.close(parent)
+def valid_name(name):return type(name) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',name) is not None
+def source(value):
+    if type(value) is not str or not re.fullmatch(re.escape(str(TRUST))+r'/slsmassnotifyserver-[a-f0-9]{64}/module',value):raise ValueError('Protected approved generation required')
+    return value
+def load_plan(path):
+    path=transaction(path);raw=read(path/PLAN);value=decode(raw)
+    fields={'schema','kind','transaction','approved_source','credential_sha256','owned_names','created_at'}
+    if (type(value) is not dict or set(value)!=fields or type(value['schema']) is not int or value['schema']!=1
+            or value['kind']!='sll-uninstall-owned-ami-plan' or value['transaction']!=str(path)
+            or type(value['owned_names']) is not list or len(value['owned_names'])>4
+            or any(not valid_name(name) for name in value['owned_names']) or len(set(value['owned_names']))!=len(value['owned_names'])
+            or type(value['created_at']) is not int or value['created_at']<0
+            or value['credential_sha256'] is not None and not re.fullmatch(r'[a-f0-9]{64}',str(value['credential_sha256']))):raise ValueError('Invalid owned-name plan')
+    source(value['approved_source']);record=decode(read(path/'transaction.json',16384))
+    if record.get('schema')!=1 or record.get('approved_source')!=value['approved_source']:raise ValueError('Plan and protected transaction disagree')
+    return {'transaction':str(path),'sha256':hashlib.sha256(raw).hexdigest(),'owned_names':value['owned_names']}
+def load_result(path,plan):
+    value=decode(read(path/RESULT))
+    if (type(value) is not dict or value.get('schema')!=1 or value.get('kind')!='sll-uninstall-ami-revocation'
+            or value.get('transaction')!=str(path) or value.get('plan_sha256')!=plan['sha256']
+            or value.get('classification') not in STATES or type(value.get('plans')) is not list or len(value['plans'])>128):raise ValueError('Invalid prior native revocation result')
+    if any(type(item) is not dict or set(item)!={'transaction','sha256'} or type(item['transaction']) is not str
+           or not re.fullmatch(r'[a-f0-9]{64}',str(item['sha256'])) for item in value['plans']):raise ValueError('Invalid prior owned-plan reference')
+    return value
+def plans(path,mode):
+    own=load_plan(path);found={str(path):own}
+    if mode=='followup':
+        try:prior=load_result(path,own)
+        except FileNotFoundError:prior=None
+        if prior is not None:
+            for item in prior['plans']:
+                actual=load_plan(Path(item['transaction']))
+                if actual['sha256']!=item.get('sha256'):raise ValueError('Retained follow-up plan changed')
+                found[actual['transaction']]=actual
+    elif mode=='normal':
+        fd=directory(ROOT)
+        try:names=os.listdir(fd)
+        finally:os.close(fd)
+        if len(names)>1000:raise ValueError('Uninstall evidence needs private archival')
+        for name in sorted(names):
+            if not re.fullmatch(r'sls-uninstall-transaction\.[A-Za-z0-9_-]{6,16}',name) or ROOT/name==path:continue
+            other=ROOT/name
+            try:plan=load_plan(other)
+            except FileNotFoundError:
+                # Older releases had no owned-name plan; no live name becomes authority.
+                if any(item.exists() or item.is_symlink() for item in (other/PLAN,other/RESULT)):raise
+                continue
+            try:result=load_result(other,plan)
+            except FileNotFoundError:result=None
+            if result is None or result['classification']!='verified_absent':
+                found[str(other)]=plan
+                if result is not None:
+                    for item in result['plans']:
+                        referenced=load_plan(Path(item['transaction']))
+                        if referenced['sha256']!=item['sha256']:raise ValueError('Referenced pending owned-name plan changed')
+                        found[referenced['transaction']]=referenced
+    else:raise ValueError('Unknown evidence mode')
+    if len(found)>128:raise ValueError('Too many unresolved native removal plans; archive reviewed evidence')
+    rows=sorted(found.values(),key=lambda item:item['transaction'])
+    return {'schema':1,'transaction':str(path),'plans':rows,'names':sorted({name for row in rows for name in row['owned_names']})}
+def daemon_absent():
+    # Same conservative native /proc check as inspect_uninstall_idle: failed CLI
+    # access alone never proves a stopped daemon. Unknown inspection stays pending.
+    deadline=time.monotonic()+3
+    try:
+        with os.scandir(Path('/proc')) as entries:
+            for index,entry in enumerate(entries):
+                if index>=32768 or time.monotonic()>deadline:return None
+                if not entry.name.isdigit():continue
+                try:executable=os.readlink(Path('/proc')/entry.name/'exe')
+                except OSError as error:
+                    if error.errno in (errno.ENOENT,errno.ESRCH):continue
+                    return None
+                if Path(executable.removesuffix(' (deleted)')).name=='asterisk':return False
+        return True
+    except OSError:return None
+try:
+    action,*args=sys.argv[1:]
+    if action=='prepare':
+        path=transaction(args[0]);approved=source(args[1]);value=decode(sys.stdin.buffer.read(16385))
+        record=decode(read(path/'transaction.json',16384))
+        if record.get('schema')!=1 or record.get('approved_source')!=approved:raise ValueError('Durable transaction must precede its owned-name plan')
+        if (type(value) is not dict or set(value)!={'owned_names','credential_sha256'} or type(value['owned_names']) is not list
+                or len(value['owned_names'])>4 or any(not valid_name(name) for name in value['owned_names'])
+                or len(set(value['owned_names']))!=len(value['owned_names'])
+                or value['credential_sha256'] is not None and not re.fullmatch(r'[a-f0-9]{64}',str(value['credential_sha256']))):raise ValueError('Invalid bounded owned-name input')
+        write_new(path/PLAN,{'schema':1,'kind':'sll-uninstall-owned-ami-plan','transaction':str(path),
+            'approved_source':approved,'created_at':int(time.time()),**value});print('Owned-name plan retained')
+    elif action=='plans':print(json.dumps(plans(transaction(args[0]),args[1]),separators=(',',':')))
+    elif action=='probe':
+        name,status=args;raw=sys.stdin.buffer.read(8193);state='unverified'
+        if not valid_name(name) or not re.fullmatch(r'[0-9]{1,3}',status):raise ValueError('Invalid native probe identity')
+        if status=='0' and len(raw)<=8192:
+            text=re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]','',raw.decode('utf-8','strict')).strip()
+            # Native CLI startup emits this exact utils.c warning on a private
+            # host without Ethernet. It carries no Manager response or authority.
+            notice='No ethernet interface found for seeding global EID. You will have to set it manually.'
+            text='\n'.join(line for line in text.splitlines() if line.strip()!=notice).strip()
+            if text=='There is no manager called '+name:state='absent'
+            elif re.search(r'^\s*username:\s*'+re.escape(name)+r'\s*$',text,re.M):state='present'
+        print(json.dumps({'name':name,'state':state},separators=(',',':')))
+    elif action=='finish':
+        path=transaction(args[0]);expected=decode(args[1]);mode=args[2]
+        if mode not in ('readonly','write') or type(expected) is not dict or set(expected)!={'schema','transaction','plans','names'} or expected['schema']!=1 or expected['transaction']!=str(path) or type(expected['plans']) is not list or not 1<=len(expected['plans'])<=128:raise ValueError('Invalid native verification plan')
+        current=[load_plan(Path(item['transaction'])) for item in expected['plans']]
+        if current!=expected['plans'] or str(path) not in {row['transaction'] for row in current}:raise ValueError('Owned-name evidence changed before verification')
+        names=sorted({name for row in current for name in row['owned_names']})
+        if expected['names']!=names:raise ValueError('Native probe names differ from protected plans')
+        body=sys.stdin.buffer.read(65537)
+        if len(body)>65536:raise ValueError('Native result bound exceeded')
+        rows=[decode(line) for line in body.splitlines() if line.strip()];observed={}
+        for row in rows:
+            if type(row) is not dict or set(row)!={'name','state'} or row['name'] not in names or row['name'] in observed or row['state'] not in ('absent','present','unverified'):raise ValueError('Native result does not match owned names')
+            observed[row['name']]=row['state']
+        absent=all(observed.get(name)=='absent' for name in names)
+        stopped=daemon_absent() if not absent else None
+        result={'schema':1,'kind':'sll-uninstall-ami-revocation','transaction':str(path),
+            'plan_sha256':next(row['sha256'] for row in current if row['transaction']==str(path)),
+            'plans':[{'transaction':row['transaction'],'sha256':row['sha256']} for row in current],
+            'classification':'verified_absent' if absent else 'daemon_absent' if stopped is True else 'pending_unverified',
+            'checked_at':int(time.time()),'owned_names_checked':len(names),'verified_absent_names':sum(value=='absent' for value in observed.values()),
+            'daemon_absent':stopped,'raw_manager_output_retained':False,'existing_sessions_inspected':False,'read_only_followup':mode=='readonly'}
+        if mode=='write':write_new(path/RESULT,result)
+        print(json.dumps(result,separators=(',',':')))
+    else:raise ValueError('Unknown evidence action')
+except (OSError,ValueError,TypeError,KeyError,IndexError):
+    raise SystemExit('Protected native AMI removal evidence could not be verified; preserve the retained uninstall transaction.') from None
+PYUNINSTALLAMIEVIDENCE
+}
+
+prepare_uninstall_ami_plan() {
+  local ownership file_account
+  file_account="$(rewrite_managed_text_file /etc/asterisk/manager_custom.conf managed-block "SLS Mass Notifications AMI" ami-name)" || return 1
+  ownership="$(run_bounded_as_asterisk "SLS_FILE_AMI_USERNAME=$file_account" "SLS_CONFIGURED_AMI_USERNAME=$CONFIGURED_AMI_USERNAME" "SLS_AMI_SECRET_HASH=$CONFIGURED_AMI_SECRET_HASH" "SLS_AMI_OWNERSHIP_HELPER=$RECOVERY_AMI_OWNERSHIP_HELPER" /usr/bin/php -d pcre.jit=0 <<'PHPAMIPLAN'
+<?php
+$bootstrap_settings = ['freepbx_auth'=>false,'skip_astman'=>true]; require '/etc/freepbx.conf';
+require_once (string)getenv('SLS_AMI_OWNERSHIP_HELPER');
+$names = array_values(array_unique(array_filter(['slsmassnotify','sls_mass_notify','nws_push',(string)getenv('SLS_CONFIGURED_AMI_USERNAME')])));
+$hash=(string)getenv('SLS_AMI_SECRET_HASH');
+$file=(string)getenv('SLS_FILE_AMI_USERNAME');
+$owned=\SLS\MassNotify\AmiUserOwnership::ownedNames(\FreePBX::Database(),$names,$hash,
+    (string)\FreePBX::Config()->get('AMPMGRUSER'),$file === '' ? null : $file);
+echo json_encode(['owned_names'=>$owned,'credential_sha256'=>$hash === '' ? null : $hash],JSON_THROW_ON_ERROR);
+exit(0);
+PHPAMIPLAN
+)" || return 1
+  printf '%s' "$ownership" | uninstall_ami_evidence prepare "$UNINSTALL_TRANSACTION_DIR" "$UNINSTALL_APPROVED_SOURCE" >/dev/null
+}
+
+verify_uninstall_runtime_ami() {
+  local transaction="$1" mode="${2:-normal}" plans names name output status rows='' result deadline=$((SECONDS+120))
+  plans="$(uninstall_ami_evidence plans "$transaction" "$mode")" || return 1
+  names="$(/usr/bin/python3 -I -c 'import json,sys;print("\n".join(json.loads(sys.argv[1])["names"]))' "$plans")" || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    output=''; status=124
+    if [ "$SECONDS" -lt "$deadline" ]; then
+      if output="$(asterisk -rx "manager show user $name" 2>/dev/null | /usr/bin/head -c 8193)"; then status=0; else status=$?; fi
+    fi
+    result="$(printf '%s' "$output" | uninstall_ami_evidence probe "$name" "$status")" || return 1
+    rows+="$result"$'\n'
+  done <<<"$names"
+  local evidence_mode=write
+  [ "$mode" != followup ] || evidence_mode=readonly
+  result="$(printf '%s' "$rows" | uninstall_ami_evidence finish "$transaction" "$plans" "$evidence_mode")" || return 1
+  UNINSTALL_AMI_CLASSIFICATION="$(/usr/bin/python3 -I -c 'import json,sys;print(json.loads(sys.argv[1])["classification"])' "$result")" || return 1
+  if [ "$mode" = followup ]; then printf '%s\n' "$result"; return 0; fi
+  case "$UNINSTALL_AMI_CLASSIFICATION" in
+    verified_absent) log 'Native AMI account-absence checks passed: every protected owned name is absent from the running Manager user inventory. Existing authenticated sessions were not inspected or disconnected.' ;;
+    daemon_absent) log 'Asterisk is absent. No current daemon credential is active; verify native AMI removal after the desired PBX startup and reload.' ;;
+    pending_unverified) log 'WARNING: native AMI removal is unverified. A loaded SLL Manager account may remain until a successful native PBX reload; software removal does not certify credential revocation.' ;;
+    *) return 1 ;;
+  esac
+  if [ "$UNINSTALL_AMI_CLASSIFICATION" != verified_absent ]; then
+    log "Preserved native removal evidence: $transaction. After the desired fwconsole reload, run: /bin/bash $UNINSTALL_APPROVED_SOURCE/bin/sls_mass_notify_uninstall.sh --verify-runtime $transaction"
+  fi
+}
+
 uninstall_usage() {
   printf '%s\n' \
     'Usage: sls_mass_notify_uninstall.sh' \
     '       sls_mass_notify_uninstall.sh --help' \
+    '       sls_mass_notify_uninstall.sh --verify-runtime RETAINED_UNINSTALL_TRANSACTION' \
     'Normal removal preserves SLL settings, media and delivery history.' \
     'For deliberate removal of retained data, use sudo slsconsole uninstall --purge.'
 }
 
 main() {
+  if [ "$#" -eq 2 ] && [ "$1" = --verify-runtime ]; then
+    [ "${EUID:-$(id -u)}" -eq 0 ] || { log 'Run native removal verification as root.'; return 1; }
+    admit_root_runtime || return 1
+    verify_uninstall_runtime_ami "$2" followup
+    return $?
+  fi
   if [ "$#" -gt 0 ]; then
     if [ "$#" -eq 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
       uninstall_usage
@@ -2195,6 +3249,7 @@ main() {
   capture_configured_ami_username
   UNINSTALL_TRANSACTION_DIR="$(uninstall_recovery_workspace sls-uninstall-transaction)"
   record_uninstall_stage prepared
+  prepare_uninstall_ami_plan
   log "Persistent uninstall transaction: $UNINSTALL_TRANSACTION_DIR"
   assert_uninstall_workers
   record_uninstall_stage services
@@ -2230,13 +3285,15 @@ main() {
   fi
   verify_freepbx_cleanup
   assert_uninstall_workers
+  verify_uninstall_runtime_ami "$UNINSTALL_TRANSACTION_DIR"
+  purge_uninstall_data
   record_uninstall_stage complete
   cleanup_recovery_signer
   trap - EXIT
   if [ "$PURGE_CONFIG" = "1" ]; then
-    log "SLL Mass Notify Server uninstall cleanup finished. Configuration and user data were purged."
+    log "SLL Mass Notify Server software removal finished. Configuration and user data were purged. Native AMI result: $UNINSTALL_AMI_CLASSIFICATION."
   else
-    log "SLL Mass Notify Server uninstall cleanup finished. Central config, media, delivery history and audit logs were preserved."
+    log "SLL Mass Notify Server software removal finished. Central config, media, delivery history and audit logs were preserved. Native AMI result: $UNINSTALL_AMI_CLASSIFICATION."
   fi
   if [ -e /etc/sls-mass-notify/config-keys.json ] || [ -L /etc/sls-mass-notify/config-keys.json ]; then
     log "Configuration recovery keys were retained at /etc/sls-mass-notify/config-keys.json, including after a data purge. Keep this protected keyring while older encrypted configurations or backups may still be needed."

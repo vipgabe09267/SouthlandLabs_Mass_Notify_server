@@ -1,8 +1,9 @@
 # SLL Mass Notify Server Control API
 
-This document describes the published `0.1.9-beta` correction, immutable
-reserved tag `release-0.1.9-beta`. Uppercase V0.1.9-beta and v0.1.10-beta releases remain
-withdrawn historical evidence. The API contract remains additive: notification
+This document describes the unpublished `0.2.0-beta` development candidate.
+The available published release remains `0.1.9-beta` at immutable tag
+`release-0.1.9-beta`.
+The API contract remains additive: notification
 payload schema **1** and desktop SSE protocol **2** are unchanged. Labs features
 require acceptance with actual devices, providers and clients before operational use.
 

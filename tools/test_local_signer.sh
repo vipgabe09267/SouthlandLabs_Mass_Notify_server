@@ -66,6 +66,8 @@ run_fixture_signer() {
   local force_file_race="${4:-0}"
 
   SLS_TEST_FORCE_FILE_RACE="$force_file_race" \
+  SLS_TEST_DIGEST_MODE="${5:-0}" \
+  SLS_TEST_SIGNATURE_RACE="${6:-0}" \
   SLS_TEST_RACED_MANIFEST="$FIXTURE_ROOT/raced-manifest.txt" \
   SLS_TEST_TRUST_HELPER="$TRUST_HELPER" \
   SLS_TEST_TRUST_ROOT="$TRUST_ROOT" \
@@ -102,7 +104,7 @@ if [ "$SLS_TEST_FORCE_FILE_RACE" = "1" ]; then
   signature_operation() {
     command /usr/bin/python3 -I "$TRUST_HELPER" signature-file --module "$MODULE" \
       --web-root "$FREEPBX_WEB_ROOT" --web-user "$FREEPBX_WEB_USER" --action "$1" "${@:2}" || return 1
-    if [ "$1" = "publish" ]; then
+    if [ "$1" = "publish-guarded" ]; then
       cp "$WORKDIR/module.plain" "$SLS_TEST_RACED_MANIFEST"
       printf '%s\n' 'changed after signing' >"$MODULE_DIR/payload.txt"
     fi
@@ -132,15 +134,22 @@ verify_published_signature() {
   timeout 45 runuser -u "$FREEPBX_WEB_USER" -- \
     env HOME="$FREEPBX_USER_HOME" PATH="$PATH" \
     gpg --homedir "$FREEPBX_GPG_HOME" --batch --status-fd 2 \
-    --output "$plaintext" --decrypt "$MODULE_SIG" 2>"$status_file"
-  grep -Fq '[GNUPG:] VALIDSIG ' "$status_file"
-  grep -Eq '\[GNUPG:\] TRUST_(ULTIMATE|FULLY)' "$status_file"
+    --decrypt "$MODULE_SIG" >"$plaintext" 2>"$status_file" || return 1
+  grep -Fq '[GNUPG:] VALIDSIG ' "$status_file" || return 1
+  grep -Eq '\[GNUPG:\] TRUST_(ULTIMATE|FULLY)' "$status_file" || return 1
   expected_hash="$(sha256sum "$MODULE_DIR/payload.txt" | awk '{print $1}')"
-  grep -Fqx "payload.txt = $expected_hash" "$plaintext"
+  grep -Fqx "payload.txt = $expected_hash" "$plaintext" || return 1
   printf '%s\n' '{"status":129,"details":[]}'
+  if [ "$SLS_TEST_SIGNATURE_RACE" = 1 ]; then
+    printf '%s\n' 'signature replaced during native verification' >"$MODULE_SIG"
+  fi
 }
 
-main
+if [ "$SLS_TEST_DIGEST_MODE" = 1 ]; then
+  run_signer "$MODULE" --verified-digest
+else
+  run_signer "$MODULE"
+fi
 RUN_SIGNER
 }
 
@@ -161,6 +170,10 @@ secret_key_count="$(
 [ "$secret_key_count" -eq 1 ]
 [ -s "${MODULE_DIR}/module.sig" ]
 [ "$(stat -c '%a %U:%G' "$GPG_HOME")" = "700 ${WEB_USER}:${WEB_GROUP}" ]
+run_fixture_signer 0 "$MODULE_NAME" 0 0 1 >"$FIXTURE_ROOT/digest.out" 2>"$FIXTURE_ROOT/digest.log"
+sha256sum "${MODULE_DIR}/module.sig" | cut -d' ' -f1 | cmp - "$FIXTURE_ROOT/digest.out"
+grep -Fxq '{"status":129,"details":[]}' "$FIXTURE_ROOT/digest.log"
+grep -Fxq '{"status":129,"details":[]}' "$FIXTURE_ROOT/signer-one.log"
 if find "$GPG_HOME" -xdev ! -user "$WEB_USER" -print -quit | grep -q .; then
   printf 'Signer did not repair all FreePBX GPG-home ownership.\n' >&2
   exit 1
@@ -168,6 +181,30 @@ fi
 
 # A failed verification must leave the previous trusted signature byte-for-byte.
 signature_hash_before="$(sha256sum "${MODULE_DIR}/module.sig" | awk '{print $1}')"
+cp -p "$MODULE_DIR/module.sig" "$FIXTURE_ROOT/prior.sig"
+if run_fixture_signer 0 "$MODULE_NAME" 0 0 1 1 >"$FIXTURE_ROOT/raced.out" 2>"$FIXTURE_ROOT/raced.log"; then
+  printf 'Signer returned a receipt for a signature replaced during native verification.\n' >&2
+  exit 1
+fi
+[ ! -s "$FIXTURE_ROOT/raced.out" ]
+grep -Fxq 'signature replaced during native verification' "$MODULE_DIR/module.sig"
+evidence="$(sed -n 's/.*Signature recovery evidence retained at \([^;]*\);.*/\1/p' "$FIXTURE_ROOT/raced.log" | tail -1)"
+[[ "$evidence" == /tmp/signerfixture-sls-local-sign.* && -f "$evidence/module.sig.publication" ]]
+cmp "$evidence/module.sig.previous" "$FIXTURE_ROOT/prior.sig"
+[ -s "$evidence/module.sig.candidate" ]
+find "$evidence" -depth -delete
+rm -- "$MODULE_DIR/module.sig"
+if run_fixture_signer 0 "$MODULE_NAME" 0 0 1 1 >"$FIXTURE_ROOT/raced-absent.out" 2>"$FIXTURE_ROOT/raced-absent.log"; then
+  printf 'Signer accepted a competing first signature.\n' >&2
+  exit 1
+fi
+[ ! -s "$FIXTURE_ROOT/raced-absent.out" ]
+grep -Fxq 'signature replaced during native verification' "$MODULE_DIR/module.sig"
+evidence="$(sed -n 's/.*Signature recovery evidence retained at \([^;]*\);.*/\1/p' "$FIXTURE_ROOT/raced-absent.log" | tail -1)"
+[[ "$evidence" == /tmp/signerfixture-sls-local-sign.* && -f "$evidence/module.sig.publication" ]]
+[ ! -e "$evidence/module.sig.previous" ] && [ -s "$evidence/module.sig.candidate" ]
+find "$evidence" -depth -delete
+cp -p "$FIXTURE_ROOT/prior.sig" "$MODULE_DIR/module.sig"
 if run_fixture_signer 1 >"${FIXTURE_ROOT}/forced-failure.log" 2>&1; then
   printf 'Signer accepted an injected verification failure.\n' >&2
   exit 1

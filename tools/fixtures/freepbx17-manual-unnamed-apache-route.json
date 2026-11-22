@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "vhosts": "*:80                   127.0.1.1 (/etc/apache2/sites-enabled/000-default.conf:1)",
+  "config": "Alias /icons/ \"/usr/share/apache2/icons/\"\n<Directory \"/usr/share/apache2/icons\">\n</Directory>\nAddHandler type-map var\n<FilesMatch \".+\\.ph(?:ar|p|tml)$\">\nSetHandler application/x-httpd-php\n</FilesMatch>\n<FilesMatch \".+\\.phps$\">\nSetHandler application/x-httpd-php-source\n</FilesMatch>\n<FilesMatch \"^\\.ph(?:ar|p|ps|tml)$\">\n</FilesMatch>\n<Location /server-status>\nSetHandler server-status\n</Location>\nListen 80\n<Directory />\n</Directory>\n<Directory /usr/share>\n</Directory>\n<Directory /var/www/>\n</Directory>\n<FilesMatch \"^\\.ht\">\n</FilesMatch>\nAlias /javascript /usr/share/javascript/\n<Directory \"/usr/share/javascript/\">\n</Directory>\n<VirtualHost *:80>\nDocumentRoot /var/www/html\n</VirtualHost>",
+  "public_host": "manual-pbx.audit.invalid",
+  "media_path": "/sls_mass_notify/media_probe_0123456789abcdef01234567.png",
+  "source_evidence_sha256": "d1f530071f001332d33f437d2ea6b5861d216912545ed6205e937484b0d4efc2",
+  "scope": "Actual sanitized Apache authority from disposable expert-manual FreePBX17/Debian12 after candidate12 rollback. Host input is a synthetic saved machine hostname, different from Apache inferred127.0.1.1. Publisher media rules are appended separately as a test projection, not observed pre-failure bytes."
+}

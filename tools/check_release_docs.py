@@ -66,9 +66,16 @@ def check(root=ROOT):
     digest = hashlib.sha256(
         (root / "tools/install_bootstrap.sh").read_bytes()
     ).hexdigest()
-    if (
-        digest + "  sls-bootstrap.sh" not in readme
-        or "sls-bootstrap.sh " + version not in readme
+    candidate_command = "sls-bootstrap.sh " + version in readme
+    published = record["published_version"]
+    published_tag = ("release-0.1.9-beta" if published == "0.1.9-beta" else
+                     ("slsmassnotifyserver-" if tuple(map(int, published[:-5].split('.'))) < (0,1,9) else "v") + published)
+    retained_published_commands = (status == "unpublished" and not candidate_command
+        and "sls-bootstrap.sh " + published in readme and published_tag in readme
+        and version in readme and "unpublished" in readme
+        and re.search(r"\b[0-9a-f]{64}  sls-bootstrap\.sh\b", readme) is not None)
+    if not retained_published_commands and (
+        digest + "  sls-bootstrap.sh" not in readme or not candidate_command
     ):
         raise ValueError("The README bootstrap checksum/version is stale.")
     security = (root / "SECURITY.md").read_text()

@@ -170,7 +170,9 @@ verify_phone_collector
 
     def test_main_checks_collector_readiness_after_freepbx_reload_before_static_verification(self):
         main=SOURCE.split('main() {',1)[1]
-        reload=main.index('SLS_MASS_NOTIFY_PRESERVE_PENDING=1 run_without_install_maintenance_lock fwconsole reload')
+        # fwconsole now supervises its native child while root holders retain
+        # the leases. Collector admission must still follow that full boundary.
+        reload=main.index('SLS_MASS_NOTIFY_PRESERVE_PENDING=1 fwconsole reload')
         verify=main.index('protected_install_phase verify',reload)
         self.assertIn('verify_phone_collector',main[reload:verify])
 
@@ -188,9 +190,13 @@ verify_phone_collector
         positions = [main.index(step) for step in ordered]
         self.assertEqual(positions, sorted(positions))
         service = source.split('remove_phone_collector_service() {', 1)[1].split('\n}\n', 1)[0]
-        self.assertLess(service.index('verify_uninstall_collector_unit'), service.index('systemctl stop'))
-        self.assertLess(service.index('systemctl stop'), service.index('inspect_uninstall_idle'))
-        self.assertLess(service.index('inspect_uninstall_idle'), service.index('systemctl disable'))
+        absent, managed = service.split('verify_uninstall_collector_unit "$unit" || return 1', 1)
+        self.assertLess(absent.index('absent_uninstall_collector_is_stopped'), absent.index('inspect_uninstall_idle'))
+        self.assertLess(absent.index('inspect_uninstall_idle'), absent.index('retire_stopped_uninstall_collector'))
+        stop = managed.index('systemctl stop')
+        final_idle = managed.index('inspect_uninstall_idle', stop)
+        retirement = managed.index('retire_stopped_uninstall_collector', final_idle)
+        self.assertLess(retirement, managed.index('systemctl disable'))
         self.assertLess(service.index('systemctl disable'), service.index('rm -- "$unit"'))
         self.assertIn('/usr/bin/timeout --kill-after=2 20 /usr/bin/systemctl stop', service)
         self.assertIn('/usr/bin/timeout --kill-after=2 20 /usr/bin/systemctl disable', service)

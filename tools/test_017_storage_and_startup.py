@@ -326,6 +326,7 @@ printf '%s %s %s %s\\n' "$fixture_status" "$fixture_checks" "$fixture_sleeps" "$
 fixture_allowed="$2"; fixture_mutations=0; fixture_admissions=0; fixture_startup=0
 log() { :; }
 sls_as_asterisk() { return 0; }
+sls_supervised_as_asterisk() { return 0; }
 private_apache2ctl() { printf 'rewrite_module setenvif_module\\n'; }
 systemctl() { return 0; }
 asterisk() { [[ "$*" = '-rx core show version' ]] || fixture_mutations=$((fixture_mutations+1)); }
@@ -460,16 +461,16 @@ os.open=replacing_open
             self.assertIn('changed during inspection',result.stderr)
 
     def test_signer_preserves_shared_parent_and_existing_lock_inode(self):
-        source=(ROOT/'slsmassnotifyserver/bin/sign_sls_mass_notify_local_sig.sh').read_text()
-        function=re.search(r'^acquire_signing_lock\(\) \{.*?(?=^prepare_signing_home\(\))',source,re.M|re.S).group(0)
+        signer = ROOT / 'slsmassnotifyserver/bin/sign_sls_mass_notify_local_sig.sh'
         with tempfile.TemporaryDirectory() as directory:
             parent=Path(directory)/'shared';parent.mkdir();parent.chmod(0o1777)
             lock=parent/'signing.lock';lock.touch(mode=0o600);inode=lock.stat().st_ino
-            harness='set -euo pipefail\nlog() { :; }\nvalidate_absolute_path() { :; }\n'+function+'\nLOCK_FILE="$1"; acquire_signing_lock\n'
-            result=subprocess.run(['bash','-c',harness,'fixture',str(lock)],capture_output=True,text=True,timeout=4)
+            command = ['bash', '-c', 'source "$1"; LOCK_FILE="$2"; acquire_signing_lock',
+                       'fixture', str(signer), str(lock)]
+            result=subprocess.run(command,capture_output=True,text=True,timeout=4)
             self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(parent.stat().st_mode&0o7777,0o1777);self.assertEqual(lock.stat().st_ino,inode)
             lock.unlink();os.mkfifo(lock)
-            result=subprocess.run(['bash','-c',harness,'fixture',str(lock)],capture_output=True,text=True,timeout=4)
+            result=subprocess.run(command,capture_output=True,text=True,timeout=4)
             self.assertNotEqual(result.returncode,0);self.assertEqual(parent.stat().st_mode&0o7777,0o1777)
 
     def test_updater_display_writer_drops_root_and_rejects_links(self):

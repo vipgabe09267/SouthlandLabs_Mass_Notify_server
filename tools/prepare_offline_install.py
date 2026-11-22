@@ -74,7 +74,37 @@ def members(body,root):
     return result
 
 
-def validate(directory):
+def selected_optional_voices(contents, selected):
+    if (not isinstance(selected, (list, tuple)) or len(selected)>2
+            or any(not isinstance(name,str) for name in selected) or len(set(selected))!=len(selected)):
+        raise ValueError('Select at most two distinct optional voice packs')
+    if not selected: return {}
+    catalogue=json.loads(contents['bin/sls_mass_notify/piper-optional-voices.json'])
+    if not isinstance(catalogue,dict) or type(catalogue.get('schema')) is not int or catalogue['schema']!=1 or not isinstance(catalogue.get('voices'),list) or len(catalogue['voices'])>100:
+        raise ValueError('Signed optional voice catalogue is invalid')
+    voices={}
+    for voice in catalogue['voices']:
+        if not isinstance(voice,dict) or not isinstance(voice.get('id'),str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',voice['id']) or voice['id'] in voices:
+            raise ValueError('Signed optional voice identity is invalid or duplicated')
+        voices[voice['id']]=voice
+    files={}
+    for name in selected:
+        voice=voices.get(name)
+        if voice is None: raise ValueError('Optional voice is not in the signed candidate catalogue: '+name)
+        entries=voice.get('files')
+        if not isinstance(entries,dict) or set(entries)!={name+'.onnx',name+'.onnx.json'}:
+            raise ValueError('Signed optional voice requires its exact model/configuration pair: '+name)
+        for filename,record in entries.items():
+            if (not isinstance(record,dict) or not isinstance(record.get('sha256'),str)
+                    or not re.fullmatch(r'[a-f0-9]{64}',record['sha256']) or type(record.get('size')) is not int
+                    or not 0<record['size']<=134217728):
+                raise ValueError('Signed optional voice file metadata is invalid: '+filename)
+            files[filename]=record
+    return files
+
+
+def validate(directory, optional_voice_packs=(), required_upstream_versions=None):
+    directory=Path(directory)
     manifest=release(directory)
     contents=members(read(directory/manifest['package'],54525952),'slsmassnotifyserver')
     locks=b'\n'.join(contents['bin/sls_mass_notify/'+name] for name in ('piper-packaging.lock','piper-requirements.lock'))
@@ -92,20 +122,42 @@ def validate(directory):
     for filename,digest in voices.items():
         if hashlib.sha256(read(directory/'assets/voices'/filename,67108864)).hexdigest()!=digest:
             raise ValueError('Offline voice does not match the signed candidate catalogue: '+filename)
+    optional_files=selected_optional_voices(contents,optional_voice_packs)
+    for filename,record in optional_files.items():
+        body=read(directory/'assets/voices'/filename,134217728)
+        if len(body)!=record['size'] or hashlib.sha256(body).hexdigest()!=record['sha256']:
+            raise ValueError('Offline optional voice differs from its signed size/hash: '+filename)
     # Upgrade prerequisites remain verified by the installer's pinned GPG
     # upstream workflow; this check rejects surprising bundle paths early.
     upstream=directory/'upstream'
-    if not upstream.is_dir() or len(list(upstream.iterdir()))>20: raise ValueError('Supply the exact installed Dashboard/Framework signed upstream packages in upstream/')
-    for package in upstream.iterdir():
+    if not upstream.is_dir(): raise ValueError('Supply the exact installed Dashboard/Framework signed upstream packages in upstream/')
+    packages=list(upstream.iterdir())
+    if not 2<=len(packages)<=20: raise ValueError('Supply both Dashboard and Framework signed upstream packages; an empty catalogue is not verification')
+    upstream_versions={}
+    for package in packages:
         if not re.fullmatch(r'(?:dashboard|framework)-17\.[0-9]+(?:\.[0-9]+){1,3}\.tgz\.gpg',package.name): raise ValueError('Unexpected upstream package name')
         read(package,67108864)
-    verify_upstream(list(upstream.iterdir()),contents)
+        module,version=package.name[:-8].split('-',1)
+        upstream_versions.setdefault(module,[]).append(version)
+    if set(upstream_versions)!={'dashboard','framework'}: raise ValueError('Both Dashboard and Framework source identities are required')
+    required={} if required_upstream_versions is None else required_upstream_versions
+    if not isinstance(required,dict) or not set(required)<={'dashboard','framework'}:
+        raise ValueError('Unknown required upstream module')
+    for module,version in required.items():
+        if not isinstance(version,str) or not re.fullmatch(r'17\.[0-9]+(?:\.[0-9]+){1,3}',version) or version not in upstream_versions[module]:
+            raise ValueError('The exact required upstream version is absent: '+module)
+    verify_upstream(packages,contents)
     verify_wheel_resolution(directory/'assets/wheels',contents)
     previous=directory/'previous'
     if previous.exists(): release(previous)
     return {'schema':1,'ok':True,'version':manifest['version'],'wheel_count':len(wheels),'voice_count':len(voices),
             'upstream_count':len(list(upstream.iterdir())),'previous_release':previous.exists(),
-            'debian_packages_included':False,'wheel_resolution_verified':True,'upstream_signatures_verified':True}
+            'debian_packages_included':False,'wheel_resolution_verified':True,'upstream_signatures_verified':True,
+            'optional_voice_packs':list(optional_voice_packs),'optional_voice_file_count':len(optional_files),
+            'provided_upstream_versions':{name:sorted(versions) for name,versions in upstream_versions.items()},
+            'target_upstream_versions_verified':dict(required),
+            'target_requirements_complete':set(required)=={'dashboard','framework'},
+            'installed_publisher_policy_check':'required independently by the installer'}
 
 
 def verify_wheel_resolution(wheelhouse,contents):
@@ -113,7 +165,11 @@ def verify_wheel_resolution(wheelhouse,contents):
         scratch=Path(name)
         for filename in ('piper-packaging.lock','piper-requirements.lock'):
             lock=scratch/filename;lock.write_bytes(contents['bin/sls_mass_notify/'+filename])
+            # Even a dry run otherwise targets Debian's externally managed
+            # system Python. Keep resolution in this disposable destination;
+            # --dry-run still prevents installation into it.
             result=subprocess.run(['/usr/bin/python3','-I','-m','pip','--isolated','install','--dry-run','--ignore-installed',
+                '--target',str(scratch/'target'),
                 '--only-binary=:all:','--require-hashes','--no-input','--no-index','--find-links',str(wheelhouse),'-r',str(lock)],
                 stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,timeout=120)
             if result.returncode: raise ValueError('Offline wheels do not resolve the complete compatible signed lock: '+filename)
@@ -168,8 +224,12 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory',type=Path)
     parser.add_argument('--print-environment',action='store_true')
+    parser.add_argument('--optional-voice-pack',action='append',default=[],help='Validate each optional pack selected in the target configuration; does not change selection')
+    parser.add_argument('--framework-version',help='Require the exact Framework source version for the target')
+    parser.add_argument('--dashboard-version',help='Require the exact Dashboard source version for the target')
     args=parser.parse_args();directory=args.directory.absolute()
-    result=validate(directory)
+    required={name:version for name,version in (('framework',args.framework_version),('dashboard',args.dashboard_version)) if version is not None}
+    result=validate(directory,args.optional_voice_pack,required)
     if args.print_environment:
         values=installer_environment(directory)
         for key,value in values.items(): print('export '+key+'='+shlex.quote(value))

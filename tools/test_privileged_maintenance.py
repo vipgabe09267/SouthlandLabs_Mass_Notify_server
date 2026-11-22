@@ -13,6 +13,81 @@ REPAIR = SOURCE[SOURCE.index('repair_ok=1\n'):]
 PRIVILEGED_HELPER = '/usr/local/bin/sls_mass_notify/sls_privileged_install.py'
 
 class ProtectedMaintenance(unittest.TestCase):
+    def stock_integration(self, disposition='due', reconcile_status=0, signer_output='valid'):
+        with tempfile.TemporaryDirectory(prefix='sls-stock-automation-') as folder:
+            base = Path(folder)
+            stock = base/'modules'
+            for module in ('framework','dashboard'):
+                (stock/module).mkdir(parents=True)
+            for relative in ('sections/SlsMassNotifyAnnouncement.class.php', 'views/sections/sls-mass-notify-announcement.php'):
+                for source in (base/'sll/dashboard', stock/'dashboard'):
+                    target = source/relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text('existing authenticated widget\n')
+            (base/'menu').write_text('<?php // stock upstream menu, no SLL insertion\n')
+            block = SOURCE[SOURCE.index('# Dashboard and Framework upgrades'):SOURCE.index('claim_request()')]
+            block = block.replace('/var/www/html/admin/modules/',str(stock)+'/')
+            script = '''set -eu
+cd "$1"
+exec {LOG_FD}>>log
+INTEGRATION_REPAIR_FILE="$1/retry"; MODULE_DIR="$1/sll"; DASHBOARD_DIR="$1/modules/dashboard"; MENU_FILE="$1/menu"
+SIGNER=fixture-signer
+safe_single_regular_file() { [ -f "$1" ]; }
+log() { echo "$*" >>log; }
+mark_integration_retry() { touch retry; }
+clear_integration_retry() { rm -f retry; }
+acquire_mutation_coordination() { return 0; }
+release_mutation_coordination() { return 0; }
+verify_installed_sls_module() { return 0; }
+verify_mutation_idle() { return 0; }
+stock_maintenance_control() {
+    echo "$1" >>actions
+    if [[ "$1" = complete ]]; then
+        [[ "$2" = --verified-signatures && "$3" = "$(printf 'a%.0s' {1..64})" && "$4" = "$(printf 'b%.0s' {1..64})" ]]
+        return
+    fi
+    case "$1" in probe) echo "$STOCK_PLAN";; reconcile) return "$RECONCILE_STATUS";; esac
+    return 0
+}
+run_without_maintenance_lock() {
+    if [[ "$1" == stock_maintenance_control ]]; then "$@"; return; fi
+    if [[ " $* " == *" fixture-signer "* ]]; then
+        [[ "${!#}" = --verified-digest ]] || return 1
+        local a=("$@"); local module="${a[-2]}"
+        echo "signed $module" >>actions
+        if [[ "$SIGNER_OUTPUT" != valid ]]; then echo "$SIGNER_OUTPUT"; return; fi
+        if [[ "$module" = dashboard ]]; then printf 'a%.0s' {1..64}; else printf 'b%.0s' {1..64}; fi
+    else echo "published widgets" >>actions; fi
+}
+''' + block
+            shell = base/'check.sh'; shell.write_text(script)
+            result = subprocess.run(['bash',str(shell),str(base)], env={**os.environ, 'STOCK_PLAN':disposition,
+                'RECONCILE_STATUS':str(reconcile_status), 'SIGNER_OUTPUT':signer_output}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return ((base/'actions').read_text().splitlines() if (base/'actions').exists() else [],
+                    (base/'retry').exists())
+
+    def test_stock_change_triggers_signing_with_intact_widgets_and_original_framework_menu(self):
+        actions, retry = self.stock_integration()
+        self.assertIn('reconcile',actions)
+        self.assertLess(actions.index('reconcile'),actions.index('signed framework'))
+        self.assertIn('complete',actions)
+        self.assertFalse(retry)
+
+    def test_unusable_signer_output_keeps_retry_without_stock_completion(self):
+        actions, retry = self.stock_integration(signer_output='unverified status')
+        self.assertTrue(retry)
+        self.assertIn('failed',actions)
+        self.assertNotIn('complete',actions)
+
+    def test_failed_stock_review_never_publishes_widgets_or_signatures_and_does_not_retry_each_minute(self):
+        actions, retry = self.stock_integration(reconcile_status=1)
+        self.assertNotIn('published widgets',actions)
+        self.assertNotIn('signed framework',actions)
+        self.assertIn('failed',actions)
+        self.assertTrue(retry)
+        self.assertEqual(self.stock_integration(disposition='waiting')[0],['probe'])
+
     def run_repair(self, failure=''):
         with tempfile.TemporaryDirectory(prefix='sls-protected-repair-') as name:
             base=Path(name)
@@ -108,11 +183,13 @@ fail_maintenance() { log "$*"; exit "$3"; }
         with tempfile.TemporaryDirectory(prefix='sls-guard-release-') as name:
             base=Path(name);runtime=base/'runtime';runtime.mkdir()
             sentinel=base/'released'
-            (runtime/'sls_install_guard.py').write_text('''import os,sys
-print("ready",flush=True)
-message=sys.stdin.readline()
-with open(os.environ["GUARD_SENTINEL"],"w",encoding="utf-8") as output: output.write(message)
-''')
+            guard_source=(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_install_guard.py').read_text()
+            release="            if command in (b'', b'release\\n'):\n"
+            self.assertEqual(guard_source.count(release),1)
+            observed="""            if command == b'release\\n':
+                with open(os.environ['GUARD_SENTINEL'],'w',encoding='utf-8') as output: output.write('release\\n')
+"""
+            (runtime/'sls_install_guard.py').write_text(guard_source.replace(release,observed+release,1))
             (runtime/'sls_install_idle.py').write_text('print("{}")\n')
             script=definitions.replace('/run/sls-maintenance-idle.XXXXXXXX',str(base/'idle.XXXXXXXX'))+'''\n
 RUNTIME_DIR="$1/runtime"

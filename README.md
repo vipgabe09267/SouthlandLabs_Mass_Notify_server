@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. The software remains **0.1.9-beta**, now the available published prerelease, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. This branch develops **0.2.0-beta**, an **unpublished** candidate. Private development checks cover the installer on selected PBX configurations. The available published prerelease remains **0.1.9-beta**, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused.
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 

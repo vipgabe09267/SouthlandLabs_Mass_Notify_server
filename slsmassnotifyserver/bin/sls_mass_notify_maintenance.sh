@@ -21,10 +21,12 @@ LOG_FILE="/var/log/sls_mass_notify.log"
 LOCK_FILE="/run/lock/sls-mass-notify-maintenance.lock"
 MODULE_DIR="/var/www/html/admin/modules/slsmassnotifyserver"
 DASHBOARD_DIR="/var/www/html/admin/modules/dashboard"
-MENU_FILE="/var/www/html/admin/views/menu_items.php"
 ACTIVE_ACTION=""
 FAILURE_RECORDED=0
 LOG_FD=""
+MUTATION_RESPONSE_FD=""
+MUTATION_COORDINATION_REQUIRED=0
+declare -a MUTATION_LEASE_FDS=()
 
 # Open only a root-owned regular file through trusted directories. Creation is
 # exclusive; an existing file is never truncated or written before fd identity
@@ -166,10 +168,89 @@ close_inherited_maintenance_lock_fds() {
 # background helpers behind receive no duplicate descriptor, preventing a GPG
 # key refresh from keeping repair/update/uninstall blocked after this run exits.
 run_without_maintenance_lock() (
-  close_inherited_maintenance_lock_fds
-  if [ -n "${MUTATION_KEEPALIVE_FD:-}" ]; then exec {MUTATION_KEEPALIVE_FD}>&-; fi
-  "$@"
+  [ "$MUTATION_COORDINATION_REQUIRED" != 1 ] || assert_mutation_coordination || return 1
+  trap ':' TERM INT HUP
+  (
+    trap - TERM INT HUP
+    # Only this fixed Python control receives the inherited maintenance flock.
+    # Its stock operation checks the descriptor and closes it to subprocesses.
+    if [ "$1" != stock_maintenance_control ]; then close_inherited_maintenance_lock_fds; fi
+    close_mutation_worker_descriptors
+    if [ -n "${MUTATION_KEEPALIVE_FD:-}" ]; then exec {MUTATION_KEEPALIVE_FD}>&-; fi
+    if [ -n "${MUTATION_RESPONSE_FD:-}" ]; then exec {MUTATION_RESPONSE_FD}<&-; fi
+    "$@"
+  ) <&0 &
+  child=$!; status=0
+  while true; do
+    if wait "$child"; then status=0; break; else status=$?; fi
+    kill -0 "$child" 2>/dev/null || break
+  done
+  exit "$status"
 )
+
+close_mutation_worker_descriptors() {
+  local descriptor
+  for descriptor in "${MUTATION_LEASE_FDS[@]}"; do exec {descriptor}>&-; done
+  MUTATION_LEASE_FDS=()
+}
+
+prepare_mutation_worker_descriptors() {
+  local prepare_pid prepare_input prepare_output response mapping descriptor remote status=0
+  local -a remote_fds=()
+  coproc SLS_MAINTENANCE_PREPARE {
+    exec /usr/bin/python3 -I "$RUNTIME_DIR/sls_install_guard.py" --data "${CONFIG_FILE%/*}" prepare
+  }
+  prepare_pid="${SLS_MAINTENANCE_PREPARE_PID:-}"
+  prepare_input="${SLS_MAINTENANCE_PREPARE[1]:-}"; prepare_output="${SLS_MAINTENANCE_PREPARE[0]:-}"
+  if [ -z "$prepare_pid" ] || [ -z "$prepare_input" ] || [ -z "$prepare_output" ] \
+    || ! exec {prepare_input}>&"$prepare_input" || ! exec {prepare_output}<&"$prepare_output"; then
+    status=1
+  elif ! IFS= read -r -t 125 response <&"$prepare_output" || [[ "$response" != 'prepared '* ]]; then
+    status=1
+  else
+    mapping="$(/usr/bin/python3 -I - "$prepare_pid" "${response#prepared }" <<'PYMAINTENANCEFDS'
+import json, sys
+if len(sys.argv[2])>16384: raise SystemExit('Worker descriptor preparation exceeds bound')
+value=json.loads(sys.argv[2])
+if (type(value) is not dict or set(value)!={'schema','pid','fds'} or type(value['schema']) is not int or value['schema']!=1
+        or type(value['pid']) is not int or value['pid']!=int(sys.argv[1]) or type(value['fds']) is not list
+        or not 1<=len(value['fds'])<=1100 or any(type(fd) is not int or not 3<=fd<=9999999 for fd in value['fds'])
+        or len(set(value['fds']))!=len(value['fds'])):
+    raise SystemExit('Invalid prepared worker descriptors')
+for fd in value['fds']: print(fd)
+PYMAINTENANCEFDS
+    )" || status=1
+    if [ "$status" -eq 0 ]; then
+      mapfile -t remote_fds <<<"$mapping"
+      for remote in "${remote_fds[@]}"; do
+        if ! exec {descriptor}<"/proc/$prepare_pid/fd/$remote"; then status=1; break; fi
+        MUTATION_LEASE_FDS+=("$descriptor")
+      done
+    fi
+  fi
+  if [ -n "$prepare_input" ]; then
+    ( trap '' PIPE; printf 'release\n' >&"$prepare_input" ) 2>/dev/null || true
+    exec {prepare_input}>&-
+  fi
+  if [ -n "$prepare_output" ]; then exec {prepare_output}<&-; fi
+  [ -z "$prepare_pid" ] || wait "$prepare_pid" 2>/dev/null || status=1
+  if [ "$status" -ne 0 ]; then
+    close_mutation_worker_descriptors
+    log 'The authenticated maintenance guard could not prepare retained worker descriptors; no mutation started.'
+    return 1
+  fi
+}
+
+assert_mutation_coordination() {
+  local status
+  [ -n "${MUTATION_GUARD_PID:-}" ] && [ -n "${MUTATION_KEEPALIVE_FD:-}" ] \
+    && [ -n "${MUTATION_RESPONSE_FD:-}" ] && kill -0 "$MUTATION_GUARD_PID" 2>/dev/null \
+    && ( trap '' PIPE; printf 'check\n' >&"$MUTATION_KEEPALIVE_FD" ) 2>/dev/null \
+    && IFS= read -r -t 5 status <&"$MUTATION_RESPONSE_FD" && [ "$status" = checked ] || {
+      log 'Maintenance worker leases could not be confirmed; further mutations stopped and evidence was preserved.'
+      return 1
+    }
+}
 
 # Admit the protected helper before importing or executing any runtime Python.
 # The helper then verifies all root-executable SLL bytes against the enrolled
@@ -208,12 +289,15 @@ acquire_mutation_coordination() {
   MUTATION_VERIFIED=0
   MUTATION_BASELINE_DIR="$(mktemp -d /run/sls-maintenance-idle.XXXXXXXX)" || return 1
   chmod 0700 "$MUTATION_BASELINE_DIR" || { release_mutation_coordination; return 1; }
+  prepare_mutation_worker_descriptors || { release_mutation_coordination; return 1; }
+  local inherited
+  inherited="$(IFS=,; printf '%s' "${MUTATION_LEASE_FDS[*]}")"
   coproc SLS_MAINTENANCE_GUARD {
-    /usr/bin/python3 -I "$RUNTIME_DIR/sls_install_guard.py" --data "${CONFIG_FILE%/*}" --settings hold
+    exec /usr/bin/python3 -I "$RUNTIME_DIR/sls_install_guard.py" --data "${CONFIG_FILE%/*}" --settings --inherited-fds "$inherited" hold
   }
   MUTATION_GUARD_PID="$SLS_MAINTENANCE_GUARD_PID"
   local status guard_read_fd="${SLS_MAINTENANCE_GUARD[0]}" guard_write_fd="${SLS_MAINTENANCE_GUARD[1]}"
-  if ! exec {MUTATION_KEEPALIVE_FD}>&"$guard_write_fd"; then
+  if ! exec {MUTATION_KEEPALIVE_FD}>&"$guard_write_fd" || ! exec {MUTATION_RESPONSE_FD}<&"$guard_read_fd"; then
     exec {guard_read_fd}<&- {guard_write_fd}>&-
     release_mutation_coordination
     return 1
@@ -221,12 +305,13 @@ acquire_mutation_coordination() {
   # The duplicate above is the sole parent-side keepalive. Leaving Bash's
   # original coprocess writer open prevents EOF and can deadlock release/wait.
   exec {guard_write_fd}>&-
-  if ! IFS= read -r -t 125 status <&"$guard_read_fd" || [ "$status" != ready ]; then
+  if ! IFS= read -r -t 125 status <&"$MUTATION_RESPONSE_FD" || [ "$status" != ready ]; then
     exec {guard_read_fd}<&-
     release_mutation_coordination
     return 1
   fi
   exec {guard_read_fd}<&-
+  MUTATION_COORDINATION_REQUIRED=1
   if ! run_without_maintenance_lock /usr/bin/timeout --signal=TERM --kill-after=5 120 \
     /usr/bin/python3 -I "$RUNTIME_DIR/sls_install_idle.py" --data "${CONFIG_FILE%/*}" \
     inspect --repair-collector >"$MUTATION_BASELINE_DIR/before.json"; then
@@ -235,6 +320,7 @@ acquire_mutation_coordination() {
   fi
   chmod 0600 "$MUTATION_BASELINE_DIR/before.json" || { release_mutation_coordination; return 1; }
   MUTATION_CONFIG_BEFORE="$(mutation_config_fingerprint)" || { release_mutation_coordination; return 1; }
+  assert_mutation_coordination || { release_mutation_coordination; return 1; }
   MUTATION_STARTED=1
 }
 
@@ -288,7 +374,7 @@ PYCONFIG
 }
 
 verify_mutation_idle() {
-  [ -n "${MUTATION_GUARD_PID:-}" ] && kill -0 "$MUTATION_GUARD_PID" 2>/dev/null || return 1
+  assert_mutation_coordination || return 1
   local after
   after="$(mutation_config_fingerprint)" || return 1
   [ "$after" = "$MUTATION_CONFIG_BEFORE" ] || {
@@ -298,6 +384,7 @@ verify_mutation_idle() {
   run_without_maintenance_lock /usr/bin/timeout --signal=TERM --kill-after=5 120 \
     /usr/bin/python3 -I "$RUNTIME_DIR/sls_install_idle.py" --data "${CONFIG_FILE%/*}" \
     inspect --baseline "$MUTATION_BASELINE_DIR/before.json" || return 1
+  assert_mutation_coordination || return 1
   MUTATION_VERIFIED=1
 }
 
@@ -325,6 +412,9 @@ release_mutation_coordination() {
     wait "$guard_pid" 2>/dev/null || true
   fi
   MUTATION_GUARD_PID=""
+  if [ -n "${MUTATION_RESPONSE_FD:-}" ]; then exec {MUTATION_RESPONSE_FD}<&-; MUTATION_RESPONSE_FD=""; fi
+  close_mutation_worker_descriptors
+  MUTATION_COORDINATION_REQUIRED=0
   if [ -n "${MUTATION_BASELINE_DIR:-}" ]; then
     if [ "${MUTATION_STARTED:-0}" -eq 1 ] && [ "${MUTATION_VERIFIED:-0}" -ne 1 ]; then
       log "Preserved pre-maintenance idle evidence: $MUTATION_BASELINE_DIR/before.json"
@@ -645,8 +735,8 @@ safe_single_regular_file() {
 
 mark_integration_retry() {
   write_status_json maintenance "$INTEGRATION_REPAIR_FILE" "integration" "retry" \
-    "Dashboard/menu integration signing must be retried." "integration_signing_failed" 1 \
-    || log "Unable to record the required dashboard/menu signing retry."
+    "FreePBX module signing is pending. Review /var/log/sls_mass_notify.log and the protected stock-maintenance-review.json when present." "integration_signing_failed" 1 \
+    || log "Unable to record the required FreePBX module signing retry."
 }
 
 clear_integration_retry() {
@@ -654,6 +744,12 @@ clear_integration_retry() {
     safe_single_regular_file "$INTEGRATION_REPAIR_FILE" || return 1
     rm -f -- "$INTEGRATION_REPAIR_FILE"
   fi
+}
+
+stock_maintenance_control() {
+  /usr/bin/timeout --signal=TERM --kill-after=10 360 \
+    /usr/bin/python3 -I "$RUNTIME_DIR/sls_upgrade_trust.py" \
+    --coordination-lock "$LOCK_FILE" --coordination-fd "$MAINTENANCE_LOCK_FD" --maintenance-stock "$@"
 }
 announcement_worker="$RUNTIME_DIR/sls_mass_notify_announcement_worker.php"
 if [ -r "$announcement_worker" ]; then
@@ -702,9 +798,18 @@ if [ -r "$MODULE_DIR/EnterpriseIdentityStore.php" ]; then
     || log "Expired Enterprise Labs state could not be compacted; it will retry during the next maintenance cycle."
 fi
 
-# Dashboard and Framework upgrades can replace the two managed widget files or
-# the menu ordering hook. Detect that drift and restore only those integration
-# points from the installed module, then refresh their trusted local signatures.
+# Dashboard and Framework upgrades can change module versions and signatures
+# independently of the two SLL Dashboard widgets.
+record_stock_failure() {
+  local phase
+  if ! phase="$(run_without_maintenance_lock stock_maintenance_control failed 2>&"$LOG_FD")"; then
+    log "FreePBX stock verification could not save its retry state. Review the maintenance log."
+  elif [ "$phase" = transition ]; then
+    log "FreePBX stock changed during verification. Maintenance will recheck the update after a bounded delay."
+  else
+    log "FreePBX stock verification failed. Review /var/lib/sls-mass-notify-trust/stock-maintenance-review.json when present. Unchanged failures are retried after 24 hours."
+  fi
+}
 integration_drift=0
 if safe_single_regular_file "$INTEGRATION_REPAIR_FILE"; then
   integration_drift=1
@@ -720,50 +825,67 @@ for relative_path in sections/SlsMassNotifyAnnouncement.class.php views/sections
     integration_drift=1
   fi
 done
-if ! safe_single_regular_file "$MENU_FILE" \
-  || ! /usr/bin/timeout --signal=KILL 5 /usr/bin/grep -Fq -- \
-    'SLS Mass Notifications menu placement:' "$MENU_FILE"; then
-  integration_drift=1
+stock_options=()
+if [ "$integration_drift" -eq 1 ]; then stock_options+=(--integration-drift); fi
+integration_drift=0
+if stock_plan="$(run_without_maintenance_lock stock_maintenance_control probe "${stock_options[@]}" 2>&"$LOG_FD")"; then
+  if [ "$stock_plan" = due ]; then integration_drift=1; fi
+else
+  log "FreePBX stock approval could not be inspected. Review the maintenance log."
 fi
 if [ "$integration_drift" -eq 1 ] && ! acquire_mutation_coordination >&"$LOG_FD" 2>&1; then
   integration_drift=0
   log "Dashboard/menu repair deferred: active delivery, paging, or configuration editing did not become safely idle."
 fi
+if [ "$integration_drift" -eq 1 ] && ! run_without_maintenance_lock stock_maintenance_control reserve >&"$LOG_FD" 2>&1; then
+  integration_drift=0
+  log "FreePBX stock review could not save its protected retry state."
+  release_mutation_coordination
+fi
 if [ "$integration_drift" -eq 1 ] && ! verify_installed_sls_module >&"$LOG_FD" 2>&1; then
   integration_drift=0
+  record_stock_failure
   log "Dashboard/menu repair deferred: the installed SLL module differs from its authenticated publisher inventory. Run Repair Installation from a verified release."
   release_mutation_coordination
 fi
 if [ "$integration_drift" -eq 1 ]; then
-  log "FreePBX update drift detected; restoring Mass Notify dashboard/menu integration"
+  log "Checking FreePBX stock changes against signed packages and reviewed local files."
   integration_ok=1
-  if run_without_maintenance_lock /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- \
+  verified_signatures=()
+  if ! run_without_maintenance_lock stock_maintenance_control reconcile >&"$LOG_FD" 2>&1; then
+    integration_ok=0
+  elif run_without_maintenance_lock /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- \
     /usr/bin/timeout --signal=TERM --kill-after=10 300 /usr/bin/env SLS_MASS_NOTIFY_DEFER_SIGNING=1 \
     /usr/bin/php -r 'require "/etc/freepbx.conf"; \FreePBX::Create()->Slsmassnotifyserver->repairUpdateSensitiveIntegration(); exit(0);' >&"$LOG_FD" 2>&1; then
     # Widget/menu files are web-account data. Do not invoke root FreePBX
     # bootstrap or a global ownership sweep to repair these two UI hooks.
     for module in dashboard framework; do
-      [ -d "/var/www/html/admin/modules/$module" ] || continue
-      run_without_maintenance_lock /usr/bin/timeout --signal=TERM --kill-after=10 360 \
-        "$SIGNER" "$module" >&"$LOG_FD" 2>&1 \
-        || { integration_ok=0; log "Unable to refresh local signature for $module"; }
+      if verified_digest="$(run_without_maintenance_lock /usr/bin/timeout --signal=TERM --kill-after=10 360 \
+        "$SIGNER" "$module" --verified-digest 2>&"$LOG_FD")" && [[ "$verified_digest" =~ ^[0-9a-f]{64}$ ]]; then
+        verified_signatures+=("$verified_digest")
+      else
+        integration_ok=0
+        log "Unable to verify the signature for $module."
+      fi
     done
   else
     integration_ok=0
-    log "Automatic dashboard/menu integration repair failed; it will retry on the next maintenance run"
+    log "Automatic Dashboard integration repair failed."
   fi
   if ! verify_mutation_idle >&"$LOG_FD" 2>&1; then
     mark_integration_retry
+    record_stock_failure
     log "Dashboard/menu repair idle verification failed; preserve delivery history and review the maintenance log."
     release_mutation_coordination
     exit 1
   fi
   release_mutation_coordination
-  if [ "$integration_ok" -eq 1 ] && clear_integration_retry; then
-    log "Mass Notify dashboard/menu integration restored after FreePBX update drift"
+  if [ "$integration_ok" -eq 1 ] && clear_integration_retry \
+    && run_without_maintenance_lock stock_maintenance_control complete --verified-signatures "${verified_signatures[@]}" >&"$LOG_FD" 2>&1; then
+    log "FreePBX stock approvals and Dashboard integration signatures verified."
   else
     mark_integration_retry
-    log "Automatic dashboard/menu integration repair failed; runtime permissions or signatures require attention and will be retried."
+    record_stock_failure
   fi
 fi
 

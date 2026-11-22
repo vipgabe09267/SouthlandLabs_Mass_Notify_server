@@ -8,6 +8,7 @@ timezone, never commands, paths, service names or executable contents. No operat
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from contextlib import contextmanager, nullcontext
 import ctypes
 import fcntl
@@ -25,6 +26,7 @@ import time
 import stat
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
 # -I ignores PYTHONDONTWRITEBYTECODE. Authenticated source generations must never
 # acquire interpreter-generated files when importing the adjacent trust helper.
@@ -625,20 +627,175 @@ class Files:
         finally: os.close(root)
 
 
-def runner(arguments, *, timeout=30, input=None, allowed=(0,)):
+PRIVATE_INSTALL_TEMP = '/var/spool/sls-mass-notify-installer-tmp'
+
+
+def _private_spool_parent(root):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root = Path(root)
+    if root.resolve() != root:
+        raise ValueError('private installer workspace IO root is not canonical')
+    descriptor = os.open(root, flags)
+    try:
+        for component in ('var', 'spool'):
+            before = os.fstat(descriptor)
+            if before.st_uid != 0 or before.st_mode & 0o022:
+                raise ValueError('unsafe private installer workspace ancestor')
+            named = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            child = os.open(component, flags, dir_fd=descriptor)
+            opened = os.fstat(child)
+            if (named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode) != (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_gid, opened.st_mode):
+                os.close(child)
+                raise ValueError('private installer workspace ancestor changed')
+            os.close(descriptor)
+            descriptor = child
+        parent = os.fstat(descriptor)
+        if parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe private installer workspace parent')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def private_install_temporary_state(root=Path('/'), *, allow_missing=False):
+    """Read only the fixed scratch role; root is an IO root for namespace fixtures."""
+    account = pwd.getpwnam('asterisk')
+    if account.pw_uid <= 0 or account.pw_gid <= 0:
+        raise ValueError('private installer workspace requires a nonroot native account')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    stamp = lambda info: {key: getattr(info, 'st_' + key) for key in ('dev', 'ino', 'uid', 'gid', 'mode')}
+    descriptor = _private_spool_parent(root)
+    leaf = None
+    try:
+        parent = os.fstat(descriptor)
+        if parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe private installer workspace parent')
+        name = Path(PRIVATE_INSTALL_TEMP).name
+        try:
+            leaf = os.open(name, flags, dir_fd=descriptor)
+        except FileNotFoundError:
+            if not allow_missing:
+                raise
+        identity = None
+        if leaf is not None:
+            info = os.fstat(leaf)
+            if (info.st_uid != 0 or info.st_gid != account.pw_gid
+                    or stat.S_IMODE(info.st_mode) != 0o710
+                    or stamp(info) != stamp(os.stat(name, dir_fd=descriptor, follow_symlinks=False))):
+                raise ValueError('private installer workspace must be root:native-primary-GID mode0710')
+            identity = stamp(info)
+        capacity = os.fstatvfs(leaf if leaf is not None else descriptor)
+        if stamp(parent) != stamp(os.fstat(descriptor)):
+            raise ValueError('private installer workspace parent changed')
+        return {'path': PRIVATE_INSTALL_TEMP, 'exists': leaf is not None,
+                'uid': account.pw_uid, 'gid': account.pw_gid, 'identity': identity, 'parent_identity': stamp(parent),
+                'allocation_unit': max(4096, capacity.f_frsize),
+                'available_bytes': capacity.f_bavail * capacity.f_frsize,
+                'available_inodes': capacity.f_favail if capacity.f_files else None,
+                'read_only': bool(capacity.f_flag & os.ST_RDONLY)}
+    finally:
+        if leaf is not None:
+            os.close(leaf)
+        os.close(descriptor)
+
+
+def protected_ca_bundle(value):
+    """Resolve CA aliases through root-controlled directories, including their link targets."""
+    source = Path(value)
+    if not source.is_absolute():
+        raise ValueError
+    current = Path('/')
+    pending = deque(source.parts[1:])
+    links = 0
+    while pending:
+        component = pending.popleft()
+        if component == '..':
+            current = current.parent
+            continue
+        candidate = current / component
+        info = candidate.lstat()
+        if info.st_uid != 0:
+            raise ValueError
+        if stat.S_ISLNK(info.st_mode):
+            links += 1
+            if links > 40:
+                raise ValueError
+            target = candidate.readlink()
+            if target.is_absolute():
+                current = Path('/')
+            parts = target.parts[1:] if target.is_absolute() else target.parts
+            pending.extendleft(reversed(parts))
+            continue
+        if pending and (not stat.S_ISDIR(info.st_mode)
+                        or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+            raise ValueError
+        current = candidate
+    info = current.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022
+            or not 0 < info.st_size <= 16 * 1024 * 1024):
+        raise ValueError
+    descriptor = os.open(current, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(descriptor)
+        if ((opened.st_dev, opened.st_ino, opened.st_ctime_ns)
+                != (info.st_dev, info.st_ino, info.st_ctime_ns)):
+            raise ValueError
+    finally:
+        os.close(descriptor)
+    return str(current)
+
+
+def operator_download_environment():
+    proxies = ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')
+    bypass = ('NO_PROXY', 'no_proxy')
+    certificates = ('SSL_CERT_FILE', 'PIP_CERT', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+    result = {}
+    for name in (*proxies, *bypass, *certificates):
+        value = os.environ.get(name)
+        if not value:
+            continue
+        try:
+            if (len(os.fsencode(value)) > (16384 if name in bypass else 8192)
+                    or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+                raise ValueError
+            if name in certificates:
+                value = protected_ca_bundle(value)
+            elif name in proxies:
+                proxy = urlsplit(value)
+                if (proxy.scheme not in ('http', 'https') or not proxy.hostname
+                        or proxy.port == 0 or any(char.isspace() for char in value)):
+                    raise ValueError
+        except (OSError, ValueError):
+            # URL parsing and filesystem errors can contain proxy passwords or private paths.
+            raise InstallError('Invalid installer download setting ' + name) from None
+        result[name] = value
+    return result
+
+
+def runner(arguments, *, timeout=30, input=None, allowed=(0,), network=False):
     """Bound stdout/stderr while a command runs, including failure/timeout paths."""
+    if type(network) is not bool or (network and os.geteuid() != 0):
+        raise InstallError('Protected download settings require an explicit root operation')
     temporary = os.environ.get('TMPDIR', '/tmp')
-    if temporary not in ('/tmp', '/var/tmp'):
+    if temporary not in ('/tmp', '/var/tmp', PRIVATE_INSTALL_TEMP):
         raise InstallError('unsupported protected installation workspace')
-    for path in (Path(temporary), *Path(temporary).parents):
-        info = path.lstat()
-        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
-                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
-            raise InstallError('unsafe protected installation workspace')
+    if temporary == PRIVATE_INSTALL_TEMP:
+        try:
+            private_install_temporary_state()
+        except (OSError, ValueError, KeyError) as error:
+            raise InstallError('unsafe fixed private installation workspace') from error
+    else:
+        for path in (Path(temporary), *Path(temporary).parents):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+                raise InstallError('unsafe protected installation workspace')
+    download = operator_download_environment() if network else {}
     process = subprocess.Popen(arguments, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
                                env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8', 'TMPDIR': temporary,
-                                    'ORT_DISABLE_TELEMETRY': '1'})
+                                    'ORT_DISABLE_TELEMETRY': '1', **download})
     output = {'stdout': bytearray(), 'stderr': bytearray()}
     deadline = time.monotonic() + timeout
     pending = memoryview(input or b'')
@@ -685,6 +842,11 @@ def runner(arguments, *, timeout=30, input=None, allowed=(0,)):
             if stream is not None and not stream.closed: stream.close()
     result = subprocess.CompletedProcess(arguments, code, bytes(output['stdout']), bytes(output['stderr']))
     if code not in allowed:
+        if download:
+            # Clients can print credentials in several encodings. Report the fixed
+            # phase and exit status without relaying client-controlled error text.
+            phase = 'Piper runtime' if '--runtime-only' in arguments else 'Piper dependencies'
+            raise InstallError(f'{phase} failed with exit {code} using operator download settings')
         detail = result.stderr.decode('utf-8', 'replace').strip()[-500:]
         raise InstallError(f'{Path(arguments[0]).name} failed with exit {code}: {detail}')
     return result
@@ -929,20 +1091,25 @@ class PrivilegedInstall:
                     or stat.S_IMODE(info.st_mode) != mode or self.files.read(target) != self.contents[source]):
                 raise InstallError('root runtime differs from authenticated release: ' + target)
 
-    def dependencies(self, offline_assets=None):
+    def dependencies(self, offline_assets=None, *, resource_profile=None):
         self.admit()
         # Existing authenticated root script performs dependency/hash/voice
         # checks and private compatibility-path repair. No PHP is loaded.
         script = RUNTIME + '/sls_mass_notify_install_piper_voices.sh'
         assets=[]
+        if resource_profile is not None:
+            if resource_profile not in ('lite', 'standard'):
+                raise InstallError('Invalid dependency resource profile')
+            assets.extend(('--resource-profile', resource_profile))
         if offline_assets is not None:
             offline_assets=Path(offline_assets)
             for directory in (offline_assets, offline_assets/'wheels', offline_assets/'voices'):
                 descriptor=self.trust.directory(directory,protected=True)
                 os.close(descriptor)
-            assets=['--wheelhouse',str(offline_assets/'wheels'),'--voice-cache',str(offline_assets/'voices')]
-        self.run(['/bin/bash', script, '--runtime-only', '--workers-paused',*assets], timeout=930)
-        self.run(['/bin/bash', script, '--workers-paused',*assets], timeout=1830)
+            assets.extend(('--wheelhouse',str(offline_assets/'wheels'),'--voice-cache',str(offline_assets/'voices')))
+        online = offline_assets is None
+        self.run(['/bin/bash', script, '--runtime-only', '--workers-paused',*assets], timeout=930, network=online)
+        self.run(['/bin/bash', script, '--workers-paused',*assets], timeout=1830, network=online)
         self.run(['/bin/bash', script, '--repair-permissions-only'], timeout=130)
 
     def activate(self):
@@ -1001,18 +1168,21 @@ def main():
     parser.add_argument('phase', choices=('plan', 'preflight', 'prepare', 'admit', 'dependencies', 'activate', 'verify', 'timezone'))
     parser.add_argument('--apply', action='store_true', help='required for prepare/dependencies/activate')
     parser.add_argument('--offline-assets',type=Path,help='Root-protected directory containing hash-locked wheels and pinned voices; dependencies phase only.')
+    parser.add_argument('--resource-profile', choices=('standard', 'lite'), help='Selected installation profile for speech dependency storage checks.')
     args = parser.parse_args()
     if os.geteuid() != 0: raise InstallError('protected installation operations require root')
     protect_entrypoint()
     trust = load_trust()
     action = PrivilegedInstall(trust, args.trust_root)
     if args.offline_assets is not None and args.phase != 'dependencies': raise InstallError('--offline-assets is only supported by the dependencies phase')
+    if args.resource_profile is not None and args.phase != 'dependencies':
+        raise InstallError('--resource-profile is only supported by the dependencies phase')
     if args.phase in ('prepare', 'dependencies', 'activate', 'timezone') and not args.apply:
         raise InstallError('mutating phase requires --apply; use plan to review fixed operations')
     if args.phase == 'plan':
         print(json.dumps(action.plan(), indent=2))
     elif args.phase == 'dependencies':
-        action.dependencies(args.offline_assets)
+        action.dependencies(args.offline_assets, resource_profile=args.resource_profile)
         print(json.dumps({'ok':True,'phase':args.phase,'generation':action.source.parent.name}))
     else:
         getattr(action, args.phase)()

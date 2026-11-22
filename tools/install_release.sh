@@ -21,6 +21,10 @@ REQUESTED_HISTORY_LOSS_APPROVAL=""
 REQUESTED_HISTORY_LOSS_OPERATOR=""
 REQUESTED_HISTORY_LOSS_REASON=""
 REQUESTED_DEPLOYMENT_PROFILE=""
+REQUESTED_RETAINED_MODE=""
+REQUESTED_RETAINED_APPROVAL=""
+REQUESTED_RETAINED_OPERATOR=""
+REQUESTED_RETAINED_REASON=""
 case "${1:-}" in
   --lite) REQUESTED_DEPLOYMENT_PROFILE=lite; shift ;;
   --standard) REQUESTED_DEPLOYMENT_PROFILE=standard; shift ;;
@@ -71,6 +75,44 @@ if [ "${1:-}" = '--recover' ]; then
     printf 'History-loss operator and reason require --approve-history-loss and its exact review challenge.\n' >&2; exit 2
   fi
 fi
+case "${1:-}" in
+  --review-retained)
+    REQUESTED_RETAINED_MODE=review
+    shift ;;
+  --approve-retained)
+    REQUESTED_RETAINED_MODE=approve
+    [[ "${2:-}" =~ ^[a-f0-9]{64}$ ]] || {
+      printf 'Retained approval requires the exact SHA256 challenge from a separate --review-retained command.\n' >&2; exit 2;
+    }
+    REQUESTED_RETAINED_APPROVAL="$2"
+    shift 2
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --operator|--reason)
+          retained_argument="$1"; retained_value="${2:-}"
+          [ -n "$retained_value" ] && [[ "$retained_value" != *[$'\001'-$'\037'$'\177']* ]] \
+            && [[ "$retained_value" != [[:space:]]* && "$retained_value" != *[[:space:]] ]] || {
+              printf 'Retained-review operator and reason must be bounded nonempty text without control characters or surrounding whitespace.\n' >&2; exit 2;
+            }
+          if [ "$retained_argument" = --operator ]; then
+            [ -z "$REQUESTED_RETAINED_OPERATOR" ] && [ "${#retained_value}" -le 128 ] || {
+              printf 'Use --operator once with at most 128 characters.\n' >&2; exit 2;
+            }
+            REQUESTED_RETAINED_OPERATOR="$retained_value"
+          else
+            [ -z "$REQUESTED_RETAINED_REASON" ] && [ "${#retained_value}" -ge 10 ] && [ "${#retained_value}" -le 500 ] || {
+              printf 'Use --reason once with 10 through 500 characters.\n' >&2; exit 2;
+            }
+            REQUESTED_RETAINED_REASON="$retained_value"
+          fi
+          shift 2 ;;
+        *) break ;;
+      esac
+    done
+    [ -n "$REQUESTED_RETAINED_OPERATOR" ] && [ -n "$REQUESTED_RETAINED_REASON" ] || {
+      printf 'Retained approval requires --operator and --reason after its exact review challenge.\n' >&2; exit 2;
+    } ;;
+esac
 if [ "${1:-}" = '--inspect' ]; then
   SLS_MASS_NOTIFY_INVENTORY_ONLY=1
   shift
@@ -81,6 +123,11 @@ fi
 # operation.  Tests source this file to exercise individual helpers, so only an
 # executed installer owns and validates the caller's positional arguments.
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [ -n "$REQUESTED_RETAINED_MODE" ] && { [ -n "$REQUESTED_RECOVERY" ] \
+      || [ -n "$REQUESTED_DEPLOYMENT_PROFILE" ] || [ "${SLS_MASS_NOTIFY_INVENTORY_ONLY:-0}" = 1 ]; }; then
+    printf 'Retained-source review/approval is separate from --inspect, --recover and deployment-profile changes.\n' >&2
+    exit 2
+  fi
   if [ -n "$REQUESTED_RECOVERY" ] && [ "${SLS_MASS_NOTIFY_INVENTORY_ONLY:-0}" = 1 ]; then
     printf 'Use either --recover TRANSACTION or --inspect [TGZ_URL], not both.\n' >&2
     exit 2
@@ -96,7 +143,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     }
   else
     [ "$#" -le 1 ] || {
-      printf 'Usage: %s [--lite|--standard] [--inspect] [SIGNED_GITHUB_TGZ_URL]\n' "$0" >&2
+      printf 'Usage: %s [--lite|--standard] [--inspect] [SIGNED_GITHUB_TGZ_URL]; or --review-retained [SIGNED_GITHUB_TGZ_URL]; or --approve-retained SHA256 --operator NAME --reason TEXT [SIGNED_GITHUB_TGZ_URL]\n' "$0" >&2
       exit 2
     }
     case "${1:-}" in
@@ -116,12 +163,12 @@ if [ -n "${SLS_MASS_NOTIFY_MODULE:-}" ] \
     "SLS_MASS_NOTIFY_MODULE is fixed to the FreePBX raw module name '$MODULE'; refusing an alternate value." >&2
   exit 2
 fi
-TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.1.9-beta.tgz}"
+TGZ="${SLS_MASS_NOTIFY_TGZ:-/tmp/slsmassnotifyserver-0.2.0-beta.tgz}"
 URL="${SLS_MASS_NOTIFY_TGZ_URL:-${1:-}}"
 SHA256="${SLS_MASS_NOTIFY_SHA256:-}"
 TOKEN="${SLS_MASS_NOTIFY_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
 LOG_FILE="${SLS_MASS_NOTIFY_INSTALL_LOG:-/tmp/slsmassnotifyserver-install.log}"
-EXPECTED_TGZ_SHA256="ce98a543248bafbd1788ef0fa8b9549206802ca99280bcc79d640bc65f9a7b70"
+EXPECTED_TGZ_SHA256="0def77274d45beae009e09aeea45271baa50bd64637019b6a5fa2da34114b693"
 DATA_DIR="/var/lib/asterisk/SLS_Mass_Notifications_Plugin"
 CONFIG_FILE="$DATA_DIR/mass-notifications.config"
 CONFIG_SNAPSHOT=""
@@ -140,6 +187,8 @@ PENDING_CONFIG_PATH=""
 PENDING_CONFIG_SNAPSHOT=""
 PENDING_CONFIG_HASH=""
 WORKER_LOCK_RESPONSE_FD=""
+WORKER_COORDINATION_REQUIRED=0
+declare -a WORKER_LEASE_FDS=()
 SETTINGS_LOCK="$DATA_DIR/mass-notifications.config.lock"
 STAGING_DIR=""
 INSTALL_TEMP_ROOT="/tmp"
@@ -152,6 +201,8 @@ MODULE_ACTIVATED=0
 INSTALL_COMMITTED=0
 HAD_EXISTING_MODULE=0
 MODULE_WAS_ENABLED=0
+# Zero-valued legacy flags alone do not establish a native absence observation.
+INITIAL_NATIVE_MODULE_REGISTRY_STATE=unknown
 APT_METADATA_REFRESHED=0
 ASTERISK_PACKAGE_REPAIR_ATTEMPTS=""
 REPAIR_ASTERISK_PACKAGES="${SLS_MASS_NOTIFY_REPAIR_ASTERISK_PACKAGES:-0}"
@@ -182,6 +233,7 @@ RECOVERY_DIR=""
 STATIC_MUTATION_STARTED=0
 UPGRADE_TRUST_DIR=""
 AUTHENTICATED_INSTALLER_APPROVED=0
+CAPACITY_STOCK_CACHE_PROOF_SHA256=""
 LEGACY_PERMISSION_TOOL=""
 FREEPBX_CHOWN_CONFIG="/etc/asterisk/freepbx_chown.conf"
 INSTALL_TRANSACTION_ROOT="/var/lib/sls-mass-notify-installer"
@@ -284,6 +336,39 @@ def legacy_sequence(parent):
             raise RuntimeError('Invalid legacy installer sequence metadata; preserve it for review')
     finally:
         os.close(item)
+def initial_temporary(parent, name):
+    staged = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        before = os.fstat(staged)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_size > 65536):
+            raise RuntimeError('Unsafe interrupted first journal; preserve it for review')
+        raw = os.read(staged, 65537)
+        after = os.fstat(staged); named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        def identity(info):
+            return {'name': name, 'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+                    'gid': info.st_gid, 'mode': stat.S_IMODE(info.st_mode), 'nlink': info.st_nlink,
+                    'size': info.st_size, 'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
+        binding = identity(before)
+        if len(raw) != before.st_size or binding != identity(after) or binding != identity(named):
+            raise RuntimeError('Interrupted first journal changed; preserve it for review')
+        return raw, binding if not raw else None
+    finally: os.close(staged)
+def validate_empty_marker(value, parent):
+    binding = value.get('empty_preparation_temporary')
+    if (set(value) != {'schema','directory','phase','created_at','updated_at','settings',
+                       'empty_preparation','empty_preparation_temporary'}
+            or value['phase'] != 'abandoned' or value['settings'] != {} or value['empty_preparation'] is not True
+            or not isinstance(binding, dict) or not isinstance(binding.get('name'), str)
+            or not re.fullmatch(r'\.new-[a-f0-9]{24}', binding['name'])
+            or stat.S_IMODE(os.fstat(parent).st_mode) != 0o700
+            or set(os.listdir(parent)) != {'transaction.json', binding['name']}):
+        raise RuntimeError('Invalid unwritten preparation layout; preserve it for review')
+    raw, actual = initial_temporary(parent, binding['name'])
+    if (raw or actual is None or set(binding) != set(actual)
+            or any(type(binding[key]) is not type(item) or binding[key] != item for key, item in actual.items())
+            or set(os.listdir(parent)) != {'transaction.json', binding['name']}):
+        raise RuntimeError('Original unwritten journal identity changed; preserve it for review')
 if not root.exists() and not root.is_symlink(): raise SystemExit(0)
 fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
 try:
@@ -307,11 +392,28 @@ try:
             try:
                 item = os.open('transaction.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=child)
             except FileNotFoundError:
-                if stat.S_IMODE(info.st_mode) != 0o700 or os.listdir(child):
+                evidence = os.listdir(child)
+                initial = None
+                empty = None
+                if len(evidence) == 1 and re.fullmatch(r'\.new-[a-f0-9]{24}', evidence[0]):
+                    raw, empty = initial_temporary(child, evidence[0])
+                    if set(os.listdir(child)) != set(evidence):
+                        raise RuntimeError('Interrupted first journal layout changed; preserve it for review')
+                    if raw:
+                        initial = json.loads(raw, object_pairs_hook=unique_object,
+                                             parse_float=finite_float, parse_constant=invalid_constant)
+                    if raw and (type(initial) is not dict or set(initial) != {'schema','directory','phase','settings','created_at','updated_at'}
+                            or type(initial['schema']) is not int or initial['schema'] != 1
+                            or initial['directory'] != str(root/name) or initial['phase'] != 'preparing' or initial['settings'] != {}
+                            or type(initial['created_at']) is not int or type(initial['updated_at']) is not int
+                            or not 0 <= initial['created_at'] <= initial['updated_at'] <= 2 ** 63 - 1):
+                        raise RuntimeError('Unknown interrupted first journal; preserve it for review')
+                if stat.S_IMODE(info.st_mode) != 0o700 or evidence and initial is None and empty is None:
                     raise RuntimeError('Missing transaction metadata has unknown evidence; preserve it for review')
-                created=max(0,int(info.st_mtime))
+                created=initial['created_at'] if initial is not None else max(0,int(info.st_mtime))
                 value={'schema':1,'directory':str(root/name),'phase':'preparing','settings':{},
                        'created_at':created,'updated_at':created,'empty_preparation':True}
+                if empty is not None: value['empty_preparation_temporary'] = empty
             else:
                 with os.fdopen(item, 'rb') as stream:
                     info = os.fstat(stream.fileno())
@@ -351,6 +453,8 @@ try:
                     try:os.unlink(temporary,dir_fd=child)
                     except FileNotFoundError:pass
                 print('Archived incomplete preparation; no SLL mutation had started. Evidence: '+str(root/name))
+            if 'empty_preparation_temporary' in value:
+                validate_empty_marker(value, child)
             if value.get('phase') not in ('committed', 'rolled_back', 'abandoned'):
                 print('An interrupted SLL installation requires recovery before retrying. Evidence: ' + str(root / name), file=sys.stderr)
                 print('Run the publisher-authenticated installer with --recover ' + str(root / name) + '; preserve this directory.', file=sys.stderr)
@@ -383,7 +487,8 @@ persist_install_transaction() {
   [ -n "$INSTALL_TRANSACTION_DIR" ] || return 0
   local phase="$1" field
   local -a completion_options=()
-  if [ "$phase" = rolled_back ] && [ "$RECOVERY_REQUEST_MODE" -eq 1 ]; then
+  if [ "$phase" = rolled_back ] && { [ "$RECOVERY_REQUEST_MODE" -eq 1 ] \
+      || { [ -n "$RECOVERY_DIR" ] && [ -f "$RECOVERY_DIR/configuration-mfa-recovery.json" ]; }; }; then
     # Publish terminal state and its forensic-retention binding together. A
     # crash must never expose a completed manual recovery without its archive.
     completion_options+=(--preserve-recovery-evidence)
@@ -520,6 +625,164 @@ journal.sync_recovery_inputs(*sys.argv[2:])
 PYSYNCRECOVERY
 }
 
+admit_recovery_carrier_capacity() {
+  /usr/bin/python3 -I - "$@" <<'PYRECOVERYCARRIERCAPACITY'
+import hashlib, io, json, os, stat, sys, tarfile
+from pathlib import Path, PurePosixPath
+
+BOOTSTRAP = ('sls_module_trust.py', 'sls_release_trust.py', 'sls_privileged_install.py',
+    'sls_installer_recovery.py', 'sls_install_transaction.py', 'sls_install_idle.py',
+    'sls_install_guard.py', 'sls_audio_state.py', 'sls_config_crypto.py', 'sls_upgrade_trust.py',
+    'sls_legacy_permissions.py', 'freepbx-mirror-signing.pub')
+DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+def stamp(info):
+    return tuple(getattr(info, 'st_' + key) for key in
+                 ('dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtime_ns', 'ctime_ns'))
+
+def directory(path, private=False):
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts or path.resolve() != path:
+        raise ValueError('Recovery carrier requires canonical protected directories')
+    fd = os.open('/', DIR)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, DIR, dir_fd=fd)
+            os.close(fd); fd = child
+            info = os.fstat(fd)
+            if info.st_uid != 0 or info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
+                raise ValueError('Recovery carrier directory has an unauthorized writer')
+        if private and stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+            raise ValueError('Recovery carrier target and bootstrap must be root-private')
+        return os.dup(fd)
+    finally:
+        os.close(fd)
+
+def read(path, maximum, mode):
+    path = Path(path); parent = directory(path.parent)
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                    or stat.S_IMODE(before.st_mode) != mode or not 0 < before.st_size <= maximum):
+                raise ValueError('Recovery carrier input is incomplete or unsafe')
+            chunks = []; count = 0
+            while True:
+                block = os.read(fd, min(65536, maximum + 1 - count))
+                if not block:
+                    break
+                chunks.append(block); count += len(block)
+                if count > maximum:
+                    raise ValueError('Recovery carrier input exceeds its bound')
+            body = b''.join(chunks)
+            if (len(body) != before.st_size or stamp(before) != stamp(os.fstat(fd))
+                    or stamp(before) != stamp(os.stat(path.name, dir_fd=parent, follow_symlinks=False))):
+                raise ValueError('Recovery carrier input changed during measurement')
+            return body, stamp(before)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent)
+
+def unique(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError('Recovery carrier manifest has duplicate fields')
+        result[key] = value
+    return result
+
+def bootstrap_sources(package):
+    names = set(); found = {}; total = 0
+    prefix = 'slsmassnotifyserver/bin/sls_mass_notify/'
+    with tarfile.open(fileobj=io.BytesIO(package), mode='r:gz') as archive:
+        for member in archive:
+            name = member.name.rstrip('/'); path = PurePosixPath(name)
+            if (len(names) >= 5000 or name in names or str(path) != name or path.is_absolute()
+                    or '..' in path.parts or not path.parts or path.parts[0] != 'slsmassnotifyserver'
+                    or not (member.isdir() or member.isreg())):
+                raise ValueError('Recovery carrier archive shape is unsafe')
+            names.add(name)
+            if member.isreg():
+                total += member.size
+                if member.size < 0 or total > 50 * 1024 ** 2:
+                    raise ValueError('Recovery carrier module exceeds its bound')
+            if name.startswith(prefix) and name[len(prefix):] in BOOTSTRAP:
+                if not member.isreg() or not 0 < member.size <= 2 * 1024 ** 2:
+                    raise ValueError('Recovery bootstrap source is incomplete or unsafe')
+                with archive.extractfile(member) as source:
+                    body = source.read(2 * 1024 ** 2 + 1)
+                if len(body) != member.size:
+                    raise ValueError('Recovery bootstrap source changed')
+                found[name[len(prefix):]] = body
+    if set(found) != set(BOOTSTRAP):
+        raise ValueError('Recovery bootstrap source is incomplete')
+    return found
+
+def measure_recovery_carrier(target, installer, package, manifest, signature, bootstrap):
+    if os.geteuid() != 0:
+        raise ValueError('Recovery carrier admission requires root')
+    target = Path(target); bootstrap = Path(bootstrap)
+    target_fd = directory(target, private=True); bootstrap_fd = None
+    try:
+        original = stamp(os.fstat(target_fd))
+        bootstrap_fd = directory(bootstrap, private=True)
+        if set(os.listdir(bootstrap_fd)) != set(BOOTSTRAP):
+            raise ValueError('Recovery bootstrap membership differs')
+        bodies = {}; identities = {}
+        for path, maximum in ((installer, 2 * 1024 ** 2), (package, 52 * 1024 ** 2),
+                              (manifest, 16384), (signature, 64)):
+            body, identity = read(path, maximum, 0o600)
+            bodies[str(path)] = body; identities[str(path)] = identity
+        value = json.loads(bodies[str(manifest)], object_pairs_hook=unique)
+        digest = lambda body: hashlib.sha256(body).hexdigest()
+        if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1
+                or value.get('installer_sha256') != digest(bodies[str(installer)])
+                or value.get('package_sha256') != digest(bodies[str(package)])
+                or len(bodies[str(signature)]) != 64):
+            raise ValueError('Recovery inputs differ from the authenticated manifest')
+        expected = bootstrap_sources(bodies[str(package)])
+        for name in BOOTSTRAP:
+            path = bootstrap / name
+            body, identity = read(path, 2 * 1024 ** 2, 0o600 if name.endswith('.pub') else 0o700)
+            if body != expected[name]:
+                raise ValueError('Recovery bootstrap differs from the authenticated package')
+            bodies[str(path)] = body; identities[str(path)] = identity
+        usage = os.fstatvfs(target_fd); unit = max(4096, usage.f_frsize)
+        # Four release files, twelve helpers, two directories and four metadata
+        # slots. Charge the actual corrected carrier, not a future release cap.
+        required_inodes = len(bodies) + 2 + 4
+        required = sum((len(body) + unit - 1) // unit * unit for body in bodies.values()) + required_inodes * unit
+        available = usage.f_bavail * usage.f_frsize
+        inodes = usage.f_favail if usage.f_files > 0 else None
+        if usage.f_flag & os.ST_RDONLY:
+            raise ValueError('Recovery carrier filesystem is read-only; preserve the existing transaction')
+        if available < required:
+            raise ValueError('Recovery carrier needs %d free bytes; %d are available. Preserve the existing transaction.' % (required, available))
+        if inodes is not None and inodes < required_inodes:
+            raise ValueError('Recovery carrier needs %d free inodes; %d are available. Preserve the existing transaction.' % (required_inodes, inodes))
+        if (original != stamp(os.fstat(target_fd)) or original != stamp(target.lstat())
+                or set(os.listdir(bootstrap_fd)) != set(BOOTSTRAP)
+                or any(identity != stamp(Path(path).lstat()) for path, identity in identities.items())):
+            raise ValueError('Recovery carrier inputs or target changed during admission')
+        return {'required_free_bytes': required, 'available_bytes': available,
+                'required_inodes': required_inodes, 'available_inodes': inodes,
+                'scope': 'actual authenticated corrected recovery carrier only'}
+    finally:
+        if bootstrap_fd is not None:
+            os.close(bootstrap_fd)
+        os.close(target_fd)
+
+if __name__ == '__main__':
+    try:
+        print(json.dumps(measure_recovery_carrier(*sys.argv[1:]), sort_keys=True))
+    except (OSError, ValueError, tarfile.TarError) as error:
+        print('Corrected recovery carrier admission failed: ' + str(error), file=sys.stderr)
+        raise SystemExit(1)
+PYRECOVERYCARRIERCAPACITY
+}
+
 prepare_recovery_carrier() {
   local requested="$1" carrier
   local DOWNLOAD_DIR="" STAGING_DIR="" INSTALL_BOOTSTRAP_DIR="" TGZ="$TGZ"
@@ -532,9 +795,17 @@ prepare_recovery_carrier() {
   chmod 0700 "$STAGING_DIR" || return 1
   tar -xzf "$TGZ" -C "$STAGING_DIR" || return 1
   prepare_installer_bootstrap || return 1
+  # Keep the running installer bytes private and match them to the already
+  # authenticated manifest before measuring or changing the old transaction.
+  copy_private_release_asset "$INSTALLER_SOURCE_PATH" "$DOWNLOAD_DIR/recovery-installer.sh" 2097152 || return 1
+  admit_recovery_carrier_capacity "$requested" "$DOWNLOAD_DIR/recovery-installer.sh" "$TGZ" \
+    "$DOWNLOAD_DIR/release-manifest.json" "$DOWNLOAD_DIR/release-manifest.sig" "$INSTALL_BOOTSTRAP_DIR" || {
+    log 'Corrected recovery inputs could not be admitted on the transaction filesystem. Preserve the original transaction and review the reported space, inode or protected-input check.'
+    return 1
+  }
   carrier="$(mktemp -d "$requested/recovery-carrier.XXXXXX")" || return 1
   chmod 0700 "$carrier" || return 1
-  copy_private_release_asset "$INSTALLER_SOURCE_PATH" "$carrier/installer.sh" 2097152 || return 1
+  copy_private_release_asset "$DOWNLOAD_DIR/recovery-installer.sh" "$carrier/installer.sh" 2097152 || return 1
   copy_private_release_asset "$TGZ" "$carrier/package.tgz" 54525952 || return 1
   copy_private_release_asset "$DOWNLOAD_DIR/release-manifest.json" "$carrier/release-manifest.json" 16384 || return 1
   copy_private_release_asset "$DOWNLOAD_DIR/release-manifest.sig" "$carrier/release-manifest.sig" 64 || return 1
@@ -700,8 +971,551 @@ PYRECOVERYAUTH
 # PHP/FreePBX code is maintained by the web account. It must never become a
 # root program merely because this installer is root. Privileged operations
 # use the authenticated fixed-operation helper below, not a PHP module hook.
-sls_as_asterisk() {
-  local uid runtime_input_name
+sls_native_completion_record() {
+  /usr/bin/python3 -I - "$@" <<'PYSLSNATIVEACK'
+import json, os, re, stat, sys, tempfile, secrets
+
+def completion_directory(name):
+    if os.geteuid() != 0 or not re.fullmatch(r'/run/sls-native-command-[a-z0-9_]{8}', name):
+        raise ValueError('Invalid root native completion directory')
+    run = os.open('/run', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        parent = os.fstat(run)
+        if parent.st_uid != 0 or parent.st_mode & 0o022: raise ValueError('Unprotected native completion parent')
+        descriptor = os.open(name.rsplit('/', 1)[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=run)
+    finally: os.close(run)
+    info = os.fstat(descriptor)
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(descriptor); raise ValueError('Unprotected native completion directory')
+    return descriptor
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def read_record(directory, name):
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_nlink != 1 or not 0 < before.st_size <= 2048): raise ValueError('Unsafe native completion record')
+        body = os.read(descriptor, 2049)
+        if (len(body) != before.st_size or identity(before) != identity(os.fstat(descriptor))
+                or identity(before) != identity(os.stat(name, dir_fd=directory, follow_symlinks=False))):
+            raise ValueError('Native completion record changed')
+        return json.loads(body)
+    finally: os.close(descriptor)
+
+def write_record(directory, name, value):
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+    try:
+        body = memoryview((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode())
+        while body:
+            count = os.write(descriptor, body)
+            if count <= 0: raise OSError('Native completion publication failed')
+            body = body[count:]
+        os.fsync(descriptor)
+    finally: os.close(descriptor)
+
+def scope_record(directory, nonce):
+    value = read_record(directory, 'scope.json')
+    fields = {'schema','magic','nonce','forked','waiter_pid','waiter_start','supervisor_pid','supervisor_start'}
+    if (not isinstance(value, dict) or set(value) != fields or type(value['schema']) is not int or value['schema'] != 1
+            or value['magic'] != 'sls-native-scope-v1' or value['nonce'] != nonce or type(value['forked']) is not bool
+            or any(type(value[key]) is not int or value[key] <= 0 for key in ('waiter_pid','waiter_start'))):
+        raise ValueError('Invalid native scope binding')
+    if value['forked']:
+        if (any(type(value[key]) is not int or value[key] <= 0 for key in ('supervisor_pid','supervisor_start'))
+                or value['waiter_pid'] == value['supervisor_pid']): raise ValueError('Invalid forked native scope')
+    elif (type(value['supervisor_pid']) is not int or value['supervisor_pid'] != 0
+            or type(value['supervisor_start']) is not int or value['supervisor_start'] != 0):
+        raise ValueError('Invalid refused native scope')
+    return value
+
+def completion_record(directory, nonce):
+    scope = scope_record(directory, nonce)
+    value = read_record(directory, 'completed.json')
+    if (not isinstance(value, dict) or set(value) != {'schema','magic','nonce','status','pid'}
+            or type(value['schema']) is not int or value['schema'] != 1 or value['magic'] != 'sls-native-completion-v1'
+            or value['nonce'] != nonce or type(value['status']) is not int or not 0 <= value['status'] <= 255
+            or type(value['pid']) is not int or value['pid'] <= 0 or value['pid'] not in (scope['waiter_pid'],scope['supervisor_pid'])
+            or (not scope['forked'] and value['status'] == 0)):
+        raise ValueError('Invalid native completion binding')
+    return value['status']
+
+def complete(directory, nonce, status):
+    try: return completion_record(directory, nonce)
+    except FileNotFoundError: pass
+    write_record(directory, 'completed.json', {'schema':1,'magic':'sls-native-completion-v1',
+        'nonce':nonce,'status':status,'pid':os.getpid()})
+    return completion_record(directory, nonce)
+
+try:
+    if os.geteuid() != 0: raise ValueError('Root native completion metadata is required')
+    operation, *arguments = sys.argv[1:]
+    if operation == 'prepare' and not arguments:
+        parent = os.open('/run', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(parent)
+            if info.st_uid != 0 or info.st_mode & 0o022: raise ValueError('Unprotected native completion parent')
+        finally: os.close(parent)
+        name = tempfile.mkdtemp(prefix='sls-native-command-', dir='/run')
+        descriptor = completion_directory(name); os.close(descriptor)
+        print(name); print(secrets.token_hex(32))
+    elif operation in ('verify', 'cancel') and len(arguments) in ((2,3) if operation == 'verify' else (3,)):
+        name, nonce, *extra = arguments
+        if not re.fullmatch(r'[a-f0-9]{64}', nonce): raise ValueError('Invalid native invocation binding')
+        descriptor = completion_directory(name)
+        try:
+            if operation == 'verify':
+                status = completion_record(descriptor, nonce)
+                if extra and (not re.fullmatch(r'[0-9]{1,3}',extra[0]) or status != int(extra[0])): raise ValueError('Native completion status changed')
+                print(status)
+            else:
+                if extra[0] not in ('1','2','15'): raise ValueError('Invalid native cancellation signal')
+                # One Bash owner sends requests synchronously. Preserve its
+                # first accepted cancellation as an immutable record so a
+                # repeated signal cannot invalidate an active strict reader.
+                try: existing = read_record(descriptor, 'cancel.json')
+                except FileNotFoundError:
+                    temporary = 'cancel-' + secrets.token_hex(12)
+                    write_record(descriptor, temporary, {'schema':1,'magic':'sls-native-cancel-v1','nonce':nonce,'signal':int(extra[0])})
+                    os.replace(temporary, 'cancel.json', src_dir_fd=descriptor, dst_dir_fd=descriptor)
+                else:
+                    if (not isinstance(existing, dict) or set(existing) != {'schema','magic','nonce','signal'}
+                            or type(existing['schema']) is not int or existing['schema'] != 1
+                            or existing['magic'] != 'sls-native-cancel-v1' or existing['nonce'] != nonce
+                            or type(existing['signal']) is not int or existing['signal'] not in (1,2,15)):
+                        raise ValueError('Invalid retained native cancellation binding')
+        finally: os.close(descriptor)
+    else: raise ValueError('Invalid fixed native completion operation')
+except (OSError, ValueError, RuntimeError, TypeError):
+    sys.exit(1)
+PYSLSNATIVEACK
+}
+
+sls_cancel_native_scope() {
+  native_cancel_signal="$1"
+  if [ -n "${native_completion_directory:-}" ]; then
+    sls_native_completion_record cancel "$native_completion_directory" "$native_completion_nonce" "$1" || true
+  fi
+}
+
+sls_bounded_native_command() {
+  # Only these immutable root stages retain lease copies. Actual mutable
+  # FreePBX/PHP children receive none through Popen(close_fds=True).
+  /usr/bin/python3 -I /dev/fd/3 "${native_completion_directory:?}" "${native_completion_nonce:?}" "$@" 3<<'PYSLSBOUNDEDNATIVE'
+import ctypes, errno, fcntl, json, math, os, re, select, signal, socket, stat, subprocess, sys, time
+
+import json, os, re, stat, sys, tempfile, secrets
+
+def completion_directory(name):
+    if os.geteuid() != 0 or not re.fullmatch(r'/run/sls-native-command-[a-z0-9_]{8}', name):
+        raise ValueError('Invalid root native completion directory')
+    run = os.open('/run', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        parent = os.fstat(run)
+        if parent.st_uid != 0 or parent.st_mode & 0o022: raise ValueError('Unprotected native completion parent')
+        descriptor = os.open(name.rsplit('/', 1)[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=run)
+    finally: os.close(run)
+    info = os.fstat(descriptor)
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(descriptor); raise ValueError('Unprotected native completion directory')
+    return descriptor
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+def read_record(directory, name):
+    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    try:
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_nlink != 1 or not 0 < before.st_size <= 2048): raise ValueError('Unsafe native completion record')
+        body = os.read(descriptor, 2049)
+        if (len(body) != before.st_size or identity(before) != identity(os.fstat(descriptor))
+                or identity(before) != identity(os.stat(name, dir_fd=directory, follow_symlinks=False))):
+            raise ValueError('Native completion record changed')
+        return json.loads(body)
+    finally: os.close(descriptor)
+
+def write_record(directory, name, value):
+    descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=directory)
+    try:
+        body = memoryview((json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode())
+        while body:
+            count = os.write(descriptor, body)
+            if count <= 0: raise OSError('Native completion publication failed')
+            body = body[count:]
+        os.fsync(descriptor)
+    finally: os.close(descriptor)
+
+def scope_record(directory, nonce):
+    value = read_record(directory, 'scope.json')
+    fields = {'schema','magic','nonce','forked','waiter_pid','waiter_start','supervisor_pid','supervisor_start'}
+    if (not isinstance(value, dict) or set(value) != fields or type(value['schema']) is not int or value['schema'] != 1
+            or value['magic'] != 'sls-native-scope-v1' or value['nonce'] != nonce or type(value['forked']) is not bool
+            or any(type(value[key]) is not int or value[key] <= 0 for key in ('waiter_pid','waiter_start'))):
+        raise ValueError('Invalid native scope binding')
+    if value['forked']:
+        if (any(type(value[key]) is not int or value[key] <= 0 for key in ('supervisor_pid','supervisor_start'))
+                or value['waiter_pid'] == value['supervisor_pid']): raise ValueError('Invalid forked native scope')
+    elif (type(value['supervisor_pid']) is not int or value['supervisor_pid'] != 0
+            or type(value['supervisor_start']) is not int or value['supervisor_start'] != 0):
+        raise ValueError('Invalid refused native scope')
+    return value
+
+def completion_record(directory, nonce):
+    scope = scope_record(directory, nonce)
+    value = read_record(directory, 'completed.json')
+    if (not isinstance(value, dict) or set(value) != {'schema','magic','nonce','status','pid'}
+            or type(value['schema']) is not int or value['schema'] != 1 or value['magic'] != 'sls-native-completion-v1'
+            or value['nonce'] != nonce or type(value['status']) is not int or not 0 <= value['status'] <= 255
+            or type(value['pid']) is not int or value['pid'] <= 0 or value['pid'] not in (scope['waiter_pid'],scope['supervisor_pid'])
+            or (not scope['forked'] and value['status'] == 0)):
+        raise ValueError('Invalid native completion binding')
+    return value['status']
+
+def complete(directory, nonce, status):
+    try: return completion_record(directory, nonce)
+    except FileNotFoundError: pass
+    write_record(directory, 'completed.json', {'schema':1,'magic':'sls-native-completion-v1',
+        'nonce':nonce,'status':status,'pid':os.getpid()})
+    return completion_record(directory, nonce)
+
+
+cancel_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+cancelled_number = 0
+def cancelled(number, frame):
+    global cancelled_number
+    if not cancelled_number: cancelled_number = number
+for number in cancel_signals: signal.signal(number, cancelled)
+
+completion_name, completion_nonce = sys.argv[1:3]
+if not re.fullmatch(r'[a-f0-9]{64}', completion_nonce): raise ValueError('Invalid native invocation binding')
+completion_fd = completion_directory(completion_name)
+def start_tick(pid):
+    with open('/proc/%d/stat' % pid, 'rb') as stream: return int(stream.read(65536).rsplit(b')', 1)[1].split()[19])
+def own_children(descriptor):
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    raw = os.read(descriptor, 262145)
+    if len(raw) > 262144 or any(not item.isdigit() for item in raw.split()): raise RuntimeError('Native child inventory is unavailable')
+    return {int(item) for item in raw.split()}
+def diagnostic(body):
+    channel = None
+    descriptor = None
+    try:
+        mode = os.fstat(2).st_mode
+        if stat.S_ISSOCK(mode):
+            channel = socket.socket(fileno=os.dup(2))
+            channel.send(body, socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
+        else:
+            descriptor = os.dup(2) if stat.S_ISREG(mode) else os.open('/proc/self/fd/2',
+                os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+            os.write(descriptor, body)
+    except OSError: pass
+    finally:
+        if channel is not None: channel.close()
+        if descriptor is not None: os.close(descriptor)
+
+try:
+    duration, grace = map(float, sys.argv[3:5])
+    if not (math.isfinite(duration) and 0 < duration <= 1200 and math.isfinite(grace) and 0 < grace <= 5):
+        raise ValueError('Invalid fixed native command budget')
+    scope_deadline = time.monotonic() + duration
+    caller_pidfd = os.pidfd_open(os.getppid())
+    library = ctypes.CDLL(None, use_errno=True)
+    if os.getsid(0) != os.getpid(): os.setsid()
+    waiter_pid = os.getpid()
+    waiter_start = start_tick(waiter_pid)
+    waiter_children = os.open('/proc/self/task/%d/children' % os.getpid(), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    waiter_baseline = own_children(waiter_children)
+    if library.prctl(36, 1, 0, 0, 0) != 0: raise OSError(ctypes.get_errno(), 'Native waiter adoption is unavailable')
+
+    read_gate, write_gate = os.pipe2(os.O_CLOEXEC)
+    supervisor_pid = os.fork()
+except (OSError, ValueError, RuntimeError):
+    write_record(completion_fd, 'scope.json', {'schema':1,'magic':'sls-native-scope-v1','nonce':completion_nonce,
+        'forked':False,'waiter_pid':os.getpid(),'waiter_start':start_tick(os.getpid()),'supervisor_pid':0,'supervisor_start':0})
+    diagnostic(b'Native root supervision is unavailable before admission; no mutable command was started.\n')
+    sys.exit(complete(completion_fd, completion_nonce, 1))
+
+def cancellation_record(directory, nonce):
+    try: value = read_record(directory, 'cancel.json')
+    except FileNotFoundError: return 0
+    if (not isinstance(value, dict) or set(value) != {'schema','magic','nonce','signal'}
+            or type(value['schema']) is not int or value['schema'] != 1 or value['magic'] != 'sls-native-cancel-v1'
+            or value['nonce'] != nonce or type(value['signal']) is not int or value['signal'] not in cancel_signals):
+        raise ValueError('Invalid native cancellation binding')
+    return value['signal']
+
+def retire_waiter_children():
+    while True:
+        try:
+            owned = own_children(waiter_children) - waiter_baseline
+            if not owned: return
+            for pid in owned:
+                try: descriptor = os.pidfd_open(pid)
+                except ProcessLookupError: continue
+                try:
+                    if pid not in own_children(waiter_children) - waiter_baseline: continue
+                    try: signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    except ProcessLookupError: pass
+                    try: os.waitpid(pid, 0)
+                    except ChildProcessError: pass
+                finally: os.close(descriptor)
+        except (OSError, ValueError, RuntimeError): time.sleep(.05)
+
+def contain_scope():
+    # No mutable writer can obtain this root-only completion capability. Keep
+    # the independent root leases if a valid semantic result is unavailable.
+    diagnostic(('CRITICAL: Native completion is unverified; independent root waiter %d retains leases. Preserve %s and transaction evidence.\n' % (os.getpid(), completion_name)).encode())
+    for number in cancel_signals: signal.signal(number, signal.SIG_IGN)
+    while True: time.sleep(1)
+
+if supervisor_pid:
+    os.close(read_gate)
+    child_pidfd = None
+    try:
+        child_pidfd = os.pidfd_open(supervisor_pid)
+        if supervisor_pid not in own_children(waiter_children) - waiter_baseline: raise RuntimeError('Native supervisor parentage changed')
+        scope = {'schema':1,'magic':'sls-native-scope-v1','nonce':completion_nonce,'forked':True,
+            'waiter_pid':waiter_pid,'waiter_start':waiter_start,
+            'supervisor_pid':supervisor_pid,'supervisor_start':start_tick(supervisor_pid)}
+        write_record(completion_fd, 'scope.json', scope)
+        requested = cancelled_number or cancellation_record(completion_fd, completion_nonce)
+        if not requested and select.select([caller_pidfd], [], [], 0)[0]: requested = signal.SIGTERM
+        os.write(write_gate, ('cancel:%d\n' % requested).encode() if requested else b'go\n')
+        os.close(write_gate); write_gate = None
+        sent = 0
+        while True:
+            waited, raw = os.waitpid(supervisor_pid, os.WNOHANG)
+            if waited: break
+            requested = cancelled_number or cancellation_record(completion_fd, completion_nonce)
+            if not requested and select.select([caller_pidfd], [], [], 0)[0]: requested = signal.SIGTERM
+            if requested and requested != sent:
+                try: signal.pidfd_send_signal(child_pidfd, requested)
+                except ProcessLookupError: pass
+                sent = requested
+            # The inner stage owns the nominal deadline and TERM grace. This
+            # independent watchdog retires it if that same total bound fails.
+            if time.monotonic() >= scope_deadline + grace:
+                try: signal.pidfd_send_signal(child_pidfd, signal.SIGKILL)
+                except ProcessLookupError: pass
+            time.sleep(.01)
+        try: result = completion_record(completion_fd, completion_nonce)
+        except FileNotFoundError:
+            retire_waiter_children()
+            result = complete(completion_fd, completion_nonce, os.waitstatus_to_exitcode(raw) if os.WIFEXITED(raw) and os.WEXITSTATUS(raw) else (128 + os.WTERMSIG(raw) if os.WIFSIGNALED(raw) else 1))
+        if result: retire_waiter_children()
+        os.close(child_pidfd); child_pidfd = None
+        os.close(waiter_children); os.close(caller_pidfd); os.close(completion_fd)
+        sys.exit(result)
+    except (OSError, ValueError, RuntimeError):
+        retire_waiter_children()
+        contain_scope()
+    finally:
+        if write_gate is not None: os.close(write_gate)
+        if child_pidfd is not None: os.close(child_pidfd)
+else:
+    os.close(write_gate)
+    # The inherited descriptor belongs to the ancestor, not this fork role.
+    # The supervisor below opens its own child inventory and baseline.
+    os.close(waiter_children)
+    gate = os.read(read_gate, 64)
+    os.close(read_gate)
+    if gate != b'go\n':
+        try: scope_record(completion_fd, completion_nonce)
+        except FileNotFoundError:
+            write_record(completion_fd, 'scope.json', {'schema':1,'magic':'sls-native-scope-v1','nonce':completion_nonce,'forked':True,
+                'waiter_pid':waiter_pid,'waiter_start':waiter_start,'supervisor_pid':os.getpid(),'supervisor_start':start_tick(os.getpid())})
+        number = int(gate[7:-1]) if re.fullmatch(rb'cancel:(?:1|2|15)\n', gate) else 0
+        sys.exit(complete(completion_fd, completion_nonce, 128 + number if number else 125))
+
+import ctypes, errno, fcntl, math, os, signal, socket, stat, subprocess, sys, time
+
+cancel_signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+cancelled_number = globals().get("cancelled_number", 0)
+def cancelled(number, frame):
+    global cancelled_number
+    if not cancelled_number: cancelled_number = number
+
+class Output:
+    def __init__(self, target):
+        self.socket = None
+        mode = os.fstat(target).st_mode
+        if stat.S_ISSOCK(mode):
+            self.socket = socket.socket(fileno=os.dup(target))
+            self.fd = self.socket.fileno()
+        elif stat.S_ISREG(mode):
+            # Share the original file offset; reopening an ordinary log file
+            # could let the shell overwrite output after this command returns.
+            self.fd = os.dup(target)
+        else:
+            # A separate open description avoids changing the shell's flags.
+            self.fd = os.open('/proc/self/fd/%d' % target,
+                os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+        self.pending = bytearray()
+    def write(self, body):
+        try:
+            if self.socket is not None:
+                return self.socket.send(body, socket.MSG_DONTWAIT | socket.MSG_NOSIGNAL)
+            return os.write(self.fd, body)
+        except BlockingIOError: return 0
+    def flush(self):
+        if not self.pending: return False
+        count = self.write(self.pending[:65536])
+        if count: del self.pending[:count]
+        return bool(count)
+    def close(self):
+        if self.socket is not None: self.socket.close()
+        else: os.close(self.fd)
+
+library = ctypes.CDLL(None, use_errno=True)
+previous = ctypes.c_int()
+if library.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), 'Native child supervision is unavailable')
+children_fd = os.open('/proc/self/task/%d/children' % os.getpid(), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+def children():
+    os.lseek(children_fd, 0, os.SEEK_SET)
+    raw = os.read(children_fd, 262145)
+    if len(raw) > 262144 or any(not value.isdigit() for value in raw.split()):
+        raise RuntimeError('Native child inventory is unavailable')
+    return {int(value) for value in raw.split()}
+baseline = children()
+if library.prctl(36, 1, 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), 'Native child adoption is unavailable')
+for number in cancel_signals: signal.signal(number, cancelled)
+process = None
+outputs = []
+pipes = []
+status = 1
+cleanup = True
+try:
+    duration, grace = map(float, sys.argv[3:5])
+    if not (math.isfinite(duration) and 0 < duration <= 1200
+            and math.isfinite(grace) and 0 < grace <= 5):
+        raise ValueError('Invalid fixed native command budget')
+    # Start before the privilege transition, including runuser/PAM startup.
+    deadline = scope_deadline
+    outputs = [Output(1), Output(2)]
+    process = subprocess.Popen(sys.argv[5:], stdin=None, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, close_fds=True, start_new_session=True, cwd='/')
+    for stream, output in zip((process.stdout, process.stderr), outputs):
+        os.set_blocking(stream.fileno(), False)
+        pipes.append([stream, output, None])
+    expired = None
+    draining = False
+    while True:
+        now = time.monotonic()
+        if not cancelled_number: cancelled_number = cancellation_record(completion_fd, completion_nonce)
+        if not cancelled_number and select.select([caller_pidfd], [], [], 0)[0]: cancelled_number = signal.SIGTERM
+        if cancelled_number: break
+        result = process.poll()
+        if now >= deadline and expired is None:
+            expired = now
+            status = 124
+            if result is None:
+                # Popen's unreaped session leader anchors this owned group.
+                descriptor = os.pidfd_open(process.pid)
+                try:
+                    if process.pid in children() - baseline:
+                        try: os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError: pass
+                finally: os.close(descriptor)
+        if expired is not None and now >= expired + grace:
+            if result is None: status = 137
+            break
+        if result is not None and not draining:
+            if expired is None: status = 128 - result if result < 0 else result
+            draining = True
+            # A successful service may outlive the CLI. Drain only bytes
+            # already bounded by each actual pipe capacity, then close the
+            # read ends. Such services are not explicitly killed on success.
+            for pipe in pipes: pipe[2] = fcntl.fcntl(pipe[0].fileno(), fcntl.F_GETPIPE_SZ)
+        progress = False
+        for pipe in list(pipes):
+            stream, output, remaining = pipe
+            available = 131072 - len(output.pending)
+            if available:
+                count = min(65536, available, remaining if remaining is not None else 65536)
+                try: body = os.read(stream.fileno(), count) if count else b''
+                except BlockingIOError: body = None
+                if body:
+                    output.pending.extend(body)
+                    if remaining is not None: pipe[2] -= len(body)
+                    progress = True
+                elif body == b'' or draining:
+                    stream.close(); pipes.remove(pipe)
+            progress = output.flush() or progress
+        for output in outputs: progress = output.flush() or progress
+        if draining and not pipes and not any(output.pending for output in outputs): break
+        if expired is not None and result is not None and not progress: break
+        if not progress: time.sleep(.01)
+    cleanup = status != 0
+except (OSError, ValueError, RuntimeError):
+    status = 1
+    cleanup = True
+    if len(outputs) == 2:
+        try: outputs[1].write(b'Native PBX command supervision failed; preserve transaction evidence.\n')
+        except OSError: pass
+finally:
+    # A record-only handler cannot escape this boundary. Capture signals
+    # pending before finalization, then make owned retirement noninterruptible.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, cancel_signals)
+    pending = signal.sigpending()
+    cancellation = cancelled_number or next((number for number in cancel_signals if number in pending), 0)
+    if cancellation:
+        status = 128 + cancellation
+        cleanup = True
+    for number in cancel_signals: signal.signal(number, signal.SIG_IGN)
+    if cleanup:
+        # Reap only this invocation's adopted descendants, including setsid
+        # hooks. Keep root leases fenced if retirement cannot be confirmed.
+        reported = False
+        while True:
+            try:
+                owned = children() - baseline
+                if not owned: break
+                for pid in owned:
+                    try: descriptor = os.pidfd_open(pid)
+                    except ProcessLookupError: continue
+                    try:
+                        if pid not in children() - baseline: continue
+                        try: signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                        except ProcessLookupError: pass
+                        try: os.waitpid(pid, 0)
+                        except ChildProcessError: pass
+                    finally: os.close(descriptor)
+            except (OSError, ValueError, RuntimeError):
+                status = status or 1
+                if not reported and len(outputs) == 2:
+                    try: outputs[1].write(b'Native cleanup is incomplete; root worker leases remain held until owned children are reaped.\n')
+                    except OSError: pass
+                    reported = True
+                time.sleep(.05)
+    for stream in (getattr(process, 'stdout', None), getattr(process, 'stderr', None)):
+        if stream is not None: stream.close()
+    for output in outputs: output.close()
+    os.close(children_fd)
+    if library.prctl(36, previous.value, 0, 0, 0) != 0:
+        status = 1
+    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+status = complete(completion_fd, completion_nonce, status)
+os.close(caller_pidfd); os.close(completion_fd)
+sys.exit(status)
+PYSLSBOUNDEDNATIVE
+}
+
+sls_as_asterisk() { sls_runtime_account bounded "$@"; }
+sls_bounded_as_asterisk() { sls_runtime_account bounded "$@"; }
+sls_supervised_as_asterisk() { sls_runtime_account supervised "$@"; }
+
+sls_runtime_account() {
+  local mode="$1"; shift
+  case "$mode" in bounded|supervised) ;; *) return 64 ;; esac
+  local uid gid runtime_input_name
   local -a child_environment=(
     'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
     'HOME=/var/lib/asterisk' 'USER=asterisk' 'LOGNAME=asterisk'
@@ -709,11 +1523,14 @@ sls_as_asterisk() {
   )
   uid="$(id -u asterisk 2>/dev/null)" || { log 'The asterisk service account is missing.'; return 1; }
   [[ "$uid" =~ ^[0-9]+$ ]] && [ "$uid" -ne 0 ] || { log 'The asterisk service account must have a nonzero UID.'; return 1; }
+  gid="$(id -g asterisk 2>/dev/null)" || { log 'The asterisk primary group is unavailable.'; return 1; }
+  [[ "$gid" =~ ^[0-9]+$ ]] && [ "$gid" -ne 0 ] || { log 'The asterisk service account must have a nonzero primary GID.'; return 1; }
   for runtime_input_name in \
     CONFIG_PATH SLS_CONFIG_CRYPTO_PHP SLS_INIT_DEPLOYMENT_PROFILE SLS_INIT_PHONE_CAPACITY \
     SLS_MASS_NOTIFY_MODULE SLS_NATIVE_INSTALL_ACTION SLS_NATIVE_INSTALL_MODULE \
     SLS_NATIVE_REGISTRY_MODULE SLS_RECOVERY_AMI_NAMES \
-    SLS_MASS_NOTIFY_DEFER_SIGNING SLS_MASS_NOTIFY_PRESERVE_PENDING; do
+    SLS_MASS_NOTIFY_DEFER_SIGNING SLS_MASS_NOTIFY_PRESERVE_PENDING \
+    SLS_LOCAL_WEB_VHOST_DUMP SLS_LOCAL_WEB_CONFIG_DUMP; do
     if [[ -v "$runtime_input_name" ]]; then
       child_environment+=("$runtime_input_name=${!runtime_input_name}")
     fi
@@ -723,16 +1540,25 @@ sls_as_asterisk() {
     # Clean both the privilege-transition process and its final child. PAM or
     # runuser defaults cannot reintroduce caller credentials or change the
     # fixed runtime environment. Approved explicit env arguments follow this.
-    run_without_install_maintenance_lock /usr/bin/env -i "${child_environment[@]}" \
-      /usr/sbin/runuser -u asterisk -- /usr/bin/env -i "${child_environment[@]}" "$@"
+    local -a native_deadline=()
+    if [ "$mode" = bounded ]; then native_deadline=(/usr/bin/timeout --signal=TERM --kill-after=5 1200); fi
+    local -a native_operation=("${native_deadline[@]}" "$@")
+    # Supervised short probes retain their declared timeout and kill grace.
+    [ "${native_operation[0]:-}" = /usr/bin/timeout ] && \
+      [ "${native_operation[1]:-}" = --signal=TERM ] && \
+      [[ "${native_operation[2]:-}" = --kill-after=* ]] || return 64
+    run_without_install_maintenance_lock sls_bounded_native_command \
+      "${native_operation[3]}" "${native_operation[2]#--kill-after=}" \
+      /usr/bin/env -i "${child_environment[@]}" /usr/sbin/runuser -u asterisk -- \
+      /usr/bin/env -i "${child_environment[@]}" "${native_operation[@]}"
   )
 }
 
-php() { sls_as_asterisk /usr/bin/php "$@"; }
+php() { sls_bounded_as_asterisk /usr/bin/php "$@"; }
 
-asterisk() { sls_as_asterisk /usr/sbin/asterisk "$@"; }
-soxi() { sls_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 10 /usr/bin/soxi "$@"; }
-identify() { sls_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 10 /usr/bin/identify "$@"; }
+asterisk() { sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/sbin/asterisk "$@"; }
+soxi() { sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 10 /usr/bin/soxi "$@"; }
+identify() { sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 10 /usr/bin/identify "$@"; }
 
 fwconsole() {
   case "${1:-}" in
@@ -740,7 +1566,7 @@ fwconsole() {
       log "Root-dependent fwconsole action '$1' is not permitted inside this installer. Use the fixed protected service/permission phases."
       return 1 ;;
   esac
-  sls_as_asterisk /usr/sbin/fwconsole "$@"
+  sls_bounded_as_asterisk /usr/sbin/fwconsole "$@"
 }
 
 protected_install_phase() {
@@ -748,9 +1574,14 @@ protected_install_phase() {
     log 'The authenticated privileged installer has not been prepared. No root module hook will be used as a fallback.'
     return 1
   }
-  local -a offline=()
-  if [ "${1:-}" = dependencies ] && [ -n "${SLS_MASS_NOTIFY_OFFLINE_ASSETS:-}" ]; then offline+=(--offline-assets "$SLS_MASS_NOTIFY_OFFLINE_ASSETS"); fi
-  run_logged /usr/bin/python3 -I "$PRIVILEGED_INSTALL_BOOTSTRAP" --trust-root "$TRUST_ROOT" "$@" "${offline[@]}"
+  local -a dependency_options=()
+  if [ "${1:-}" = dependencies ]; then
+    [ -z "${SLS_MASS_NOTIFY_OFFLINE_ASSETS:-}" ] || dependency_options+=(--offline-assets "$SLS_MASS_NOTIFY_OFFLINE_ASSETS")
+    [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || dependency_options+=(--resource-profile "$REQUESTED_DEPLOYMENT_PROFILE")
+  fi
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || return 1
+  run_logged /usr/bin/python3 -I "$PRIVILEGED_INSTALL_BOOTSTRAP" --trust-root "$TRUST_ROOT" "$@" "${dependency_options[@]}" || return 1
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination
 }
 
 initialize_configuration_keyring() {
@@ -813,6 +1644,7 @@ approvals = json.loads(trust.read(Path(sys.argv[4]), trust.MAX_MANIFEST * 4, pro
 prior = approvals['prior']
 for module in ('dashboard', 'framework'):
     data = approvals['approved'][module]
+    trust.check_reviewed_omissions(data, web)
     overlays = {
         'sections/SlsMassNotifyAnnouncement.class.php': candidate / 'dashboard/sections/SlsMassNotifyAnnouncement.class.php',
         'views/sections/sls-mass-notify-announcement.php': candidate / 'dashboard/views/sections/sls-mass-notify-announcement.php',
@@ -871,6 +1703,46 @@ preflight_authenticated_prerequisites() {
   run_logged /usr/bin/python3 -I "$PRIVILEGED_INSTALL_BOOTSTRAP" --trust-root "$UPGRADE_TRUST_DIR/registry" preflight || return 1
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$UPGRADE_TRUST_DIR/service-preview" preflight-services || return 1
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$UPGRADE_TRUST_DIR/static-preview" preflight-inventory || return 1
+}
+
+capture_install_resource_proof() {
+  # This normal-install-only fact is captured before the new journal and worker
+  # locks are created. Missing or inapplicable evidence keeps the full budget.
+  [ "$AUTHENTICATED_INSTALLER_APPROVED" -eq 1 ] || return 0
+  case "$INITIAL_NATIVE_MODULE_REGISTRY_STATE" in known_absent|established) ;; *) return 0 ;; esac
+  /usr/bin/python3 -I - "$STAGING_DIR/$MODULE/bin/sls_mass_notify/sls_resource_capacity.py" \
+      "$UPGRADE_TRUST_DIR" "$STAGING_DIR/$MODULE" "$INITIAL_NATIVE_MODULE_REGISTRY_STATE" <<'PYRESOURCERELATIONSHIP'
+from pathlib import Path
+import json, os, stat, sys, types
+source, review, candidate = map(Path, sys.argv[1:4])
+module = types.ModuleType('authenticated_resource_relationship'); module.__file__ = str(source)
+exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
+proof = None
+if sys.argv[4] == 'established' and hasattr(module, 'capture_prepared_upgrade_storage_proof'):
+    proof = module.capture_prepared_upgrade_storage_proof(review, candidate, sys.argv[4])
+if proof is None and sys.argv[4] == 'known_absent' and hasattr(module, 'capture_install_storage_proof'):
+    proof = module.capture_install_storage_proof(review, candidate, sys.argv[4])
+if proof is None and sys.argv[4] == 'known_absent':
+    proof = module.capture_fresh_release_proof(review, candidate, sys.argv[4])
+if proof is None:
+    raise SystemExit(0)
+if not isinstance(proof, dict):
+    raise RuntimeError('Resource relationship proof is invalid')
+raw = (json.dumps(proof, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+if len(raw) > 4 * 1024 * 1024:
+    raise RuntimeError('Resource relationship proof exceeds its bound')
+parent = os.open(review, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+try:
+    info = os.fstat(parent)
+    if review.resolve() != review or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+        raise RuntimeError('Private authenticated review required')
+    fd = os.open('resource-relationship-proof.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+    with os.fdopen(fd, 'wb') as output:
+        os.fchmod(output.fileno(), 0o600); output.write(raw); output.flush(); os.fsync(output.fileno())
+    os.fsync(parent)
+finally:
+    os.close(parent)
+PYRESOURCERELATIONSHIP
 }
 
 repair_authenticated_legacy_permissions() {
@@ -958,6 +1830,11 @@ PYCOLLECTORIDENTITY
 commit_authenticated_installer() {
   local manifest="$DOWNLOAD_DIR/release-manifest.json" signature="$DOWNLOAD_DIR/release-manifest.sig"
   local module_name inventory digest
+  local -a cache_capacity_arguments=()
+  if [ -n "$CAPACITY_STOCK_CACHE_PROOF_SHA256" ]; then
+    cache_capacity_arguments=(--cache-storage-proof "$UPGRADE_TRUST_DIR/resource-relationship-proof.json"
+      --cache-storage-proof-sha256 "$CAPACITY_STOCK_CACHE_PROOF_SHA256")
+  fi
   # Retire untrusted generated bytecode and restore only absent authenticated
   # prior helpers before the rollback snapshot can authorize prior root jobs.
   run_logged /usr/bin/python3 -I "$INSTALL_BOOTSTRAP_DIR/sls_upgrade_trust.py" \
@@ -973,7 +1850,7 @@ commit_authenticated_installer() {
     /usr/bin/python3 -I "$TRUST_TOOL" --root "$TRUST_ROOT" enroll-reviewed --inventory "$inventory" --sha256 "$digest" || return 1
   done
   run_logged /usr/bin/python3 -I "$INSTALL_BOOTSTRAP_DIR/sls_upgrade_trust.py" \
-    --workspace "$UPGRADE_TRUST_DIR" --trust-root "$TRUST_ROOT" --cache-stock \
+    --workspace "$UPGRADE_TRUST_DIR" --trust-root "$TRUST_ROOT" --cache-stock "${cache_capacity_arguments[@]}" \
     --coordination-fd "$INSTALL_MAINTENANCE_LOCK_FD" \
     --coordination-lock "${SLS_MASS_NOTIFY_MAINTENANCE_LOCK:-/run/lock/sls-mass-notify-maintenance.lock}" || return 1
   protected_install_phase plan
@@ -1263,42 +2140,185 @@ exit(0);
 ' >/dev/null 2>&1 || true
 }
 
+capture_local_web_probe_authority() {
+  local authority
+  authority="$(/usr/bin/timeout --signal=TERM --kill-after=1 8 /usr/sbin/apache2ctl -t \
+    -D DUMP_VHOSTS -D DUMP_CONFIG -C 'LoadModule info_module /usr/lib/apache2/modules/mod_info.so' \
+    2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" | /usr/bin/python3 -I -c '
+import json,re,shlex,sys
+raw=sys.stdin.buffer.read(1048577)
+if len(raw)>1048576: raise SystemExit("Apache route authority exceeds its bound")
+text=raw.decode("utf-8","strict");before,marker,config=text.partition("# In file:")
+if not marker: raise SystemExit("Native Apache effective route authority is unavailable")
+allowed={"listen","servername","serveralias","documentroot","alias","aliasmatch","scriptalias","redirect","redirectmatch","sslengine","sethandler","addhandler","proxypass","proxypassmatch","balancermember","rewriterule"}
+lines=[]
+pending_conditions=False
+def selector(token):
+    if len(token)>=2 and token.startswith("\"") and token.endswith("\""):
+        token=token[1:-1]
+    return token if re.fullmatch(r"[A-Za-z0-9_./\\^$|()*+!?:-]{1,256}",token) else None
+def sanitized_flags(tokens, allowed_flags):
+    if not tokens: return ""
+    if len(tokens)==1 and re.fullmatch(r"\[[A-Za-z0-9,=]+\]",tokens[0]):
+        items=tokens[0][1:-1].upper().split(",")
+        if len(set(items))==len(items) and all(re.fullmatch(allowed_flags,item) for item in items):
+            return " ["+",".join(items)+"]"
+    return " [UNKNOWN]"
+for line in config.splitlines():
+    value=line.strip()
+    if not value or value.startswith("#"): continue
+    parts=value.split()
+    name=parts[0].lower()
+    if name=="rewritecond":
+        pending_conditions=True
+        subject=parts[1] if len(parts)>=3 else ""
+        condition=parts[2] if len(parts)>=3 else ""
+        # A mod_rewrite file/URL test or expanded lookup can perform work
+        # before a later condition excludes this URI. Preserve that uncertainty.
+        simple_subject=bool(re.fullmatch(r"%\{(?:REQUEST_URI|HTTP_HOST|HTTP:[A-Za-z0-9-]{1,64})\}",subject))
+        simple_pattern=bool(re.fullmatch(r"[A-Za-z0-9_./\\^$|()*+!?:<>=\[\]-]{1,256}",condition)
+                            and not condition.lstrip("!").startswith("-"))
+        if not simple_subject or not simple_pattern:
+            lines.append("RewriteCond UNKNOWN UNKNOWN [UNKNOWN]")
+            continue
+        path=selector(condition) if subject=="%{REQUEST_URI}" else None
+        flags=sanitized_flags(parts[3:],r"NC|OR") if len(parts)>=3 else " [UNKNOWN]"
+        lines.append("RewriteCond "+("%{REQUEST_URI} "+path if path else "UNKNOWN UNKNOWN")+flags)
+        continue
+    if pending_conditions and name!="rewriterule":
+        lines.append("SLSRewriteBoundary reset")
+    pending_conditions=False
+    if re.match(r"^</?(?:VirtualHost|Directory|DirectoryMatch|Location|LocationMatch|Files|FilesMatch)\b",value,re.I):
+        lines.append(value);continue
+    if value.startswith("<"):
+        lines.append("</SLSUnknown>" if value.startswith("</") else "<SLSUnknown>")
+        continue
+    if name not in allowed: continue
+    if name=="rewriterule" and re.search(r"[a-z][a-z0-9+.-]*://",value,re.I):
+        source=selector(parts[1]) if len(parts)>=3 else None
+        flags=sanitized_flags(parts[3:],r"R(?:=30[12378])?|L|END|NE|NC|F|G|P|QSA")
+        lines.append("RewriteRule "+(source or "UNKNOWN")+" UNQUALIFIED_REMOTE_HANDLER"+flags)
+        continue
+    if name=="redirectmatch" and re.search(r"[a-z][a-z0-9+.-]*://",value,re.I):
+        statuses={"permanent","temp","seeother","gone","301","302","303","307","308","410"}
+        index=2 if len(parts)>1 and parts[1].lower() in statuses else 1
+        source=selector(parts[index]) if len(parts)==index+2 else None
+        prefix=(parts[1]+" " if index==2 else "")+source+" " if source else ""
+        lines.append("RedirectMatch "+prefix+"UNQUALIFIED_REMOTE_HANDLER")
+        continue
+    if name in {"sethandler","addhandler","proxypass","proxypassmatch","balancermember","rewriterule","redirect","redirectmatch"} and re.search(r"(?:https?|fcgi)://",value,re.I) and not re.search(r"unix:/[^\s|]+\|fcgi://(?:localhost|127\.0\.0\.1|\[::1\])",value,re.I):
+        try: parts=shlex.split(value,comments=True)
+        except ValueError: parts=[]
+        prefix=parts[1] if len(parts)>1 else ""
+        if name=="redirect" and prefix in {"permanent","temp","seeother","gone","301","302","303","307","308","410"}:
+            prefix=parts[2] if len(parts)>2 else ""
+        # A literal local prefix is necessary to keep an unrelated route from
+        # imposing its handler on SLL. Destination credentials never cross.
+        scoped=name in {"proxypass","redirect"} and re.fullmatch(r"/[A-Za-z0-9_./-]{0,255}",prefix)
+        value=name+(" "+prefix if scoped else "")+" UNQUALIFIED_REMOTE_HANDLER"
+    lines.append(value)
+vhost_lines=[]
+for line in before.splitlines():
+    if re.match(r"^\s*(?:(?:\*|_default_|[0-9.]+|\[[0-9a-f:]+\]):[0-9]+\s|port\s+[0-9]+\s+namevhost\s|(?:wild\s+)?alias\s)",line,re.I):
+        vhost_lines.append(line)
+    elif re.match(r"^\s*\S+:\S+\s+",line):
+        # Retain incomplete binding authority without passing unparsed text.
+        vhost_lines.append("UNCLASSIFIED_VHOST_BINDING")
+vhosts="\n".join(vhost_lines)
+config="\n".join(lines)
+if len(vhosts.encode())>65536 or len(config.encode())>65536: raise SystemExit("Sanitized Apache route authority exceeds its environment bound")
+print(json.dumps({"vhosts":vhosts,"config":config},separators=(",",":")))
+')" || { log 'The native Apache route authority could not be captured; no authenticated local probe was sent.'; return 1; }
+  SLS_LOCAL_WEB_VHOST_DUMP="$(printf '%s' "$authority" | /usr/bin/python3 -I -c 'import json,sys;print(json.load(sys.stdin)["vhosts"])')" || return 1
+  SLS_LOCAL_WEB_CONFIG_DUMP="$(printf '%s' "$authority" | /usr/bin/python3 -I -c 'import json,sys;print(json.load(sys.stdin)["config"])')" || return 1
+}
+
+authenticated_local_web_probe_program() {
+  # The restored module can predate route qualification. Every normal install,
+  # rollback and corrected recovery has its own authenticated, private archive.
+  local bootstrap="${RECOVERY_PROGRAM_DIR:-$INSTALL_BOOTSTRAP_DIR}"
+  [ -n "$bootstrap" ] || return 1
+  /usr/bin/timeout --signal=TERM --kill-after=1 8 /usr/bin/python3 -I - "$bootstrap" <<'PYCURRENTPROBE'
+import hashlib, os, stat, sys, tarfile
+from pathlib import Path
+
+try:
+    path = Path(sys.argv[1]).parent / 'package.tgz'
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid or info.st_nlink != 1
+                or info.st_mode & 0o077 or not 0 < info.st_size <= 54525952):
+            raise ValueError('unprotected package')
+        with tarfile.open(fileobj=stream, mode='r|gz') as archive:
+            for index, member in enumerate(archive):
+                if index >= 10000 or member.offset_data + member.size > 256 * 1024 * 1024:
+                    raise ValueError('package inspection bound exceeded')
+                if member.name != 'slsmassnotifyserver/LocalWebProbe.php':
+                    continue
+                if not member.isfile() or not 0 < member.size <= 65536:
+                    raise ValueError('unrecognized probe')
+                source = archive.extractfile(member).read(65537)
+                if (len(source) != member.size or not source.startswith(b'<?php\n')
+                        or hashlib.sha256(source).hexdigest() != 'ad9a9f25b9d15ab087ac3074690b556bdba810059b7cb5816e8b533a183977f3'):
+                    raise ValueError('unrecognized probe')
+                # php -r consumes source without its opening tag. Only the
+                # publisher-pinned public helper leaves the private carrier.
+                sys.stdout.buffer.write(source[6:])
+                break
+            else:
+                raise ValueError('missing probe')
+except (OSError, EOFError, ValueError, tarfile.TarError):
+    sys.exit('Current signed local web probe is unavailable in the protected installer package.')
+PYCURRENTPROBE
+}
+
 local_web_probe() {
-  local path="$1" output="$2" expected_pattern="$3"
-  local code target_url target_resolve targets probe_deadline remaining
-  probe_deadline=$((SECONDS + 25))
-  # Read Apache's parsed vhosts, then connect only to loopback. Public ports,
-  # DNS, firewall rules and Apache configuration are never changed by a probe.
-  targets="$(php -r '
-$helper = "/var/www/html/admin/modules/slsmassnotifyserver/LocalWebProbe.php";
-if (!is_file($helper)) { exit(0); }
-require_once $helper;
+  local path="$1" output="$2" expected_pattern="$3" program code
+  if ! capture_local_web_probe_authority >&2 || ! program="$(authenticated_local_web_probe_program)"; then
+    printf '000\n'; return 1
+  fi
+  # The account can read its protected settings without opening the carrier
+  # or the root-private output. The whole request, including the local socket,
+  # uses the same path-specific bounded transport as authenticated UI checks.
+  if ! code="$(
+    sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 30 /usr/bin/php -r "$program"'
 require_once "/usr/local/bin/sls_mass_notify/sls_config_crypto.php";
-$settings = \FreePBX\modules\SlsConfigCrypto::decode((string)file_get_contents(
+$settings = SlsConfigCrypto::decode((string)file_get_contents(
     "/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config"
 ));
-foreach (\FreePBX\modules\SlsLocalWebProbe::targets((string)($settings["public_pbx_host"] ?? "")) as $target) {
-    echo $target["url"], "\t", $target["resolve"], "\n";
+$vhosts = getenv("SLS_LOCAL_WEB_VHOST_DUMP");
+$config = getenv("SLS_LOCAL_WEB_CONFIG_DUMP");
+if (!is_string($vhosts) || !is_string($config) || $config === "") { exit(1); }
+$code = 0; $body = "";
+foreach (SlsLocalWebProbe::responses($settings["public_pbx_host"] ?? "", $argv[1], [], 10, $vhosts, $config) as $response) {
+    $code = $response["status"];
+    if ($code && preg_match("~" . $argv[2] . "~D", (string)$code) === 1) {
+        $body = $response["body"]; break;
+    }
 }
-' 2>/dev/null || true)"
-  if [ -z "$targets" ]; then
-    # Previous releases restored by rollback may not contain the new helper.
-    targets=$'http://127.0.0.1:80\t127.0.0.1:80:127.0.0.1\nhttps://127.0.0.1:443\t127.0.0.1:443:127.0.0.1'
-  fi
-  while IFS=$'\t' read -r target_url target_resolve; do
-    [ -n "$target_url" ] && [ -n "$target_resolve" ] || continue
-    remaining=$((probe_deadline - SECONDS))
-    [ "$remaining" -gt 0 ] || break
-    [ "$remaining" -le 20 ] || remaining=20
-    code="$(curl -ksS --noproxy '*' --connect-timeout 5 --max-time "$remaining" --max-filesize 262144 \
-      -o "$output" -w '%{http_code}' --resolve "$target_resolve" "${target_url}${path}" || true)"
-    if [[ "$code" =~ $expected_pattern ]]; then
-      printf '%s\n' "$code"
-      return 0
-    fi
-  done <<<"$targets"
-  printf '%s\n' "${code:-000}"
-  return 1
+printf("%03d\n", $code);
+echo $body;
+' "$path" "$expected_pattern" 2>/dev/null | /usr/bin/python3 -I -c '
+import os, re, stat, sys
+frame = sys.stdin.buffer.read(262149)
+if (len(frame) > 262148 or not re.fullmatch(rb"(?:000|[1-5][0-9]{2})\n", frame[:4])):
+    sys.exit(1)
+try:
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid or info.st_nlink != 1 or info.st_mode & 0o077:
+            sys.exit(1)
+        os.ftruncate(fd, 0)
+        stream.write(frame[4:])
+except OSError:
+    sys.exit(1)
+print(frame[:3].decode("ascii"))
+' "$output"
+  )"; then printf '000\n'; return 1; fi
+  printf '%s\n' "$code"
+  [[ "$code" =~ $expected_pattern ]]
 }
 
 rollback_failure() {
@@ -1578,7 +2598,7 @@ PYREGISTRATION
 }
 
 verify_install_idle_history() {
-  [ -n "${WORKER_LOCK_PID:-}" ] && kill -0 "$WORKER_LOCK_PID" 2>/dev/null || {
+  assert_worker_coordination || {
     log 'The installer worker guard exited unexpectedly; preserve recovery evidence.'
     return 1
   }
@@ -1591,7 +2611,12 @@ verify_install_idle_history() {
   # heartbeat. Cron can briefly launch a worker which exits at the held guard;
   # require the complete strict check after that process has exited as well.
   for ((attempt=1; attempt<=maximum; attempt++)); do
-    if /usr/bin/python3 -I "$IDLE_TOOL" "${inspection[@]}" >/dev/null; then return 0; fi
+    assert_worker_coordination || return 1
+    if /usr/bin/python3 -I "$IDLE_TOOL" "${inspection[@]}" >/dev/null; then
+      assert_worker_coordination || return 1
+      return 0
+    fi
+    assert_worker_coordination || return 1
     if [ "$attempt" -lt "$maximum" ]; then sleep 1; fi
   done
   return 1
@@ -1750,51 +2775,85 @@ try {
     $exists = $db->prepare("SHOW TABLES LIKE ?"); $exists->execute(["recordings"]);
     $recordingsPresent = (bool)$exists->fetchColumn();
     if (!$recordingsPresent && array_filter($data["recordings"])) { throw new \RuntimeException("Saved System Recordings cannot be restored because their table is unavailable"); }
+    $sameRecording = static function ($left, $right) {
+        if (count($left) !== count($right) || array_diff_key($left, $right) || array_diff_key($right, $left)) { return false; }
+        foreach ($right as $key => $value) {
+            if ($key === "id" ? (string)$left[$key] !== (string)$value : $left[$key] !== $value) { return false; }
+        }
+        return true;
+    };
+    $recordingPlan = []; $retainedAdditionalRecordings = 0; $requiredRecordingIds = [];
     if ($recordingsPresent) {
         $lookup = $db->prepare("SELECT * FROM recordings WHERE filename = ? ORDER BY id");
-        $delete = $db->prepare("DELETE FROM recordings WHERE filename = ?");
+        $lookupId = $db->prepare("SELECT * FROM recordings WHERE id = ?");
     }
     foreach ($recordingsPresent ? $data["recordings"] : [] as $filename => $rows) {
-        $lookup->execute([$filename]);
-        $current = $lookup->fetchAll(\PDO::FETCH_ASSOC);
-        if ($current === $rows) { continue; }
-        // New-release registration only adds reserved SLL rows and removes
-        // legacy rows proven owned by this module. Refuse unrelated changes.
-        if ($current && $rows) {
-            // A rebrand changes only exact publisher labels and retains every
-            // recording ID/reference. Any other changed column is independent.
-            $rebranded = $rows;
-            foreach ($rebranded as &$recording) {
-                if (strpos($filename, "custom/SLS_Mass_Notify_") !== 0
-                    || strpos((string)($recording["displayname"] ?? ""), "SLS Mass Notify - ") !== 0
-                    || strpos((string)($recording["description"] ?? ""), "Default Southland Servers ") !== 0) {
-                    throw new \RuntimeException("System Recording changed independently during installation: " . $filename);
-                }
-                $recording["displayname"] = str_replace("SLS Mass Notify - ", "SLL Mass Notify Server - ", $recording["displayname"]);
-                $recording["description"] = str_replace("Default Southland Servers ", "Default Southland Labs ", $recording["description"]);
-            }
-            unset($recording);
-            if ($current !== $rebranded) { throw new \RuntimeException("System Recording changed independently during installation: " . $filename); }
-            $delete->execute([$filename]);
+        $lookup->execute([$filename]); $current = $lookup->fetchAll(\PDO::FETCH_ASSOC);
+        if (count($current) > 100) { throw new \RuntimeException("Current System Recordings exceed the bounded recovery inventory"); }
+        $byId = [];
+        foreach ($current as $recording) {
+            $validateRow($recording);
+            $id = (string)($recording["id"] ?? "");
+            if (!preg_match("/^[1-9][0-9]{0,19}$/D", $id) || isset($byId[$id])) { throw new \RuntimeException("Ambiguous native System Recording identifier"); }
+            $byId[$id] = $recording;
         }
-        if (!$rows && $current) {
-            if (strpos($filename, "custom/SLS_Mass_Notify_") !== 0) { throw new \RuntimeException("Unexpected new legacy System Recording"); }
-            foreach ($current as $recording) {
-                $currentBrand = strpos((string)($recording["displayname"] ?? ""), "SLL Mass Notify Server - ") === 0
-                    && strpos((string)($recording["description"] ?? ""), "Default Southland Labs ") === 0;
-                $legacyBrand = strpos((string)($recording["displayname"] ?? ""), "SLS Mass Notify - ") === 0
-                    && strpos((string)($recording["description"] ?? ""), "Default Southland Servers ") === 0;
-                if (!$currentBrand && !$legacyBrand) { throw new \RuntimeException("New System Recording is not owned by this installation"); }
+        $originalIds = [];
+        foreach ($rows as $before) {
+            $id = (string)($before["id"] ?? "");
+            if (!preg_match("/^[1-9][0-9]{0,19}$/D", $id) || isset($requiredRecordingIds[$id])) { throw new \RuntimeException("Invalid or duplicate saved System Recording identifier"); }
+            $requiredRecordingIds[$id] = true; $originalIds[$id] = true;
+            if (!isset($byId[$id])) {
+                $lookupId->execute([$id]);
+                if ($lookupId->fetchAll(\PDO::FETCH_ASSOC)) { throw new \RuntimeException("A saved System Recording ID is now owned independently; it was not replaced"); }
+                $recordingPlan[] = ["before" => $before, "current" => null];
+                continue;
             }
-            $delete->execute([$filename]);
+            $observed = $byId[$id];
+            if ($sameRecording($observed, $before)) { continue; }
+            $authored = $before;
+            if (strpos($filename, "custom/SLS_Mass_Notify_") !== 0
+                || strpos((string)($before["displayname"] ?? ""), "SLS Mass Notify - ") !== 0
+                || strpos((string)($before["description"] ?? ""), "Default Southland Servers ") !== 0) {
+                throw new \RuntimeException("Required System Recording changed independently; it was preserved");
+            }
+            $authored["displayname"] = str_replace("SLS Mass Notify - ", "SLL Mass Notify Server - ", $before["displayname"]);
+            $authored["description"] = str_replace("Default Southland Servers ", "Default Southland Labs ", $before["description"]);
+            if (!$sameRecording($observed, $authored)) { throw new \RuntimeException("Required System Recording changed beyond the authored label transition; it was preserved"); }
+            $recordingPlan[] = ["before" => $before, "current" => $observed];
         }
-        foreach ($rows as $recording) {
-            $columns = implode(",", array_map(static function ($value) { return "`" . $value . "`"; }, array_keys($recording)));
-            $marks = implode(",", array_fill(0, count($recording), "?"));
-            $db->prepare("INSERT INTO recordings (" . $columns . ") VALUES (" . $marks . ")")->execute(array_values($recording));
+        // A later native IVR, ring group, compound recording or other module
+        // may already reference a new ID. Absence from the old snapshot never
+        // authorizes deleting additional rows or their shared sound files.
+        $retainedAdditionalRecordings += count(array_diff_key($byId, $originalIds));
+    }
+    foreach ($recordingPlan as $plan) {
+        $before = $plan["before"];
+        if ($plan["current"] === null) {
+            $columns = implode(",", array_map(static function ($value) { return "`" . $value . "`"; }, array_keys($before)));
+            $marks = implode(",", array_fill(0, count($before), "?"));
+            $db->prepare("INSERT INTO recordings (" . $columns . ") VALUES (" . $marks . ")")->execute(array_values($before));
+        } else {
+            $where = []; $parameters = [$before["displayname"], $before["description"]];
+            foreach ($plan["current"] as $column => $value) {
+                $where[] = "(`" . $column . "` = ? OR (`" . $column . "` IS NULL AND ? IS NULL))";
+                $parameters[] = $value; $parameters[] = $value;
+            }
+            $update = $db->prepare("UPDATE recordings SET displayname = ?, description = ? WHERE " . implode(" AND ", $where));
+            $update->execute($parameters);
+            if ($update->rowCount() !== 1) { throw new \RuntimeException("Required System Recording changed during exact-row restoration"); }
+        }
+    }
+    foreach ($recordingsPresent ? $data["recordings"] : [] as $filename => $rows) {
+        $lookup->execute([$filename]); $verified = $lookup->fetchAll(\PDO::FETCH_ASSOC);
+        foreach ($rows as $before) {
+            $matches = array_values(array_filter($verified, static function ($entry) use ($before) { return (string)($entry["id"] ?? "") === (string)$before["id"]; }));
+            if (count($matches) !== 1 || !$sameRecording($matches[0], $before)) { throw new \RuntimeException("A required prior System Recording could not be verified; preserve recovery evidence"); }
         }
     }
     $db->commit();
+    if ($retainedAdditionalRecordings > 0) {
+        fwrite(STDERR, "Recovery retained " . $retainedAdditionalRecordings . " additional native System Recording row(s) to preserve external references; required prior IDs were verified.\n");
+    }
 } catch (\Throwable $error) { if ($db->inTransaction()) { $db->rollBack(); } throw $error; }
 if ($amiRender) {
     // Render only native Manager configuration from its recovered database.
@@ -1808,15 +2867,31 @@ if ($amiRender) {
     $manager->writeConfig(["manager_additional.conf" => $configuration["manager_additional.conf"]]);
 }
 if ($data["backup_enrollment"]) {
-    $backup = \FreePBX::Create()->Backup;
-    $jobs = (array)$backup->getAll("backupList");
-    foreach ($data["backup_enrollment"] as $entry) {
-        $job = $entry["job"];
-        if (!array_key_exists($job, $jobs)) { continue; } // Never recreate a removed job.
-        $selected = (array)$backup->getAll("modules_" . $job);
-        if (($selected["slsmassnotifyserver"] ?? null) !== true) { continue; } // Preserve independent administrator edits.
-        if ($entry["present"]) { $backup->setConfig("slsmassnotifyserver", $entry["value"], "modules_" . $job); }
-        else { $backup->delConfig("slsmassnotifyserver", "modules_" . $job); }
+    $class = "\\FreePBX\\modules\\Slsmassnotifyserver";
+    if (class_exists($class, false) && method_exists($class, "restoreFreePbxBackupEnrollment")) {
+        // An already loaded current class supplies the same checked contract.
+        // Do not force-load it: recovery may just have restored an older or
+        // disabled public module which predates this method.
+        $module = new $class(\FreePBX::Create());
+        $module->restoreFreePbxBackupEnrollment($data["backup_enrollment"]);
+    } else {
+        $backup = \FreePBX::Create()->Backup;
+        $jobs = (array)$backup->getAll("backupList");
+        $enabled = static function ($value) { return in_array(strtolower(trim((string)$value)), ["1", "true", "yes", "on"], true); };
+        foreach ($data["backup_enrollment"] as $entry) {
+            if (!array_key_exists("value", $entry) || !$entry["present"] && $entry["value"] !== null) {
+                throw new \RuntimeException("Invalid original backup enrollment value");
+            }
+            $job = $entry["job"];
+            if (!array_key_exists($job, $jobs) || $entry["present"] && $enabled($entry["value"])) { continue; }
+            $selected = (array)$backup->getAll("modules_" . $job);
+            // A native fresh DB_Helper/PDO read returns the authored true as
+            // string1; its same-process cache can retain booltrue or integer1.
+            // Other spellings remain independently authored selections.
+            if (!in_array($selected["slsmassnotifyserver"] ?? null, [true, 1, "1"], true)) { continue; }
+            if ($entry["present"]) { $backup->setConfig("slsmassnotifyserver", $entry["value"], "modules_" . $job); }
+            else { $backup->delConfig("slsmassnotifyserver", "modules_" . $job); }
+        }
     }
 }
 require_once "/var/www/html/admin/modules/dashboard/classes/DashboardHooks.class.php";
@@ -1835,6 +2910,9 @@ restore_previous_module_tree() {
 
 rollback_module_install() {
   ROLLBACK_ATTEMPTED=1
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || {
+    rollback_failure 'worker leases were lost before static recovery'; return 1;
+  }
   log "Restoring preserved static integration and module registration without running previous install/uninstall hooks."
   if [ -z "$RECOVERY_TOOL" ] || [ -z "$RECOVERY_DIR" ]; then
     rollback_failure "the authenticated recovery helper or snapshot is unavailable"
@@ -1847,14 +2925,18 @@ rollback_module_install() {
   if [ "$MODULE_ACTIVATED" -eq 1 ] || [ -n "$MODULE_BACKUP_DIR" ]; then
     restore_previous_module_tree || rollback_failure "the previous module directory could not be restored"
   fi
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || { rollback_failure 'worker leases were lost during module recovery'; return 1; }
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" restore >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
     || rollback_failure "the static integration snapshot could not be fully restored"
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || { rollback_failure 'worker leases were lost during static recovery'; return 1; }
   restore_module_registration || rollback_failure "the original module/AMI registration and Dashboard hook index could not be restored"
-  sls_as_asterisk /usr/sbin/asterisk -rx "manager reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || rollback_failure "restored Asterisk manager configuration did not reload"
-  sls_as_asterisk /usr/sbin/asterisk -rx "dialplan reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || rollback_failure "restored Asterisk dialplan did not reload"
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || { rollback_failure 'worker leases were lost during native registration recovery'; return 1; }
+  asterisk -rx "manager reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || rollback_failure "restored Asterisk manager configuration did not reload"
+  asterisk -rx "dialplan reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || rollback_failure "restored Asterisk dialplan did not reload"
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" restore-services >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
     || rollback_failure "the prior collector/Apache process state could not be restored safely"
   refresh_served_php_workers || rollback_failure "the restored PHP-FPM serving processes could not be refreshed safely"
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || { rollback_failure 'worker leases were lost during service recovery'; return 1; }
   /usr/bin/python3 -I "$RECOVERY_TOOL" --snapshot "$RECOVERY_DIR/static" verify >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
     || rollback_failure "restored static integration differs from its preserved snapshot"
   if [ "$HAD_EXISTING_MODULE" -eq 1 ] && [ "$ROLLBACK_FAILED" -eq 0 ]; then
@@ -1865,6 +2947,7 @@ rollback_module_install() {
   fi
   verify_install_idle_history || rollback_failure "recovered notification idleness or retained phone history could not be verified"
   if [ "$ROLLBACK_FAILED" -eq 0 ]; then
+    [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || { rollback_failure 'worker leases were lost before maintenance recovery'; return 1; }
     /usr/bin/python3 -I "${RECOVERY_PROGRAM_DIR:-$INSTALL_BOOTSTRAP_DIR}/sls_upgrade_trust.py" --workspace "$UPGRADE_TRUST_DIR" --verify-previous >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
       || rollback_failure "the recovered SLS, Dashboard or Framework files differ from their pre-install authenticated approvals"
   fi
@@ -1907,6 +2990,51 @@ PYCONFIGRECOVERY
   PENDING_RECOVERY_SNAPSHOT="${values[2]}"; PENDING_RECOVERY_HASH="${values[3]}"
 }
 
+restore_configuration_under_keeper() {
+  [ -n "$CONFIG_HASH_BEFORE" ] || [ -n "$PENDING_CONFIG_STATE" ] || return 0
+  local request response targets
+  local -a values=()
+  # Reacquire after independent keeper loss before interpreting current settings.
+  # Only this actual lease owner may derive and publish recovery targets.
+  if ! assert_worker_coordination; then
+    # Keep the root caller's shared descriptions leased while replacing a
+    # dead coordinator. Closing them here would create an exclusion gap.
+    stop_worker_guard
+    [ -n "$WORKER_GUARD_TOOL" ] || WORKER_GUARD_TOOL="${TRANSACTION_TOOL%/*}/sls_install_guard.py"
+    DATA_DIR="${CONFIG_FILE%/*}"
+    acquire_worker_coordination || return 1
+    acquire_settings_coordination || return 1
+  fi
+  request="$(/usr/bin/python3 -I - "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" "$CONFIG_SNAPSHOT" "$CONFIG_FILE" \
+      "$PENDING_CONFIG_STATE" "$PENDING_CONFIG_HASH" "$PENDING_CONFIG_SNAPSHOT" \
+      "${PENDING_CONFIG_PATH:-${CONFIG_FILE%/*}/mass-notifications.pending.config}" <<'PYRESTOREREQUEST'
+import json, sys
+print(json.dumps(sys.argv[1:], separators=(',', ':')))
+PYRESTOREREQUEST
+  )" || return 1
+  ( trap '' PIPE; printf 'restore-settings %s\n' "$request" >&"$WORKER_LOCK_KEEPALIVE_FD" ) 2>/dev/null || return 1
+  IFS= read -r -t 120 response <&"$WORKER_LOCK_RESPONSE_FD" || return 1
+  if [[ "$response" == 'rejected-settings '* ]]; then
+    log "Protected configuration recovery refused: ${response#rejected-settings }"
+    return 1
+  fi
+  [[ "$response" == 'restored-settings '* ]] || return 1
+  targets="$(/usr/bin/python3 -I - "${response#restored-settings }" <<'PYRESTORERESPONSE'
+import json, sys
+value=json.loads(sys.argv[1])
+names=('active_snapshot','active_sha256','pending_snapshot','pending_sha256')
+if type(value) is not dict or set(value)!=set(names) or any(type(value[name]) is not str or '\n' in value[name] for name in names):
+    raise SystemExit('Invalid guarded configuration recovery response')
+for name in names: print(value[name])
+PYRESTORERESPONSE
+  )" || return 1
+  mapfile -t values <<<"$targets"
+  [ "${#values[@]}" -eq 4 ] || return 1
+  CONFIG_RECOVERY_SNAPSHOT="${values[0]}"; CONFIG_RECOVERY_HASH="${values[1]}"
+  PENDING_RECOVERY_SNAPSHOT="${values[2]}"; PENDING_RECOVERY_HASH="${values[3]}"
+  assert_worker_coordination
+}
+
 guard_config_on_exit() {
   local status=$? current_hash
   INSTALL_EXIT_CODE="$status"
@@ -1914,8 +3042,8 @@ guard_config_on_exit() {
   # A failed recovery command must not interrupt later config restoration or
   # delete the only recovery copy. Preserve the original install exit status.
   set +e
-  if [ "$RECOVERY_REQUEST_MODE" -eq 1 ] && ! verify_recovery_configuration; then
-    log 'CRITICAL: recovery preserved independently changed active or pending settings. No previous configuration or runtime was restored; preserve the live settings and protected transaction evidence for review.'
+  if [ "$INSTALL_COMMITTED" -eq 0 ] && ! restore_configuration_under_keeper; then
+    log 'CRITICAL: coordinated configuration recovery stopped. Preserve live settings, durable targets and original transaction evidence; no further runtime restoration was started.'
     persist_install_transaction recovery_failed || true
     INSTALL_EXIT_CODE=1
     INSTALL_ERROR_CATEGORY="install_recovery_config_conflict"
@@ -1949,25 +3077,14 @@ guard_config_on_exit() {
         [ "$status" -ne 0 ] || status=1
       fi
     elif [ "$current_hash" != "${CONFIG_RECOVERY_HASH:-$CONFIG_HASH_BEFORE}" ]; then
-      if ensure_data_directory 2>/dev/null && safe_config_restore "${CONFIG_RECOVERY_SNAPSHOT:-$CONFIG_SNAPSHOT}" "$CONFIG_FILE" 2>/dev/null; then
-        log "The installer restored the protected recovery configuration after an interrupted or failed install; any proved MFA consumption was preserved."
-        [ "$status" -ne 0 ] || status=1
-      else
-        log "CRITICAL: the installer could not safely restore the protected central config. The root-owned snapshot remains at $CONFIG_SNAPSHOT."
-        rollback_failure "the protected central configuration could not be restored"
-        [ "$status" -ne 0 ] || status=1
-      fi
+      rollback_failure "the guarded central configuration changed after recovery; live settings were preserved"
+      [ "$status" -ne 0 ] || status=1
     fi
   fi
 
   if [ "$PENDING_CONFIG_STATE" = present ] && ! verify_pending_config_unchanged; then
-    if safe_config_restore "${PENDING_RECOVERY_SNAPSHOT:-$PENDING_CONFIG_SNAPSHOT}" "$PENDING_CONFIG_PATH"; then
-      log 'Restored the original pending settings without applying them.'
-      [ "$status" -ne 0 ] || status=1
-    else
-      rollback_failure "the original pending configuration could not be restored"
-      [ "$status" -ne 0 ] || status=1
-    fi
+    rollback_failure "pending settings changed after guarded recovery; live pending settings were preserved"
+    [ "$status" -ne 0 ] || status=1
   elif [ "$PENDING_CONFIG_STATE" = absent ] && ! verify_pending_config_unchanged; then
     rollback_failure "unexpected pending settings were preserved for administrator review"
     [ "$status" -ne 0 ] || status=1
@@ -1980,14 +3097,9 @@ guard_config_on_exit() {
 
   if [ "$ROLLBACK_ATTEMPTED" -eq 1 ] && [ -n "$CONFIG_HASH_BEFORE" ] && [ "$(safe_config_hash "$CONFIG_FILE" 2>/dev/null)" != "${CONFIG_RECOVERY_HASH:-$CONFIG_HASH_BEFORE}" ]; then
     rollback_failure "restoration changed the protected configuration"
-    safe_config_restore "${CONFIG_RECOVERY_SNAPSHOT:-$CONFIG_SNAPSHOT}" "$CONFIG_FILE" || log "CRITICAL: the original configuration requires manual restoration."
   fi
   if [ "$ROLLBACK_ATTEMPTED" -eq 1 ] && ! verify_pending_config_unchanged; then
     rollback_failure 'restoration changed the protected pending configuration'
-    if [ "$PENDING_CONFIG_STATE" = present ]; then
-      safe_config_restore "${PENDING_RECOVERY_SNAPSHOT:-$PENDING_CONFIG_SNAPSHOT}" "$PENDING_CONFIG_PATH" \
-        || log 'CRITICAL: the pending configuration requires manual restoration.'
-    fi
   fi
 
   if [ "$INSTALL_COMMITTED" -eq 0 ] && ! restore_freepbx_chown_permissions; then
@@ -2074,6 +3186,7 @@ guard_config_on_exit() {
     record_install_failure
   fi
 
+  cleanup_install_temp_root
   release_worker_coordination
   exit "$status"
 }
@@ -2346,16 +3459,68 @@ acquire_update_coordination() {
   flock -w 120 "$INSTALL_UPDATE_LOCK_FD" || { log 'Another SLL update is still running; no release files were changed.'; return 1; }
 }
 
+prepare_worker_descriptors() {
+  local prepare_pid prepare_input prepare_output response mapping descriptor remote status=0
+  local -a remote_fds=()
+  coproc SLS_INSTALL_WORKER_PREPARE {
+    exec /usr/bin/python3 -I "$WORKER_GUARD_TOOL" --data "$DATA_DIR" --timeout 120 prepare
+  }
+  prepare_pid="${SLS_INSTALL_WORKER_PREPARE_PID:-}"
+  prepare_input="${SLS_INSTALL_WORKER_PREPARE[1]:-}"; prepare_output="${SLS_INSTALL_WORKER_PREPARE[0]:-}"
+  if [ -z "$prepare_pid" ] || [ -z "$prepare_input" ] || [ -z "$prepare_output" ] \
+    || ! exec {prepare_input}>&"$prepare_input" || ! exec {prepare_output}<&"$prepare_output"; then
+    status=1
+  elif ! IFS= read -r -t 120 response <&"$prepare_output" || [[ "$response" != 'prepared '* ]]; then
+    status=1
+  else
+    mapping="$(/usr/bin/python3 -I - "$prepare_pid" "${response#prepared }" <<'PYPREPAREDFDS'
+import json, sys
+if len(sys.argv[2]) > 16384: raise SystemExit('Prepared descriptor response exceeds bound')
+value=json.loads(sys.argv[2])
+if (type(value) is not dict or set(value)!={'schema','pid','fds'} or type(value['schema']) is not int or value['schema']!=1
+        or type(value['pid']) is not int or value['pid']!=int(sys.argv[1]) or type(value['fds']) is not list
+        or not 1<=len(value['fds'])<=1100 or any(type(fd) is not int or not 3<=fd<=9999999 for fd in value['fds'])
+        or len(set(value['fds']))!=len(value['fds'])):
+    raise SystemExit('Invalid prepared worker descriptor inventory')
+for fd in value['fds']: print(fd)
+PYPREPAREDFDS
+    )" || status=1
+    if [ "$status" -eq 0 ]; then
+      mapfile -t remote_fds <<<"$mapping"
+      for remote in "${remote_fds[@]}"; do
+        # The helper pins each safe regular anchor. Bash never creates or
+        # opens a mutable data pathname, including a substituted FIFO.
+        if ! exec {descriptor}<"/proc/$prepare_pid/fd/$remote"; then status=1; break; fi
+        WORKER_LEASE_FDS+=("$descriptor")
+      done
+    fi
+  fi
+  if [ -n "$prepare_input" ]; then
+    ( trap '' PIPE; printf 'release\n' >&"$prepare_input" ) 2>/dev/null || true
+    exec {prepare_input}>&-
+  fi
+  if [ -n "$prepare_output" ]; then exec {prepare_output}<&-; fi
+  [ -z "$prepare_pid" ] || wait "$prepare_pid" 2>/dev/null || status=1
+  if [ "$status" -ne 0 ]; then
+    close_inherited_worker_lock_fds
+    log 'The authenticated guard could not prepare retained worker descriptors; an older or unsafe helper is not a fencing fallback.'
+    return 1
+  fi
+}
+
 acquire_worker_coordination() {
   ensure_data_directory || return 1
-  # A dedicated child owns all worker locks; no PHP/service process inherits
-  # their descriptors. Root only opens validated service-account lock files.
+  # The root caller and keeper share the same open-file descriptions. Keeper
+  # death cannot release leases while the caller or a root native waiter lives.
   [ -n "$WORKER_GUARD_TOOL" ] && [ -f "$WORKER_GUARD_TOOL" ] && [ ! -L "$WORKER_GUARD_TOOL" ] || {
     log 'The authenticated worker guard helper has not been staged.'
     return 1
   }
+  if [ "${#WORKER_LEASE_FDS[@]}" -eq 0 ]; then prepare_worker_descriptors || return 1; fi
+  local inherited
+  inherited="$(IFS=,; printf '%s' "${WORKER_LEASE_FDS[*]}")"
   coproc SLS_INSTALL_WORKER_GUARD {
-    /usr/bin/python3 -I "$WORKER_GUARD_TOOL" --data "$DATA_DIR" --timeout 120 hold
+    exec /usr/bin/python3 -I "$WORKER_GUARD_TOOL" --data "$DATA_DIR" --timeout 120 --inherited-fds "$inherited" hold
   }
   WORKER_LOCK_PID="${SLS_INSTALL_WORKER_GUARD_PID:-}"
   local guard_input="${SLS_INSTALL_WORKER_GUARD[1]:-}" guard_output="${SLS_INSTALL_WORKER_GUARD[0]:-}" status
@@ -2373,9 +3538,21 @@ acquire_worker_coordination() {
     release_worker_coordination
     return 1
   fi
+  WORKER_COORDINATION_REQUIRED=1
 }
 
-release_worker_coordination() {
+assert_worker_coordination() {
+  local status
+  [ -n "${WORKER_LOCK_PID:-}" ] && [ -n "${WORKER_LOCK_KEEPALIVE_FD:-}" ] \
+    && [ -n "${WORKER_LOCK_RESPONSE_FD:-}" ] && kill -0 "$WORKER_LOCK_PID" 2>/dev/null \
+    && ( trap '' PIPE; printf 'check\n' >&"$WORKER_LOCK_KEEPALIVE_FD" ) 2>/dev/null \
+    && IFS= read -r -t 5 status <&"$WORKER_LOCK_RESPONSE_FD" && [ "$status" = checked ] || {
+      log 'The installer worker lease could not be confirmed; protected mutation and commit were stopped.'
+      return 1
+    }
+}
+
+stop_worker_guard() {
   if [ -n "${WORKER_LOCK_KEEPALIVE_FD:-}" ]; then
     # A guard rejected before readiness may have already closed its pipe.
     # Isolate SIGPIPE so cleanup cannot kill the installer with exit 141.
@@ -2389,6 +3566,19 @@ release_worker_coordination() {
     exec {WORKER_LOCK_RESPONSE_FD}<&-
     WORKER_LOCK_RESPONSE_FD=""
   fi
+}
+
+close_inherited_worker_lock_fds() {
+  local descriptor
+  for descriptor in "${WORKER_LEASE_FDS[@]}"; do exec {descriptor}>&-; done
+  WORKER_LEASE_FDS=()
+}
+
+release_worker_coordination() {
+  stop_worker_guard
+  # No LOCK_UN: closing only this process's shared descriptions leaves any
+  # still-running root native waiter fenced until its actual child finishes.
+  close_inherited_worker_lock_fds
 }
 
 close_inherited_maintenance_lock_fds() {
@@ -2407,15 +3597,62 @@ close_inherited_maintenance_lock_fds() {
 }
 
 run_without_install_maintenance_lock() (
-  close_inherited_maintenance_lock_fds
-  # A detached descendant must not keep the worker guard alive after our exit.
-  if [ -n "${WORKER_LOCK_KEEPALIVE_FD:-}" ]; then
-    exec {WORKER_LOCK_KEEPALIVE_FD}>&-
+  # This root waiter retains the shared worker descriptions until the actual
+  # child is reaped. Mutable PHP/native children receive no unlock capability.
+  # Explicit stdin redirection preserves heredoc/pipeline input for async jobs.
+  local native_completion_directory="" native_completion_nonce="" native_cancel_signal=0
+  if [ "${1:-}" = sls_bounded_native_command ]; then
+    local details
+    local -a completion_fields=()
+    trap 'sls_cancel_native_scope 15' TERM
+    trap 'sls_cancel_native_scope 2' INT
+    trap 'sls_cancel_native_scope 1' HUP
+    details="$(sls_native_completion_record prepare)" || return 1
+    mapfile -t completion_fields <<<"$details"
+    [ "${#completion_fields[@]}" -eq 2 ] || return 1
+    native_completion_directory="${completion_fields[0]}"
+    native_completion_nonce="${completion_fields[1]}"
+    if [ "$native_cancel_signal" -ne 0 ]; then sls_cancel_native_scope "$native_cancel_signal"; fi
+  else
+    trap ':' TERM INT HUP
   fi
-  if [ -n "${WORKER_LOCK_RESPONSE_FD:-}" ]; then
-    exec {WORKER_LOCK_RESPONSE_FD}<&-
+  (
+    trap - TERM INT HUP
+    if [ -z "$native_completion_directory" ]; then
+      close_inherited_maintenance_lock_fds
+      close_inherited_worker_lock_fds
+    fi
+    if [ -n "${WORKER_LOCK_KEEPALIVE_FD:-}" ]; then exec {WORKER_LOCK_KEEPALIVE_FD}>&-; fi
+    if [ -n "${WORKER_LOCK_RESPONSE_FD:-}" ]; then exec {WORKER_LOCK_RESPONSE_FD}<&-; fi
+    "$@"
+  ) <&0 &
+  child=$!
+  status=0
+  while true; do
+    if wait "$child"; then status=0; break; else status=$?; fi
+    # A trapped interruption must not release the fence while the child is
+    # still running. An actual child failure is returned after it is reaped.
+    kill -0 "$child" 2>/dev/null || break
+  done
+  if [ -n "$native_completion_directory" ]; then
+    local completed_status warned=0
+    while true; do
+      if completed_status="$(sls_native_completion_record verify "$native_completion_directory" "$native_completion_nonce")"; then
+        # Semantic completion, not an intermediate waiter's exit, governs
+        # progress. A dead root waiter must not start rollback prematurely.
+        status="$completed_status"
+        rm -f -- "$native_completion_directory/completed.json" "$native_completion_directory/scope.json" "$native_completion_directory/cancel.json"
+        rmdir -- "$native_completion_directory" 2>/dev/null || true
+        break
+      fi
+      if [ "$warned" -eq 0 ]; then
+        printf 'CRITICAL: Native completion is unverified; root waiter PID %s retains leases and will not begin recovery. Preserve %s and transaction/log evidence.\n' "$BASHPID" "$native_completion_directory" >&2
+        warned=1
+      fi
+      sleep .05
+    done
   fi
-  "$@"
+  exit "$status"
 )
 
 ensure_freepbx_prerequisites() {
@@ -2598,7 +3835,7 @@ asterisk_provider_package() {
       canonical_record="$(readlink -m -- "$record_path" 2>/dev/null || true)"
       [ "$canonical_record" = "$canonical_provider" ] || continue
       status="$(dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null || true)"
-      [[ "$status" == ii* ]] || continue
+      [[ "$status" == 'ii ' || "$status" == 'hi ' ]] || continue
       printf '%s\n' "$package"
       return 0
     done < <(dpkg-query -S "$query" 2>/dev/null || true)
@@ -2623,8 +3860,17 @@ verify_asterisk_packaged_binary() {
     return 1
   }
   if ! /usr/bin/timeout 15 /usr/bin/python3 -I - /usr/sbin/asterisk "$checksums" /proc <<'PYPACKAGEDASTERISK'
-import errno, hashlib, os, pathlib, re, stat, sys
+import errno, getopt, hashlib, os, pathlib, re, stat, sys
 binary, metadata, processes = map(pathlib.Path, sys.argv[1:])
+def cli_client(command):
+    argv = command.rstrip(b'\0').split(b'\0')
+    if argv and b'rasterisk' in argv[0]: return True
+    try:
+        options, _ = getopt.gnu_getopt([os.fsdecode(arg) for arg in argv[1:]],
+            'BC:cde:FfG:ghIiL:M:mnpqRrs:TtU:VvWXx:', ['version', 'help'])
+    except getopt.GetoptError:
+        return False  # Unknown arguments must never exempt a possible daemon.
+    return any(option in ('-r', '-R', '-x', '-V', '-h', '--version', '--help') for option, _ in options)
 def identity(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
@@ -2671,8 +3917,7 @@ try:
             with (process / 'cmdline').open('rb') as stream: command = stream.read(65537)
         except FileNotFoundError: continue
         if len(command) > 65536: raise ValueError('oversized Asterisk process arguments')
-        arguments = command.split(b'\0')[1:]
-        if any(argument.startswith(b'-r') or argument in (b'-V', b'--version') for argument in arguments):
+        if cli_client(command):
             continue  # Remote CLI clients do not establish daemon provenance.
         if image != str(binary): raise ValueError('running Asterisk uses a different or deleted binary image')
         with (process / 'exe').open('rb') as stream:
@@ -2700,11 +3945,35 @@ verify_asterisk_module_peers() {
   module_directory="$(asterisk_setting_value 'Module directory')" || return 1
   [[ "$module_directory" = /* ]] || return 1
   /usr/bin/timeout 15 /usr/bin/python3 -I - "$module_directory" "$provider_package" "$provider_version" "$provider_module" /proc /usr/sbin/asterisk <<'PYASTERISKMODULESET'
-import errno, hashlib, os, pathlib, re, stat, subprocess, sys
+import errno, getopt, hashlib, os, pathlib, pwd, re, stat, subprocess, sys
 module_path, package, version, targeted, process_path, binary_path = sys.argv[1:]
 modules = pathlib.Path(module_path)
 processes, binary = pathlib.Path(process_path), pathlib.Path(binary_path)
-def private_authority(path, maximum):
+def cli_client(command):
+    argv = command.rstrip(b'\0').split(b'\0')
+    if argv and b'rasterisk' in argv[0]: return True
+    try:
+        options, _ = getopt.gnu_getopt([os.fsdecode(arg) for arg in argv[1:]],
+            'BC:cde:FfG:ghIiL:M:mnpqRrs:TtU:VvWXx:', ['version', 'help'])
+    except getopt.GetoptError:
+        return False
+    return any(option in ('-r', '-R', '-x', '-V', '-h', '--version', '--help') for option, _ in options)
+def file_identity(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+def native_daemon_binding(process):
+    try:
+        with (process/'stat').open('r') as stream: raw=stream.read(8193)
+        if len(raw)>8192:return None
+        fields=raw.rsplit(')',1)[1].split()
+        with (process/'status').open('r') as stream: raw=stream.read(65537)
+        if len(raw)>65536:return None
+        values=dict(row.split(':',1) for row in raw.splitlines() if ':' in row)
+        uids=tuple(map(int,values['Uid'].split()));gids=tuple(map(int,values['Gid'].split()))
+        if (fields[0] in ('Z','X') or int(fields[19])<=0 or uids!=(runtime.pw_uid,)*4
+                or gids!=(runtime.pw_gid,)*4 or os.readlink(process/'exe')!=str(binary)):return None
+        return (int(process.name),int(fields[19]),uids,gids)
+    except (OSError,ValueError,KeyError,IndexError):return None
+def private_authority(path, maximum, native_peer=False):
     for parent in reversed(path.parents):
         info=parent.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
@@ -2713,8 +3982,9 @@ def private_authority(path, maximum):
     with os.fdopen(descriptor,'rb') as stream:
         before=os.fstat(stream.fileno())
         identity=lambda x:(x.st_dev,x.st_ino,x.st_mode,x.st_uid,x.st_gid,x.st_nlink,x.st_size,x.st_mtime_ns,x.st_ctime_ns)
-        if not stat.S_ISREG(before.st_mode) or before.st_uid!=0 or before.st_mode&0o022 or before.st_nlink!=1 or not 0<before.st_size<=maximum:
-            raise ValueError('unsafe module/package authority')
+        owner_ok=before.st_uid==0 or (native_peer and before.st_uid==runtime.pw_uid and before.st_gid==runtime.pw_gid)
+        if not stat.S_ISREG(before.st_mode) or not owner_ok or before.st_mode&0o022 or before.st_nlink!=1 or not 0<before.st_size<=maximum:
+            raise ValueError('unsafe module/package authority: '+repr(str(path)))
         body=stream.read(maximum+1)
         if len(body)!=before.st_size or identity(before)!=identity(os.fstat(stream.fileno())) or identity(before)!=identity(path.lstat()):
             raise ValueError('module/package authority changed during inspection')
@@ -2726,6 +3996,9 @@ def query(*args):
 def module_name(path):
     return path.parent.resolve(strict=False)/path.name
 try:
+    try:runtime=pwd.getpwnam('asterisk')
+    except KeyError:raise ValueError('canonical Asterisk runtime account is unavailable') from None
+    if runtime.pw_uid<=0 or runtime.pw_gid<=0:raise ValueError('canonical Asterisk runtime account must be nonroot')
     modules=modules.resolve(strict=True)
     for parent in (modules,*modules.parents):
         info=parent.lstat()
@@ -2750,13 +4023,13 @@ try:
     target=modules/targeted
     if target not in owners or len(owners[target])!=1 or next(iter(owners[target])).split(':',1)[0]!=package.split(':',1)[0]:
         raise ValueError('targeted provider lacks exact installed package authority')
-    authorities={};verified={}
+    authorities={};verified={};native_verified={}
     def authority(owner):
         if owner in authorities:return authorities[owner]
         if len(authorities)>=128:raise ValueError('package authority count exceeds its bound')
         status=query('-W','-f=${db:Status-Abbrev}\t${Version}',owner)
         installed,separator,actual_version=status.stdout.strip().partition('\t')
-        if status.returncode!=0 or not installed.startswith('ii') or not separator or not actual_version:
+        if status.returncode!=0 or installed not in ('ii ', 'hi ') or not separator or not actual_version:
             raise ValueError('module package is not installed with version authority: '+owner)
         # Only the provider being loaded/repaired must share the proven binary
         # release. Already mapped add-ons have independent package versions
@@ -2780,19 +4053,29 @@ try:
             expected[item]=match[1].lower()
         authorities[owner]=expected
         return expected
-    def verify(path):
-        if path in verified:return verified[path]
+    def verify(path, mapped=False, binding=None):
+        if path in verified:
+            if path in native_verified:
+                info,context=native_verified[path]
+                if not mapped or binding!=context or file_identity(path.lstat())!=file_identity(info):
+                    raise ValueError('native mapped peer changed: '+repr(str(path)))
+            return verified[path]
         owner=owners.get(path,set())
         if len(owner)!=1:raise ValueError('loaded module has no unique installed package authority')
-        expected=authority(next(iter(owner))).get(path)
+        owner=next(iter(owner))
+        expected=authority(owner).get(path)
         if expected is None:raise ValueError('module lacks a package checksum')
-        try:body,info=private_authority(path,67108864)
+        # Existing independently packaged addons run in this native UID domain.
+        # This role never admits a new target/core provider or package metadata.
+        native_peer=mapped and binding is not None and path!=target and owner.split(':',1)[0]!=package.split(':',1)[0]
+        try:body,info=private_authority(path,67108864,native_peer=native_peer)
         except FileNotFoundError:
             if path==target:return None
             raise ValueError('another module in the repair package is missing') from None
         if hashlib.md5(body,usedforsecurity=False).hexdigest()!=expected:
             raise ValueError('custom or changed module peer differs from its installed package')
         verified[path]=info
+        if info.st_uid!=0:native_verified[path]=(info,binding)
         return info
     for path,owner in owners.items():
         if any(item.split(':',1)[0]==package.split(':',1)[0] for item in owner):verify(path)
@@ -2808,8 +4091,9 @@ try:
         if image!=str(binary):continue
         with (process/'cmdline').open('rb') as stream:command=stream.read(65537)
         if len(command)>65536:raise ValueError('oversized Asterisk process arguments')
-        if any(arg.startswith(b'-r') or arg in (b'-V',b'--version') for arg in command.split(b'\0')[1:]):continue
+        if cli_client(command):continue
         daemons+=1
+        binding=native_daemon_binding(process)
         descriptor=os.open(process/'maps',os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
         with os.fdopen(descriptor,'rb') as stream:raw=stream.read(16777217)
         if len(raw)>16777216:raise ValueError('mapped module inventory exceeds its bound')
@@ -2822,11 +4106,16 @@ try:
             path=module_name(path)
             if path.parent!=modules and not re.match(r'^(?:res|chan|app|func|codec|format|pbx|bridge|cel|cdr)_',path.name):continue
             if deleted or path.parent!=modules:raise ValueError('loaded custom/deleted module has unverified build authority')
-            info=verify(path)
+            info=verify(path,mapped=True,binding=binding)
             device=fields[3].split(':')
             if info is None or len(device)!=2 or (os.major(info.st_dev),os.minor(info.st_dev),info.st_ino)!=(int(device[0],16),int(device[1],16),int(fields[4])):
                 raise ValueError('loaded module image differs from the installed package inode')
+        if any(context==binding for _,context in native_verified.values()) and native_daemon_binding(process)!=binding:
+            raise ValueError('native mapped peer daemon changed during inspection')
     if daemons!=1:raise ValueError('one matching Asterisk daemon could not establish module authority')
+    for path,(info,_) in native_verified.items():
+        if file_identity(path.lstat())!=file_identity(info):
+            raise ValueError('native mapped peer changed: '+repr(str(path)))
 except (OSError,ValueError,UnicodeError,subprocess.SubprocessError) as error:
     print('Cannot qualify the packaged Asterisk module peer set: '+str(error)+'. No provider was loaded or package changed.',file=sys.stderr)
     raise SystemExit(1)
@@ -3336,8 +4625,19 @@ asterisk_channel_type_available() {
 
 verify_asterisk_runtime_identity() {
   /usr/bin/timeout 10 /usr/bin/python3 -I - "$1" /etc/asterisk /proc /usr/sbin/asterisk <<'PYASTERISKRUNTIME'
-import errno, os, pathlib, pwd, re, sys
+import errno, getopt, os, pathlib, pwd, re, sys
 configuration, expected, processes, binary = map(pathlib.Path, sys.argv[1:])
+def cli_client(command):
+    # Asterisk 20/22 getopt options: parse clusters without treating letters in
+    # attached option values (-Uasterisk, -C/path) as remote-console switches.
+    argv = command.rstrip(b'\0').split(b'\0')
+    if argv and b'rasterisk' in argv[0]: return True
+    try:
+        options, _ = getopt.gnu_getopt([os.fsdecode(arg) for arg in argv[1:]],
+            'BC:cde:FfG:ghIiL:M:mnpqRrs:TtU:VvWXx:', ['version', 'help'])
+    except getopt.GetoptError:
+        return False
+    return any(option in ('-r', '-R', '-x', '-V', '-h', '--version', '--help') for option, _ in options)
 try:
     account = pwd.getpwnam('asterisk')
     if account.pw_uid <= 0 or account.pw_gid <= 0:
@@ -3356,13 +4656,13 @@ try:
             if (running.st_dev, running.st_ino) != (image.st_dev, image.st_ino): continue
             with (process / 'cmdline').open('rb') as source: command = source.read(65537)
             if len(command) > 65536: raise ValueError('the Asterisk arguments exceed their inspection bound')
-            if any(value.startswith((b'-r', b'-R', b'-x')) or value in (b'-V', b'--version') for value in command.split(b'\0')[1:]): continue
+            if cli_client(command): continue
             with (process / 'status').open('r', encoding='ascii') as source: status = source.read(65537)
             if len(status) > 65536: raise ValueError('the Asterisk identity exceeds its inspection bound')
             for label, identifier in (('Uid', account.pw_uid), ('Gid', account.pw_gid)):
                 match = re.search(r'^' + label + r':\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*$', status, re.M)
                 if not match or any(int(value) != identifier for value in match.groups()):
-                    raise ValueError('the active daemon ' + label + ' does not match the supported asterisk runtime account')
+                    raise ValueError('the active daemon ' + label + ' at PID ' + process.name + ' does not match the supported asterisk runtime account')
             confirmed = (process / 'exe').stat()
             if (confirmed.st_dev, confirmed.st_ino) != (running.st_dev, running.st_ino):
                 raise ValueError('the Asterisk process image changed during admission')
@@ -3693,6 +4993,7 @@ These engineering allocations do not certify delivery throughput. Desktop
 transport retains its separate stream limit and requires JSON-poll fallback.
 """
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -3706,7 +5007,9 @@ import subprocess
 import sys
 import time
 import types
+import xml.etree.ElementTree as ET
 
+PRIVATE_INSTALL_TEMP = '/var/spool/sls-mass-notify-installer-tmp'
 GIB = 1024 ** 3
 MIB = 1024 ** 2
 TIERS = ((50, 2, 4), (100, 3, 5), (250, 4, 6), (500, 6, 8), (1000, 8, 12))
@@ -3727,6 +5030,13 @@ PHONE_MEMORY_ROUNDING = 256 * MIB
 # The compressed wheel sizes are from the corresponding PyPI version JSON APIs.
 PINNED_VENV_ALLOCATED = 218210304
 PINNED_VENV_FILES = 4387
+# Complete no-follow calibration of the unchanged pinned environment, 2026-11-15:
+# 4,383 regular files, 538 directories and four standard interpreter/lib aliases.
+# The 4 KiB projection includes every node, including directory/link allocation.
+PINNED_VENV_REGULAR_FILES = 4383
+PINNED_VENV_DIRECTORIES = 538
+PINNED_VENV_SYMLINKS = 4
+PINNED_VENV_TOTAL_REFERENCE_BYTES = 220450816
 PINNED_WHEEL_BYTES = 77861012
 PINNED_VERSIONS = {'pip': '26.2.1', 'setuptools': '84.2.1', 'wheel': '0.48.0',
                    'piper-tts': '1.8.0', 'onnxruntime': '1.30.0', 'numpy': '2.4.6',
@@ -3745,6 +5055,28 @@ VOICE_BYTES = {'en_US-lessac-low.onnx': 63201294, 'en_US-lessac-low.onnx.json': 
                'pt_BR-faber-medium.onnx': 63201294,
                'pt_BR-faber-medium.onnx.json': 4855}
 REGIONAL_VOICE_BYTES = {'es_MX-ald-medium': {'es_MX-ald-medium.onnx.json': 4878, 'es_MX-ald-medium.onnx': 63201294}, 'en_GB-cori-high': {'en_GB-cori-high.onnx.json': 4963, 'en_GB-cori-high.onnx': 114219352}}
+VOICE_SHA256 = {
+    'de_DE-thorsten-low.onnx': '9ac27fad17cec5c1a791161976a64f026f16fc058b400b1fea62565b8b2cf375',
+    'de_DE-thorsten-low.onnx.json': 'df38e892ed949f62d0c40978bc666de0b341c5f7921840ae7c72f4df8e8ffa05',
+    'en_GB-cori-high.onnx': '470b4dd634c98f8a4850d7626ffc3dfc90774628eeef6605a6dd8f88f30a5903',
+    'en_GB-cori-high.onnx.json': '9e7fb5b5671612c22f3c81cbe46c1ae87b031a4632bcb509e499dad6f1e2adec',
+    'en_US-amy-low.onnx': 'a5a91abb7de0f104358a25aded480ddacf1ff0762886325886ec406a2e86aab3',
+    'en_US-amy-low.onnx.json': '2250a9a605b8dc35a116717fadc5056695dd809e34a15d02f72a0f52d53d3ebb',
+    'en_US-lessac-low.onnx': 'f7d01dde371555732c4c314111ac79672b1a5ce2fc19266ab42178fd8df7f375',
+    'en_US-lessac-low.onnx.json': '45754dfdebb3b8661c3fc564713772deec6e064feeb5b4e9594857dc7305193a',
+    'en_US-lessac-medium.onnx': '5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f',
+    'en_US-lessac-medium.onnx.json': 'efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0',
+    'en_US-ryan-low.onnx': '8d21a085cc4c0010f1f3e91d5008c8691277ccfa744eb0d747becd33a3444baf',
+    'en_US-ryan-low.onnx.json': 'b27147e56b0525962609f82f58171f4618cbf17c6fb043d7d724ff28cc4aed60',
+    'es_ES-davefx-medium.onnx': '6658b03b1a6c316ee4c265a9896abc1393353c2d9e1bca7d66c2c442e222a917',
+    'es_ES-davefx-medium.onnx.json': '0e0dda87c732f6f38771ff274a6380d9252f327dca77aa2963d5fbdf9ec54842',
+    'es_MX-ald-medium.onnx': '019b3803293c93e34a206dd2e53a3889209a514e786fd7144f7b70196c579b63',
+    'es_MX-ald-medium.onnx.json': '5a71498158e04afc8099bfd019c7e87c68eb9d042505a2b1a87e5c1ac2b1a61d',
+    'fr_FR-siwis-medium.onnx': '641d1ab097da2b81128c076810edb052b385decc8be3381814802a64a73baf99',
+    'fr_FR-siwis-medium.onnx.json': '39479916c2db192b5ac9764daddd0c744d83e023ad890c6976c0633ae4df8959',
+    'pt_BR-faber-medium.onnx': '858555e3a064209c57088fe6bd70c4c3dc54d03eaa00c45d5ecaf43a33f95aa7',
+    'pt_BR-faber-medium.onnx.json': '7e694de195ae3fc36dd732c445eb04fb49b649854893cb5506b978f0d50a1d6f',
+}
 MANAGED_TREES = {'runtime': '/usr/local/bin/sls_mass_notify',
                  'venv': '/usr/local/bin/sls_mass_notify/piper/venv',
                  'voices': '/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices',
@@ -3766,13 +5098,48 @@ RECOVERY_RECORDINGS = tuple('/var/lib/asterisk/sounds/en/custom/' + name + '.wav
     'opening_Paging_Tone_Opening', 'closing_Paging_Tone_Closing', 'opening_NWS_alert', 'opening_Lightning_alert'))
 PERSISTENT_PATHS = ('/', '/var/lib/asterisk', '/usr/local', '/var/www', '/var/log')
 INSTALLER_JOURNAL = '/var/lib/sls-mass-notify-installer'
+STOCK_CACHE = '/var/lib/sls-mass-notify-trust/stock-packages'
+MAX_RELEASE_ENTRIES = 5000
+BOOTSTRAP_HELPER_ENTRIES = 12
+PREPARE_METADATA_ENTRIES = 16
+JOURNAL_METADATA_ENTRIES = 128
 
 
 def rounded(value, unit=4096):
     return (int(value) + unit - 1) // unit * unit
 
 
-def storage_requirements(measured=None, missing_voices=None, allocation_units=None, temporary_directory='/tmp', *, mode='install', payloads=None, optional_packs=()):
+def piper_environment_requirements(measured=None, allocation_unit=4096):
+    """One conservative file/directory model for admission and actual builders."""
+    if type(allocation_unit) is not int or allocation_unit <= 0:
+        raise ValueError('Qualified Piper allocation unit required')
+    unit = max(4096, allocation_unit)
+    if unit & (unit - 1):
+        raise ValueError('Piper allocation unit must be a qualified power of two')
+    measured = {} if measured is None else measured
+    if type(measured) is not dict:
+        raise ValueError('Piper measurement object required')
+    for key in ('allocated_bytes', 'files', 'directories'):
+        if type(measured.get(key, 0)) is not int or not 0 <= measured.get(key, 0) < 2**63:
+            raise ValueError('Typed Piper allocation measurement required')
+    files = max(PINNED_VENV_FILES, PINNED_VENV_REGULAR_FILES + PINNED_VENV_SYMLINKS,
+                measured.get('files', 0) + PINNED_VENV_SYMLINKS)
+    directories = max(PINNED_VENV_DIRECTORIES, measured.get('directories', 0))
+    reference_nodes = PINNED_VENV_REGULAR_FILES + PINNED_VENV_DIRECTORIES + PINNED_VENV_SYMLINKS
+    reference_bytes = PINNED_VENV_TOTAL_REFERENCE_BYTES + reference_nodes * (unit - 4096)
+    observed_bytes = measured.get('allocated_bytes', 0) + (directories + PINNED_VENV_SYMLINKS) * unit
+    # The lock, optional empty bind target, stage parent and retained-marker
+    # publication each retain one inode/allocation-unit of control headroom.
+    control_entries = 4
+    return {'allocation_unit': unit, 'reference_bytes': reference_bytes,
+            'reference_regular_files': PINNED_VENV_REGULAR_FILES,
+            'reference_directories': PINNED_VENV_DIRECTORIES, 'reference_symlinks': PINNED_VENV_SYMLINKS,
+            'environment_bytes': max(reference_bytes, observed_bytes) + control_entries * unit,
+            'required_inodes': files + directories + control_entries,
+            'control_entries': control_entries, 'control_bytes': control_entries * unit}
+
+
+def storage_requirements(measured=None, missing_voices=None, allocation_units=None, temporary_directory='/tmp', *, mode='install', payloads=None, optional_packs=(), reserve_install_workspace=False, previous_release_required=True, prepared_release_resident=False, stock_cache_publication_required=True, qualified_piper_reuse=False, stock_cache_publication_sizes=None, pending_voice_files=None):
     """Explain each byte reservation; retained history is not a fixed quota.
 
     Installation workspaces may overlap bounded state updates/compaction.
@@ -3782,27 +5149,55 @@ def storage_requirements(measured=None, missing_voices=None, allocation_units=No
     measured = measured or {}
     if mode not in ('runtime', 'prepare', 'install'):
         raise ValueError('Unsupported storage admission mode')
-    if temporary_directory not in ('/tmp', '/var/tmp'):
+    if reserve_install_workspace and mode != 'prepare':
+        raise ValueError('Install workspace reservation requires prepare mode')
+    if temporary_directory not in ('/tmp', '/var/tmp', PRIVATE_INSTALL_TEMP) or (mode == 'runtime' and temporary_directory == PRIVATE_INSTALL_TEMP):
         raise ValueError('Unsupported installation workspace')
     units = allocation_units or {}
     size = lambda name: int(measured.get(name, {}).get('allocated_bytes', 0))
-    recovery_size = lambda name: max(size(name), int(measured.get(name, {}).get('logical_bytes', 0)))
     unit = lambda path: max(4096, int(units.get(path, 4096)))
-    # Accepted releases contain at most 2,000 entries and 50 MiB of regular-file data.
+    def recovery_size(name):
+        row = measured.get(name, {})
+        aliases = PINNED_VENV_SYMLINKS if name == 'runtime' and size(name) else 0
+        # Recovery copies allocate on the journal filesystem, whose fragments
+        # may be larger than the source filesystem's allocated-file totals.
+        entries = int(row.get('files', 0)) + int(row.get('directories', 0)) + aliases
+        return max(size(name), int(row.get('logical_bytes', 0)) + entries * unit(INSTALLER_JOURNAL))
+    # Accepted releases contain at most 5,000 entries and 50 MiB of regular-file data.
     payloads = payloads or {}
     payload = lambda path: (int(payloads[path]['bytes']) + int(payloads[path]['entries']) * unit(path)
-                            if path in payloads else 50 * MIB + 2000 * unit(path))
+                            if path in payloads else 50 * MIB + MAX_RELEASE_ENTRIES * unit(path))
     runtime, voices, data = (MANAGED_TREES[name] for name in ('runtime', 'voices', 'data'))
-    reference_venv = PINNED_VENV_ALLOCATED + PINNED_VENV_FILES * (unit(runtime) - 4096)
-    venv = max(reference_venv, size('venv'))
+    piper_environment = piper_environment_requirements(measured.get('venv'), unit(runtime))
+    piper_temporary = piper_environment_requirements(measured.get('venv'), unit(temporary_directory))
+    reference_venv = piper_environment['reference_bytes']
+    venv = piper_environment['environment_bytes']
+    temporary_venv = piper_temporary['environment_bytes']
     voice_sizes=dict(VOICE_BYTES)
     for pack in optional_packs:
         if pack not in REGIONAL_VOICE_BYTES:raise ValueError('Unknown optional speech pack')
         voice_sizes.update(REGIONAL_VOICE_BYTES[pack])
     voice_total = sum(rounded(value, unit(voices)) for value in voice_sizes.values())
-    model_temporary = rounded(max(voice_sizes.values()), unit(voices))
     if missing_voices is None:
         missing_voices = voice_total
+    if type(missing_voices) is not int or not 0 <= missing_voices <= voice_total:
+        raise ValueError('Typed missing voice allocation required')
+    remaining = voice_sizes
+    if pending_voice_files is not None:
+        if (mode != 'install' or not isinstance(pending_voice_files, (tuple, list))
+                or any(type(name) is not str or name not in voice_sizes for name in pending_voice_files)
+                or len(set(pending_voice_files)) != len(pending_voice_files)):
+            raise ValueError('Invalid authenticated remaining voice inventory')
+        remaining = {name:voice_sizes[name] for name in pending_voice_files}
+    largest_pending_voice = max(remaining.values(), default=0)
+    if pending_voice_files is None:
+        # Prior to checksum qualification keep the ordinary catalog growth and
+        # largest atomic replacement allowance.
+        voice_target_bytes = min(voice_total, missing_voices + rounded(largest_pending_voice, unit(voices)))
+    else:
+        # Each pending body can be published once. Credit only verified files
+        # that the writer skips, never blocks a replaced file might release.
+        voice_target_bytes = sum(rounded(n, unit(voices)) for n in remaining.values())
     # Phone and weather state reserve 16 MiB each; encrypted configuration
     # reserves 3 MiB; schedules reserve at least their 10 MiB backup limit or
     # their actual size. Up to 25 queued jobs may write 2 MiB records.
@@ -3810,19 +5205,36 @@ def storage_requirements(measured=None, missing_voices=None, allocation_units=No
                        (('phone_ledger', 16), ('weather_ledger', 16), ('schedule_ledger', 10), ('config', 3))) + 25 * 2 * MIB
     # Retain 20 encrypted configuration backups, each bounded to 3 MiB.
     backup_growth = max(0, 20 * 3 * MIB - size('config_backups'))
+    # Each absent signed body is published once: TRUST.atomic creates it in
+    # the destination directory and renames that inode into place. No obsolete
+    # package deletion is needed to justify the credit.
+    stock_sizes = stock_cache_publication_sizes if mode == 'install' else None
+    if stock_sizes is not None:
+        if (not isinstance(stock_sizes, (list,tuple)) or len(stock_sizes) > 2
+                or any(type(n) is not int or not 0 < n <= 64*MIB for n in stock_sizes)):
+            raise ValueError('Invalid authenticated stock publication sizes')
+        stock_growth = sum(rounded(n,unit(STOCK_CACHE)) for n in stock_sizes)
+        stock_peak = len(stock_sizes) * unit(STOCK_CACHE)  # directory-entry growth
+    elif stock_cache_publication_required is False and mode == 'install':
+        stock_growth = stock_peak = 0
+    else:
+        stock_growth, stock_peak = 4 * 64 * MIB, 64 * MIB
     components = {
         INSTALLER_JOURNAL: {
             'protected_config_snapshot': 16 * MIB,
-            'reviewed_previous_and_candidate_sources': 2 * payload(INSTALLER_JOURNAL),
-            'previous_release_download_and_metadata': 64 * MIB + 16 * 1024 + 4096,
-            'saved_candidate_archive_and_metadata': 52 * MIB + 16 * 1024 + 4096,
-            'authenticated_bootstrap_helpers': payload(INSTALLER_JOURNAL),
+            'reviewed_previous_and_candidate_sources': (0 if prepared_release_resident is True else payload(INSTALLER_JOURNAL)) + (50 * MIB + MAX_RELEASE_ENTRIES * unit(INSTALLER_JOURNAL) if previous_release_required is not False else 0),
+            'previous_release_download_and_metadata': 64 * MIB + 16 * 1024 + 4096 if previous_release_required is not False else 0,
+            'saved_candidate_archive_and_metadata': 0 if prepared_release_resident is True else 52 * MIB + 16 * 1024 + 4096,
+            'authenticated_bootstrap_helpers': 0 if prepared_release_resident is True else payload(INSTALLER_JOURNAL),
             'prior_static_runtime_and_api_snapshot': sum(recovery_size(name) for name in
                 ('runtime', 'assets', 'sip_api', 'control_api', 'operator_portal', 'recovery_recordings')) + 32 * MIB,
             'journal_metadata': 4 * MIB,
         },
-        runtime: {'replacement_runtime': max(size('runtime'), venv + payload(runtime))},
-        voices: {'missing_or_replacement_voices': max(int(missing_voices), model_temporary)},
+        runtime: {'replacement_runtime': payload(runtime) if qualified_piper_reuse is True and mode == 'install' else max(size('runtime'), venv + payload(runtime))},
+        # Promotions run one at a time. One voice-sized temporary can
+        # overlap previously promoted growth, but every final body or its
+        # temporary contributes at most once to the full catalog bound.
+        voices: {'missing_or_replacement_voices': voice_target_bytes},
         data: {'bounded_atomic_state_writes': atomic_state,
                'desktop_delivery_history_headroom': 160 * MIB,
                # Sixteen independently locked 4 MiB ledgers may replace in parallel.
@@ -3840,9 +5252,8 @@ def storage_requirements(measured=None, missing_voices=None, allocation_units=No
         # Maintenance compacts logs sequentially, using backup and retained temporary files.
         '/var/log': {'event_log_backup_and_retained_copy': 2 * 64 * MIB},
         '/var/lib/sls-mass-notify-trust': {'new_authenticated_generation': payload('/var/lib/sls-mass-notify-trust'),
-                                         'stock_and_release_manifests': 8 * MIB,
-                                         'bounded_signed_stock_cache': 4 * 64 * MIB,
-                                         'signed_stock_cache_atomic_write': 64 * MIB},
+                                         'stock_and_release_manifests': 8 * MIB},
+        STOCK_CACHE: {'bounded_signed_stock_cache': stock_growth, 'signed_stock_cache_atomic_write': stock_peak},
         temporary_directory: {'release_download_and_metadata': 52 * MIB + 16 * 1024 + 4096,
                  'extracted_release': payload(temporary_directory), 'failed_release_recovery': payload(temporary_directory),
                  # Two retained signed upstream packages and one active GPG
@@ -3850,43 +5261,61 @@ def storage_requirements(measured=None, missing_voices=None, allocation_units=No
                  'upstream_package_verification': 4 * 64 * MIB,
                  'missing_signed_helper_repairs': payload(temporary_directory),
                  'quarantined_python_caches': 16 * MIB,
-                 'pinned_wheel_downloads': rounded(PINNED_WHEEL_BYTES, unit(temporary_directory)),
-                 'wheel_unpack_workspace': venv, 'pip_old_package_recovery': venv,
-                 'one_voice_download': rounded(max(voice_sizes.values()), unit(temporary_directory))},
+                 'pinned_wheel_downloads': 0 if qualified_piper_reuse is True and mode == 'install' else rounded(PINNED_WHEEL_BYTES, unit(temporary_directory)),
+                 'wheel_unpack_workspace': 0 if qualified_piper_reuse is True and mode == 'install' else temporary_venv,
+                 'pip_old_package_recovery': 0 if qualified_piper_reuse is True and mode == 'install' else temporary_venv,
+                 'one_voice_download': rounded(largest_pending_voice, unit(temporary_directory))},
     }
+    install_scratch = components[temporary_directory]
     if mode != 'install':
         components = {data: {'bounded_atomic_state_writes': atomic_state},
                       MANAGED_TREES['config_backups']: {'remaining_bounded_config_backups': backup_growth},
                       '/var/log': {'event_log_backup_and_retained_copy': 2 * 64 * MIB}}
         if mode == 'prepare':
-            components[temporary_directory] = {'release_download_and_metadata': 52 * MIB,
-                                               'extracted_release': payload(temporary_directory)}
+            components[temporary_directory] = (install_scratch if reserve_install_workspace else {
+                'release_download_and_metadata': 52 * MIB,
+                'extracted_release': payload(temporary_directory)})
         else:
             components[temporary_directory] = {}
     budgets = {path: sum(parts.values()) for path, parts in components.items()}
     inode_budgets = {data: 128, MANAGED_TREES['config_backups']: 24, '/var/log': 8, temporary_directory: 0}
     if mode == 'prepare':
-        inode_budgets[temporary_directory] = 2016
+        inode_budgets[temporary_directory] = (
+            2 * int(payloads.get(temporary_directory, {}).get('entries', MAX_RELEASE_ENTRIES)) + 128
+            if reserve_install_workspace else MAX_RELEASE_ENTRIES + BOOTSTRAP_HELPER_ENTRIES + PREPARE_METADATA_ENTRIES)
     elif mode == 'install':
         for path in components:
             if path not in inode_budgets:
-                inode_budgets[path] = int(payloads.get(path, {}).get('entries', 2000)) + 16
-        inode_budgets[runtime] += max(PINNED_VENV_FILES, int(measured.get('venv', {}).get('files', 0)))
-        inode_budgets[voices] = len(voice_sizes) + 4
-        inode_budgets[temporary_directory] = 2 * int(payloads.get(temporary_directory, {}).get('entries', 2000)) + 128
-        inode_budgets[INSTALLER_JOURNAL] = 3 * int(payloads.get(INSTALLER_JOURNAL, {}).get('entries', 2000)) + 128 + sum(
+                inode_budgets[path] = int(payloads.get(path, {}).get('entries', MAX_RELEASE_ENTRIES)) + 16
+        # Four retained packages, two interrupted writes and directory metadata.
+        inode_budgets[STOCK_CACHE] = 8
+        inode_budgets[runtime] += piper_environment['required_inodes']
+        inode_budgets[voices] = len(remaining) + 4 if remaining else 0
+        inode_budgets[temporary_directory] = 2 * int(payloads.get(temporary_directory, {}).get('entries', MAX_RELEASE_ENTRIES)) + 128
+        inode_budgets[INSTALLER_JOURNAL] = (int(payloads.get(INSTALLER_JOURNAL, {}).get('entries', MAX_RELEASE_ENTRIES))
+            + MAX_RELEASE_ENTRIES + BOOTSTRAP_HELPER_ENTRIES + JOURNAL_METADATA_ENTRIES) + sum(
             int(measured.get(name, {}).get('files', 0)) + int(measured.get(name, {}).get('directories', 0))
             for name in ('runtime', 'assets', 'sip_api', 'control_api', 'operator_portal', 'recovery_recordings'))
+    if mode == 'install' or mode == 'prepare' and reserve_install_workspace:
+        inode_budgets[temporary_directory] += 2 * piper_temporary['required_inodes'] + 16
     fixed_names = ('runtime', 'voices', 'module', 'assets', 'sip_api', 'control_api')
     fixed = sum(size(name) for name in fixed_names)
     mutable = max(0, size('data') - size('voices')) + max(0, size('web') - size('assets'))
     return {'basis': 'authenticated_payload_and_filesystem_recovery_2026-10-06', 'mode': mode,
+            'previous_release_required': previous_release_required is not False,
+            'prepared_release_resident': prepared_release_resident is True and mode == 'install',
+            'stock_cache_publication_required': bool(stock_growth or stock_peak),
+            'stock_cache_publication_sizes': stock_sizes,
+            'qualified_piper_reuse': qualified_piper_reuse is True and mode == 'install',
+            'install_workspace_reserved': reserve_install_workspace,
             'measured_fixed_allocation_bytes': fixed, 'measured_mutable_data_and_media_bytes': mutable,
             'measured_trees': measured, 'fresh_reference_voice_bytes': voice_total,
             'pinned_runtime_reference_bytes': reference_venv, 'pinned_wheel_download_bytes': PINNED_WHEEL_BYTES,
+            'piper_environment_requirements': piper_environment, 'piper_temporary_requirements': piper_temporary,
             'component_budgets_bytes': components, 'free_budgets_bytes': budgets,
             'inode_budgets': inode_budgets, 'allocation_units': units, 'payloads': payloads,
             'missing_voice_bytes': missing_voices, 'optional_voice_packs':list(optional_packs),
+            'pending_voice_files': None if pending_voice_files is None else sorted(remaining),
             'temporary_directory': temporary_directory,
             'sls_persistent_free_bytes': sum(value for path, value in budgets.items() if path != temporary_directory),
             'temporary_free_bytes': budgets[temporary_directory],
@@ -3898,6 +5327,1208 @@ def storage_requirements(measured=None, missing_voices=None, allocation_units=No
                                          'pbx_pcm_bytes': 'duration_seconds * 8000 * 2 + WAV header',
                                          'provisioning': 'Reserve raw audio, converted speech, final sequence and temporary sequence for each simultaneously rendering job. Add retained output separately.'},
             'retention_provisioning': 'Generated-media admission respects its configured cache and free-space budgets; active referenced media is preserved. Audit/history retention needs measured provisioning over its chosen window. Speech workspace is reserved before synthesis.'}
+
+
+_FRESH_KIND = 'sll-fresh-release-storage-proof-v1'
+_FRESH_FILE = 'resource-relationship-proof.json'
+_FRESH_SETTINGS = frozenset(('RECOVERY_DIR', 'INSTALL_BOOTSTRAP_DIR', 'UPGRADE_TRUST_DIR',
+    'CONFIG_SNAPSHOT', 'CONFIG_HASH_BEFORE', 'PENDING_CONFIG_STATE', 'PENDING_CONFIG_PATH',
+    'PENDING_CONFIG_SNAPSHOT', 'PENDING_CONFIG_HASH', 'MODULE_BACKUP_DIR', 'STAGING_DIR',
+    'HAD_EXISTING_MODULE', 'MODULE_WAS_ENABLED', 'MODULE_ACTIVATED', 'STATIC_MUTATION_STARTED',
+    'ORIGINAL_SYSTEM_TIMEZONE', 'SYSTEM_TIMEZONE_CHANGED'))
+_FRESH_LOCKS = frozenset(('enterprise-worker.lock', 'phone-history-retention.lock',
+    'schedule-runner.lock', 'schedule-worker.lock', 'announcement-send.lock',
+    'announcement-activity.lock', 'weather-observation.lock', 'weather-dispatch-worker.lock',
+    'weather-external-worker.lock', 'xweather-poll.lock', 'sls_mass_notify_nws_poll.lock',
+    'nws-audio-delivery.lock', 'test-cooldown.ts.lock', 'audio-reservations.lock',
+    'mass-notifications.config.lock', *(f'live-paging-slots/global-{n}.lock' for n in range(16))))
+_FRESH_ABSENT = ('/var/www/html/admin/modules/slsmassnotifyserver', MANAGED_TREES['runtime'],
+    MANAGED_TREES['data'] + '/mass-notifications.config',
+    MANAGED_TREES['data'] + '/mass-notifications.pending.config', '/etc/sls-mass-notify/config-keys.json',
+    '/var/lib/sls-mass-notify-trust/publisher-trust.json',
+    '/var/lib/sls-mass-notify-trust/release-trust.initialized',
+    '/var/lib/sls-mass-notify-trust/slsmassnotifyserver.active.json',
+    '/usr/local/bin/slsconsole', '/usr/local/sbin/sign_sls_mass_notify_local_sig.sh',
+    '/etc/systemd/system/sls-mass-notify-phone-events.service',
+    '/etc/systemd/system/sls-mass-notify-phone-events.service.d',
+    '/etc/apache2/conf-available/sls-mass-notify.conf', '/etc/apache2/conf-enabled/sls-mass-notify.conf',
+    '/etc/logrotate.d/sls-mass-notify', '/usr/local/bin/piper',
+    '/var/www/html/api/sipnotify', '/var/www/html/api/sls-mass-notify',
+    '/var/www/html/mass-notify', '/var/www/html/sls_mass_notify',
+    '/var/lib/asterisk/sounds/SLS_Mass_Notifications_Plugin',
+    '/var/lib/asterisk/sounds/en/SLS_Mass_Notifications_Plugin',
+    '/root/.gnupg-sls-mass-notify', *RECOVERY_RECORDINGS)
+
+
+def _fresh_json(raw):
+    def pairs(items):
+        result = {}
+        for name, value in items:
+            if name in result: raise ValueError('ambiguous fresh storage proof')
+            result[name] = value
+        return result
+    def invalid(unused): raise ValueError('nonfinite fresh storage proof')
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+
+
+def _fresh_directory(path, owners=(0,), private=False):
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts: raise ValueError('noncanonical proof directory')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        for part in path.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd); fd = child
+            info = os.fstat(fd)
+            if info.st_uid not in owners or info.st_mode & 0o022 and not (info.st_uid == 0 and info.st_mode & stat.S_ISVTX):
+                raise ValueError('unprotected fresh proof directory')
+        if private and os.fstat(fd).st_mode & 0o077: raise ValueError('private fresh proof directory required')
+        return fd
+    except BaseException:
+        os.close(fd); raise
+
+
+def _fresh_read(path, maximum=65536, *, private=True, owners=(0,)):
+    path = Path(path); parent = _fresh_directory(path.parent, owners)
+    fd = -1
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent)
+        before = os.fstat(fd)
+        stamp = lambda s: tuple(getattr(s, 'st_' + k) for k in ('dev','ino','mode','uid','gid','nlink','size','mtime_ns','ctime_ns'))
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid not in owners or before.st_nlink != 1
+                or before.st_mode & (0o077 if private else 0o022) or not 0 <= before.st_size <= maximum):
+            raise ValueError('unprotected fresh proof file')
+        with os.fdopen(os.dup(fd), 'rb') as stream: body = stream.read(maximum + 1)
+        named = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if len(body) != before.st_size or stamp(before) != stamp(os.fstat(fd)) or stamp(before) != stamp(named):
+            raise ValueError('fresh proof file changed')
+        return body, before
+    finally:
+        if fd >= 0: os.close(fd)
+        os.close(parent)
+
+
+def _fresh_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+
+def _fresh_review_binding(review, candidate):
+    descriptor = _fresh_directory(review, private=True); os.close(descriptor)
+    previous, _ = _fresh_read(review / 'previous-root-approval.json')
+    web, _ = _fresh_read(review / 'previous-web-approval.json', 8 * MIB)
+    prior, prior_web = _fresh_json(previous), _fresh_json(web)
+    if (not isinstance(prior, dict) or type(prior.get('schema')) is not int
+            or prior != {'schema': 1, 'source': 'fresh-install', 'files': {}, 'root_jobs': []}
+            or not isinstance(prior_web, dict) or prior_web.get('slsmassnotifyserver', 'unknown') is not None):
+        raise ValueError('previous release is not independently absent')
+    for name in ('previous-release', 'previous-registry', 'previous-runtime-repairs', 'runtime-cache-recovery'):
+        if os.path.lexists(review / name): raise ValueError('previous release recovery evidence exists')
+    reference, _ = _fresh_read(review / 'registry/slsmassnotifyserver.active.json', 1024)
+    pointer = _fresh_json(reference)
+    if (not isinstance(pointer, dict) or set(pointer) != {'generation', 'sha256'}
+            or not re.fullmatch('[a-f0-9]{64}', str(pointer.get('sha256', '')))
+            or pointer.get('generation') != 'slsmassnotifyserver-' + pointer['sha256']):
+        raise ValueError('candidate generation reference differs')
+    inventory, _ = _fresh_read(review / 'registry' / pointer['generation'] / 'inventory.json', 8 * MIB)
+    value = _fresh_json(inventory)
+    if (not isinstance(value, dict) or hashlib.sha256(inventory).hexdigest() != pointer['sha256']
+            or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('module') != 'slsmassnotifyserver' or not isinstance(value.get('source'), dict)
+            or value['source'].get('kind') != 'publisher-ed25519'
+            or not re.fullmatch('[a-f0-9]{64}', str(value.get('source', {}).get('archive_sha256', '')))
+            or not isinstance(value.get('version'), str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', value['version'])
+            or not isinstance(value.get('files'), dict) or not 1 <= len(value['files']) <= 5000):
+        raise ValueError('authenticated candidate inventory differs')
+    descriptor = _fresh_directory(candidate)
+    try:
+        if os.fstat(descriptor).st_mode & 0o022: raise ValueError('candidate source is writable')
+    finally: os.close(descriptor)
+    found = {}; count = total = 0
+    for parent, directories, files in os.walk(candidate, followlinks=False):
+        for name in (*directories, *files):
+            count += 1
+            if count > 5000: raise ValueError('candidate inventory bound')
+            path = Path(parent) / name; info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                descriptor = _fresh_directory(path); os.close(descriptor)
+            elif stat.S_ISREG(info.st_mode):
+                body, _ = _fresh_read(path, 50 * MIB, private=False)
+                total += len(body)
+                if total > 50 * MIB: raise ValueError('candidate payload bound')
+                found[path.relative_to(candidate).as_posix()] = hashlib.sha256(body).hexdigest()
+            else: raise ValueError('linked candidate source')
+    expected = value['files']
+    if set(found) != set(expected): raise ValueError('candidate inventory changed')
+    for name, digest in found.items():
+        if expected[name] != {'sha256': digest, 'target': 'admin/modules/slsmassnotifyserver/' + name}:
+            raise ValueError('candidate source changed')
+    try:
+        xml = ET.fromstring(_fresh_read(candidate / 'module.xml', MIB, private=False)[0])
+    except ET.ParseError as error:
+        raise ValueError('candidate module identity is unreadable') from error
+    if xml.findtext('rawname') != 'slsmassnotifyserver' or xml.findtext('version') != value['version']:
+        raise ValueError('candidate module identity differs')
+    return {'candidate_source': str(candidate), 'candidate_files_sha256': _fresh_digest(found),
+            'registry_reference_sha256': hashlib.sha256(reference).hexdigest(),
+            'candidate_inventory_sha256': pointer['sha256'],
+            'previous_root_approval_sha256': hashlib.sha256(previous).hexdigest(),
+            'previous_web_approval_sha256': hashlib.sha256(web).hexdigest()}
+
+
+def _fresh_journal(value, path, phase):
+    allowed = {'schema','directory','phase','created_at','updated_at','settings','stage','stage_at'}
+    if (not isinstance(value, dict) or set(value) - allowed or type(value.get('schema')) is not int
+            or value['schema'] != 1 or value.get('directory') != str(path) or value.get('phase') != phase
+            or type(value.get('created_at')) is not int or type(value.get('updated_at')) is not int
+            or not 0 <= value['created_at'] <= value['updated_at'] <= 2**63 - 1):
+        raise ValueError('unknown previous transaction')
+    settings = value.get('settings')
+    if (not isinstance(settings, dict) or set(settings) != _FRESH_SETTINGS
+            or any(not isinstance(x, str) or len(x) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in x) for x in settings.values())):
+        raise ValueError('unknown transaction settings')
+    for name in ('HAD_EXISTING_MODULE','MODULE_WAS_ENABLED','MODULE_ACTIVATED','STATIC_MUTATION_STARTED','SYSTEM_TIMEZONE_CHANGED'):
+        if settings[name] != '0': raise ValueError('previous established installation')
+    for name in ('CONFIG_SNAPSHOT','CONFIG_HASH_BEFORE','PENDING_CONFIG_SNAPSHOT','PENDING_CONFIG_HASH','MODULE_BACKUP_DIR','RECOVERY_DIR','ORIGINAL_SYSTEM_TIMEZONE'):
+        if settings[name]: raise ValueError('previous snapshot or mutation')
+    if settings['PENDING_CONFIG_STATE'] not in ('', 'absent'): raise ValueError('previous pending configuration')
+    if 'stage' in value or 'stage_at' in value:
+        stages = {'initialization','hardware admission','platform validation','release download and validation',
+                  'publisher and stock approval','FreePBX ownership protection','legacy configuration and runtime permissions',
+                  'authenticated prerequisite validation','previous phone collector recovery','notification worker coordination','configuration coordination'}
+        if value.get('stage') not in stages or type(value.get('stage_at')) is not int or not value['created_at'] <= value['stage_at'] <= value['updated_at']:
+            raise ValueError('transaction reached unqualified mutation')
+    return settings
+
+
+def _fresh_history(prefix, exclude=None):
+    root = prefix / INSTALLER_JOURNAL.lstrip('/')
+    if not os.path.lexists(root): return {}
+    descriptor = _fresh_directory(root, private=True)
+    try: names = os.listdir(descriptor)
+    finally: os.close(descriptor)
+    if len(names) > 128: raise ValueError('transaction history bound')
+    result = {}
+    for name in names:
+        path = root / name
+        if path == exclude: continue
+        if not re.fullmatch('transaction-[a-f0-9]{24}', name): raise ValueError('unknown transaction history')
+        descriptor = _fresh_directory(path, private=True)
+        try:
+            if os.listdir(descriptor) != ['transaction.json']: raise ValueError('retained previous recovery evidence')
+        finally: os.close(descriptor)
+        raw, _ = _fresh_read(path / 'transaction.json')
+        _fresh_journal(_fresh_json(raw), path, 'abandoned')
+        result[name] = hashlib.sha256(raw).hexdigest()
+    return result
+
+
+def _fresh_absence(path, prefix, account):
+    """Prove an absent name through qualified existing directory descriptors.
+
+    FreePBX's fixed native web/data parents legitimately belong to Asterisk.
+    Root runtime, key, trust and journal roles have no such ownership exception.
+    """
+    path = Path(path)
+    if not path.is_absolute() or '..' in path.parts or len(path.parts) > 128:
+        raise ValueError('unqualified absence path')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    current = Path('/')
+    try:
+        for index, part in enumerate(path.parts[1:]):
+            try: before = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError: return True
+            if index == len(path.parts) - 2: return False
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd); fd = child; current /= part
+            opened = os.fstat(fd)
+            stamp = lambda info: (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid)
+            if stamp(before) != stamp(opened): raise ValueError('absence ancestor changed')
+            logical = Path('/') / current.relative_to(prefix) if current.is_relative_to(prefix) else current
+            native = (logical.is_relative_to('/var/www/html') or logical.is_relative_to('/var/lib/asterisk'))
+            root_safe = opened.st_uid == 0 and not opened.st_mode & 0o022
+            native_safe = (native and opened.st_uid == account.pw_uid and opened.st_gid == account.pw_gid
+                           and not opened.st_mode & 0o7002)
+            temporary_parent = current == Path('/tmp') and opened.st_uid == 0 and bool(opened.st_mode & stat.S_ISVTX)
+            if not (root_safe or native_safe or temporary_parent): raise ValueError('unprotected absence ancestor')
+            attributes = os.listxattr(fd)
+            if any(name in attributes for name in ('system.posix_acl_access', 'system.posix_acl_default')):
+                raise ValueError('unqualified absence ACL')
+        return False
+    finally: os.close(fd)
+
+
+def _fresh_live(prefix):
+    account = pwd.getpwnam('asterisk'); owners = (0, account.pw_uid)
+    if account.pw_uid <= 0 or account.pw_gid <= 0: raise ValueError('native account unavailable')
+    for name in _FRESH_ABSENT:
+        if not _fresh_absence(prefix / name.lstrip('/'), prefix, account):
+            raise ValueError('established installation artifact')
+    for name in ('var/lib/sls-mass-notify-trust', 'etc/sls-mass-notify'):
+        path = prefix / name
+        if os.path.lexists(path):
+            descriptor = _fresh_directory(path)
+            try:
+                if os.listdir(descriptor): raise ValueError('retained installation authority')
+            finally: os.close(descriptor)
+    # Schedules are observed, never changed. Unknown/unreadable sources decline
+    # the optimization, including a module-less prior installation's jobs.
+    schedules = [prefix / p for p in ('etc/crontab','var/spool/cron/crontabs/root','var/spool/cron/crontabs/asterisk')]
+    cron = prefix / 'etc/cron.d'
+    if os.path.lexists(cron):
+        descriptor = _fresh_directory(cron)
+        try: names = os.listdir(descriptor)
+        finally: os.close(descriptor)
+        if len(names) > 256: raise ValueError('schedule inspection bound')
+        schedules += [cron / name for name in names]
+    for path in schedules:
+        if os.path.lexists(path):
+            raw, _ = _fresh_read(path, MIB, private=False, owners=owners)
+            if (re.search(rb'sls[_-]mass[_-]notify|slsconsole|slsmassnotifyserver|SLS_Mass_Notifications_Plugin', raw, re.I)
+                    or re.search(rb'(?:^|[\s/])(?:sls_cron_runner\.py|nws_weather_alert\.sh|nwsalerts_ensure_menu_patch\.sh)(?=$|[\s\"\'])', raw, re.M)):
+                raise ValueError('previous SLL schedule')
+    root = prefix / MANAGED_TREES['data'].lstrip('/')
+    if not os.path.lexists(root): return {}
+    descriptor = _fresh_directory(root, owners)
+    try:
+        info = os.fstat(descriptor)
+        if info.st_mode & 0o027 or info.st_gid not in (0, account.pw_gid): raise ValueError('unsafe fresh data directory')
+        names = os.listdir(descriptor)
+    finally: os.close(descriptor)
+    if len(names) > 17: raise ValueError('unknown fresh data')
+    paths = []
+    for name in names:
+        if name == 'live-paging-slots':
+            descriptor = _fresh_directory(root / name, owners)
+            try:
+                info = os.fstat(descriptor)
+                if info.st_mode & 0o027 or info.st_gid not in (0, account.pw_gid): raise ValueError('unsafe paging lock directory')
+                nested = os.listdir(descriptor)
+            finally: os.close(descriptor)
+            if len(nested) > 16: raise ValueError('paging lock bound')
+            paths += [name + '/' + x for x in nested]
+        else: paths.append(name)
+    result = {}
+    for name in paths:
+        if name not in _FRESH_LOCKS and name != 'install-failure.json': raise ValueError('unknown fresh data entry')
+        raw, info = _fresh_read(root / name, 4096, private=False, owners=owners)
+        if info.st_gid not in (0, account.pw_gid) or info.st_mode & 0o027: raise ValueError('unsafe fresh data file')
+        if name == 'install-failure.json':
+            value = _fresh_json(raw)
+            if (not isinstance(value, dict) or set(value) != {'version','failed_at','stage','message','solution','log','error_category','exit_code'}
+                    or type(value['version']) is not int or value['version'] != 1
+                    or value['message'] != 'SLL Mass Notify Server installation did not complete.'
+                    or value['stage'] not in {'hardware admission','platform validation','release download and validation','publisher and stock approval','FreePBX ownership protection','legacy configuration and runtime permissions','authenticated prerequisite validation','previous phone collector recovery','notification worker coordination','configuration coordination'}
+                    or type(value['exit_code']) is not int or not 1 <= value['exit_code'] <= 255
+                    or not re.fullmatch('[a-z][a-z0-9_]{0,63}', str(value['error_category']))):
+                raise ValueError('unknown failure diagnostic')
+            for key, maximum in (('failed_at',40),('stage',80),('message',80),('solution',400),('log',500)):
+                text = value[key]
+                if not isinstance(text,str) or len(text) > maximum or any(ord(c) < 32 or ord(c) == 127 for c in text): raise ValueError('unbounded diagnostic')
+        elif raw: raise ValueError('operational data is not an empty preparation lock')
+        result[name] = {'device':info.st_dev,'inode':info.st_ino,'uid':info.st_uid,'gid':info.st_gid,
+                        'mode':stat.S_IMODE(info.st_mode),'bytes':info.st_size,'sha256':hashlib.sha256(raw).hexdigest()}
+    return result
+
+
+def capture_fresh_release_proof(review, candidate_source, native_state, *, prefix=Path('/')):
+    """Read-only proof capsule, called only after authenticated normal review.
+
+    Prefix is for isolated filesystem fixtures, never a CLI option. Missing,
+    ambiguous or established state keeps the default previous-release budget.
+    """
+    try:
+        if os.geteuid() != 0 or native_state != 'known_absent': return None
+        review, candidate_source, prefix = Path(review), Path(candidate_source), Path(prefix)
+        binding = _fresh_review_binding(review, candidate_source)
+        history = _fresh_history(prefix); data = _fresh_live(prefix)
+        if history != _fresh_history(prefix) or data != _fresh_live(prefix): return None
+        return {'schema':1,'kind':_FRESH_KIND,'native_state':'known_absent','candidate':binding,
+                'history':history,'data':data,'establishment_paths_absent':list(_FRESH_ABSENT)}
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+def read_fresh_release_proof(review, candidate_source, *, prefix=Path('/')):
+    """Validate captured authority again inside its prepared current transaction."""
+    try:
+        if os.geteuid() != 0: return None
+        review, candidate_source, prefix = Path(review), Path(candidate_source), Path(prefix)
+        current = review.parent
+        if (review.name != 'approval' or current.parent != prefix / INSTALLER_JOURNAL.lstrip('/')
+                or not re.fullmatch('transaction-[a-f0-9]{24}', current.name)): return None
+        raw, _ = _fresh_read(review / _FRESH_FILE)
+        value = _fresh_json(raw)
+        if (not isinstance(value,dict) or set(value) != {'schema','kind','native_state','candidate','history','data','establishment_paths_absent'}
+                or type(value['schema']) is not int or value['schema'] != 1 or value['kind'] != _FRESH_KIND
+                or value['native_state'] != 'known_absent' or value['establishment_paths_absent'] != list(_FRESH_ABSENT)
+                or value['candidate'] != _fresh_review_binding(review,candidate_source)): return None
+        journal, _ = _fresh_read(current / 'transaction.json')
+        settings = _fresh_journal(_fresh_json(journal), current, 'prepared')
+        if settings['UPGRADE_TRUST_DIR'] != str(review) or settings['INSTALL_BOOTSTRAP_DIR'] != str(current / 'bootstrap'): return None
+        if any(os.path.lexists(current / name) for name in ('config.snapshot','pending.snapshot','history-evidence.json')): return None
+        history = _fresh_history(prefix, exclude=current); data = _fresh_live(prefix)
+        if history != value['history'] or not isinstance(value['data'],dict): return None
+        if any(data.get(name) != record for name,record in value['data'].items()): return None
+        if 'install-failure.json' in data and 'install-failure.json' not in value['data']: return None
+        if journal != _fresh_read(current / 'transaction.json')[0] or raw != _fresh_read(review / _FRESH_FILE)[0]: return None
+        return value
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+_INSTALL_STORAGE_KIND = 'sll-prepared-release-storage-proof-v2'
+_INSTALL_BOOTSTRAP = ('sls_module_trust.py', 'sls_release_trust.py', 'sls_privileged_install.py',
+    'sls_installer_recovery.py', 'sls_install_transaction.py', 'sls_install_idle.py',
+    'sls_install_guard.py', 'sls_audio_state.py', 'sls_config_crypto.py', 'sls_upgrade_trust.py',
+    'sls_legacy_permissions.py', 'freepbx-mirror-signing.pub')
+_INSTALL_SOURCE_ABSENT = ('/var/www/html/admin/modules/slsmassnotifyserver', MANAGED_TREES['runtime'],
+    '/var/lib/sls-mass-notify-trust/slsmassnotifyserver.active.json')
+_INSTALL_RETAINED = (MANAGED_TREES['data'] + '/mass-notifications.config',
+    MANAGED_TREES['data'] + '/mass-notifications.pending.config', '/etc/sls-mass-notify/config-keys.json',
+    '/var/lib/sls-mass-notify-trust/publisher-trust.json',
+    '/var/lib/sls-mass-notify-trust/release-trust.initialized')
+
+
+def _install_storage_review(review, candidate):
+    """Bind already publisher-approved inputs; confer no executable authority."""
+    binding = _fresh_review_binding(review, candidate)
+    pointer = _fresh_json(_fresh_read(review / 'registry/slsmassnotifyserver.active.json', 1024)[0])
+    generation = review / 'registry' / pointer['generation']
+    inventory = _fresh_json(_fresh_read(generation / 'inventory.json', 8 * MIB)[0])
+    manifest, _ = _fresh_read(generation / 'release-manifest.json', 16384)
+    signature, _ = _fresh_read(generation / 'release-manifest.sig', 64)
+    value = _fresh_json(manifest)
+    version = inventory['version']
+    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('version') != version or value.get('tag') != 'v' + version
+            or value.get('package') != 'slsmassnotifyserver-' + version + '.tgz'
+            or value.get('package_sha256') != inventory['source']['archive_sha256']
+            or not isinstance(value.get('installer_sha256'), str)
+            or re.fullmatch('[a-f0-9]{64}', value['installer_sha256']) is None
+            or len(signature) != 64):
+        raise ValueError('approved candidate release inputs differ')
+    binding.update(release_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+        release_signature_sha256=hashlib.sha256(signature).hexdigest(),
+        package_sha256=value['package_sha256'], installer_sha256=value['installer_sha256'])
+    return binding, generation
+
+
+def _install_storage_live(prefix):
+    """Observe source absence separately from retained operational files.
+
+    Retained settings, keys, history and inactive generations are never deleted
+    or interpreted as permission to restore a runtime or configuration.
+    """
+    account = pwd.getpwnam('asterisk')
+    if account.pw_uid <= 0 or account.pw_gid <= 0:
+        raise ValueError('native account unavailable')
+    for name in _INSTALL_SOURCE_ABSENT:
+        if not _fresh_absence(prefix / name.lstrip('/'), prefix, account):
+            raise ValueError('previous active release source exists')
+    result = {}
+    for name in _INSTALL_RETAINED:
+        path = prefix / name.lstrip('/')
+        if not os.path.lexists(path):
+            result[name] = None
+            continue
+        owners = (0,) if name.startswith('/etc/') or name.startswith('/var/lib/sls-mass-notify-trust/') else (0, account.pw_uid)
+        raw, info = _fresh_read(path, 3 * MIB if name.endswith('.config') else 65536,
+                               private=False, owners=owners)
+        if stat.S_IMODE(info.st_mode) not in (0o600, 0o640) or info.st_gid not in (0, account.pw_gid):
+            raise ValueError('unqualified retained storage context')
+        result[name] = {'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+            'gid': info.st_gid, 'mode': stat.S_IMODE(info.st_mode), 'bytes': info.st_size,
+            'sha256': hashlib.sha256(raw).hexdigest()}
+    return result
+
+
+def _install_storage_history(prefix, exclude=None):
+    root = prefix / INSTALLER_JOURNAL.lstrip('/')
+    if not os.path.lexists(root):
+        return {}
+    fd = _fresh_directory(root, private=True)
+    try:
+        names = sorted(os.listdir(fd))
+    finally:
+        os.close(fd)
+    if len(names) > 128:
+        raise ValueError('terminal storage history bound')
+    result = {}
+    for name in names:
+        path = root / name
+        if path == exclude:
+            continue
+        if re.fullmatch('transaction-[a-f0-9]{24}', name) is None:
+            raise ValueError('unknown previous storage transaction')
+        fd = _fresh_directory(path, private=True)
+        try:
+            if os.listdir(fd) != ['transaction.json']:
+                raise ValueError('previous recovery sources remain')
+        finally:
+            os.close(fd)
+        raw, _ = _fresh_read(path / 'transaction.json')
+        value = _fresh_json(raw)
+        allowed = {'schema', 'directory', 'phase', 'created_at', 'updated_at', 'settings', 'stage', 'stage_at'}
+        if (not isinstance(value, dict) or set(value) - allowed or type(value.get('schema')) is not int
+                or value['schema'] != 1 or value.get('directory') != str(path)
+                or value.get('phase') not in ('abandoned', 'rolled_back')
+                or type(value.get('created_at')) is not int or type(value.get('updated_at')) is not int
+                or not 0 <= value['created_at'] <= value['updated_at'] <= 2 ** 63 - 1):
+            raise ValueError('unknown terminal storage history')
+        settings = value.get('settings')
+        if (not isinstance(settings, dict) or set(settings) != _FRESH_SETTINGS
+                or any(not isinstance(x, str) or len(x) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in x)
+                       for x in settings.values())
+                or settings['HAD_EXISTING_MODULE'] != '0' or settings['MODULE_WAS_ENABLED'] != '0'
+                or any(settings[key] not in ('0', '1') for key in
+                       ('MODULE_ACTIVATED', 'STATIC_MUTATION_STARTED', 'SYSTEM_TIMEZONE_CHANGED'))):
+            raise ValueError('previous established release storage history')
+        if (value['phase'] == 'abandoned' and any(settings[key] != '0' for key in
+                ('MODULE_ACTIVATED', 'STATIC_MUTATION_STARTED', 'SYSTEM_TIMEZONE_CHANGED'))
+                or any(settings[key] == '1' for key in ('MODULE_ACTIVATED', 'SYSTEM_TIMEZONE_CHANGED'))
+                and settings['STATIC_MUTATION_STARTED'] != '1'):
+            raise ValueError('impossible terminal storage mutation flags')
+        if ('stage' in value or 'stage_at' in value) and (
+                not isinstance(value.get('stage'), str) or len(value['stage']) > 80
+                or any(ord(c) < 32 or ord(c) == 127 for c in value['stage'])
+                or type(value.get('stage_at')) is not int
+                or not value['created_at'] <= value['stage_at'] <= value['updated_at']):
+            raise ValueError('invalid terminal storage stage')
+        result[name] = hashlib.sha256(raw).hexdigest()
+    return result
+
+
+def capture_install_storage_proof(review, candidate_source, native_state, *, prefix=Path('/')):
+    """Capture a capacity-only source relationship after normal approval.
+
+    The early capsule cannot remove resident-role costs. Only its prepared
+    reader can establish that the exact current inputs are durably present.
+    """
+    try:
+        if os.geteuid() != 0 or native_state != 'known_absent':
+            return None
+        review, candidate_source, prefix = Path(review), Path(candidate_source), Path(prefix)
+        binding, _ = _install_storage_review(review, candidate_source)
+        history = _install_storage_history(prefix)
+        retained = _install_storage_live(prefix)
+        if history != _install_storage_history(prefix) or retained != _install_storage_live(prefix):
+            return None
+        return {'schema': 2, 'kind': _INSTALL_STORAGE_KIND, 'capacity_only': True,
+            'prepared_verification_required': True, 'native_state': 'known_absent',
+            'candidate': binding, 'history': history, 'retained': retained}
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+def _install_storage_resident(current, review, candidate, binding, generation):
+    # These inputs were copied/moved by begin_install_transaction before the
+    # late admission. Existing free space already excludes their allocation.
+    registered = _fresh_review_binding(review, generation / 'module')
+    expected = {k: v for k, v in binding.items() if k in registered and k != 'candidate_source'}
+    if {k: v for k, v in registered.items() if k != 'candidate_source'} != expected:
+        raise ValueError('prepared candidate approval source differs')
+    hashes = {'installer.sh': (binding['installer_sha256'], 2 * MIB),
+        'package.tgz': (binding['package_sha256'], 52 * MIB),
+        'release-manifest.json': (binding['release_manifest_sha256'], 16384),
+        'release-manifest.sig': (binding['release_signature_sha256'], 64)}
+    for name, (expected_hash, maximum) in hashes.items():
+        body, info = _fresh_read(current / name, maximum)
+        if stat.S_IMODE(info.st_mode) != 0o600 or hashlib.sha256(body).hexdigest() != expected_hash:
+            raise ValueError('prepared release input differs')
+    fd = _fresh_directory(current / 'bootstrap', private=True)
+    try:
+        if set(os.listdir(fd)) != set(_INSTALL_BOOTSTRAP):
+            raise ValueError('prepared bootstrap membership differs')
+    finally:
+        os.close(fd)
+    for name in _INSTALL_BOOTSTRAP:
+        body, info = _fresh_read(current / 'bootstrap' / name, 50 * MIB)
+        source, _ = _fresh_read(candidate / 'bin/sls_mass_notify' / name, 50 * MIB, private=False)
+        if stat.S_IMODE(info.st_mode) != (0o600 if name.endswith('.pub') else 0o700) or body != source:
+            raise ValueError('prepared bootstrap source differs')
+
+
+def read_install_storage_proof(review, candidate_source, *, prefix=Path('/')):
+    """Validate all prepared roles; unknown evidence retains every full reserve."""
+    try:
+        if os.geteuid() != 0:
+            return None
+        review, candidate_source, prefix = Path(review), Path(candidate_source), Path(prefix)
+        current = review.parent
+        if (review.name != 'approval' or current.parent != prefix / INSTALLER_JOURNAL.lstrip('/')
+                or re.fullmatch('transaction-[a-f0-9]{24}', current.name) is None):
+            return None
+        raw, _ = _fresh_read(review / _FRESH_FILE)
+        value = _fresh_json(raw)
+        if (not isinstance(value, dict) or set(value) != {'schema', 'kind', 'capacity_only',
+                'prepared_verification_required', 'native_state', 'candidate', 'history', 'retained'}
+                or type(value.get('schema')) is not int or value['schema'] != 2
+                or value['kind'] != _INSTALL_STORAGE_KIND or value['capacity_only'] is not True
+                or value['prepared_verification_required'] is not True or value['native_state'] != 'known_absent'):
+            return None
+        binding, generation = _install_storage_review(review, candidate_source)
+        if value['candidate'] != binding:
+            return None
+        journal, _ = _fresh_read(current / 'transaction.json')
+        settings = _fresh_journal(_fresh_json(journal), current, 'prepared')
+        if (settings['UPGRADE_TRUST_DIR'] != str(review)
+                or settings['INSTALL_BOOTSTRAP_DIR'] != str(current / 'bootstrap')):
+            return None
+        history = _install_storage_history(prefix, exclude=current)
+        retained = _install_storage_live(prefix)
+        if history != value['history'] or retained != value['retained']:
+            return None
+        _install_storage_resident(current, review, candidate_source, binding, generation)
+        if (journal != _fresh_read(current / 'transaction.json')[0]
+                or raw != _fresh_read(review / _FRESH_FILE)[0]
+                or history != _install_storage_history(prefix, exclude=current)
+                or retained != _install_storage_live(prefix)
+                or binding != _install_storage_review(review, candidate_source)[0]):
+            return None
+        return value
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+def _stock_storage_binding(workspace, root, *, reader, directory):
+    """Bind complete protected cache and pending package sizes for capacity only.
+
+    The caller supplies protected, stable byte/directory readers. Only complete
+    independently approved native versions qualify. A new pending package must
+    match that version's signed archive digest. The writer re-verifies GPG.
+    """
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import re
+    def require(ok):
+        if not ok:
+            raise ValueError('Incomplete or changed protected stock cache storage role')
+    def strict(raw):
+        def pairs(rows):
+            result = {}
+            for key, value in rows:
+                require(key not in result); result[key] = value
+            return result
+        def invalid(unused):
+            raise ValueError('Nonfinite stock storage metadata')
+        return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
+    def names(path):
+        descriptor = directory(path)
+        try:
+            result = sorted(os.listdir(descriptor))
+        finally:
+            os.close(descriptor)
+        require(len(result) <= 512)
+        return result
+    workspace, root = Path(workspace), Path(root)
+    pending_names = names(workspace)
+    folder = root / 'stock-packages'
+    cache_names = names(folder)
+    require(2 <= len(cache_names) <= 4)
+    require(all(sum(name.startswith(module + '-') for name in cache_names) <= 2 for module in ('dashboard', 'framework')))
+    pattern = r'(dashboard|framework)-(17\.[0-9]+(?:\.[0-9]+){1,3})\.tgz\.gpg'
+    cached = {}
+    for name in cache_names:
+        require(re.fullmatch(pattern, name) is not None)
+        body = reader(folder / name, 64 * 1024**2)
+        require(0 < len(body) <= 64 * 1024**2)
+        cached[name] = {'sha256': hashlib.sha256(body).hexdigest(), 'bytes': len(body)}
+    pending = {}
+    for name in pending_names:
+        if not name.startswith(('dashboard-', 'framework-')) or not name.endswith('.tgz.gpg'):
+            continue
+        require(re.fullmatch(pattern, name) is not None and len(pending) < 4)
+        body = reader(workspace / name, 64 * 1024**2)
+        require(0 < len(body) <= 64 * 1024**2)
+        row = {'sha256': hashlib.sha256(body).hexdigest(), 'bytes': len(body)}
+        require(name not in cached or row == cached[name])
+        pending[name] = row
+    approved = {}
+    for module in ('dashboard', 'framework'):
+        body = reader(workspace / (module + '.json'), 8 * 1024**2)
+        value = strict(body)
+        require(type(value) is dict and type(value.get('schema')) is int and value['schema'] == 1
+                and value.get('module') == module and type(value.get('version')) is str
+                and re.fullmatch(r'17\.[0-9]+(?:\.[0-9]+){1,3}', value['version']) is not None)
+        source = value.get('source')
+        require(type(source) is dict and source.get('kind') == 'reviewed-upstream-and-overlays'
+                and source.get('upstream_signer') == '456D051E9204C27C37D4811BB53D215A755231A3'
+                and type(source.get('signed_archive_sha256')) is str
+                and re.fullmatch('[a-f0-9]{64}', source['signed_archive_sha256']) is not None)
+        name = module + '-' + value['version'] + '.tgz.gpg'
+        available = pending.get(name, cached.get(name))
+        require(available is not None and available['sha256'] == source['signed_archive_sha256'])
+        approved[module] = {'version': value['version'], 'signed_archive_sha256': source['signed_archive_sha256'],
+                            'inventory_sha256': hashlib.sha256(body).hexdigest()}
+    new = set(pending) - set(cached)
+    expected = {module + '-' + item['version'] + '.tgz.gpg' for module, item in approved.items()}
+    require(new <= expected)
+    return {'approved': approved, 'cached': cached, 'pending': pending}
+
+
+def _upgrade_candidate_binding(review, candidate):
+    descriptor = _fresh_directory(review, private=True); os.close(descriptor)
+    previous, _ = _fresh_read(review / 'previous-root-approval.json')
+    web, _ = _fresh_read(review / 'previous-web-approval.json', 8 * MIB)
+    prior, prior_web = _fresh_json(previous), _fresh_json(web)
+    if type(prior) is not dict or type(prior_web) is not dict:
+        raise ValueError('independent previous approvals are incomplete')
+    reference, _ = _fresh_read(review / 'registry/slsmassnotifyserver.active.json', 1024)
+    pointer = _fresh_json(reference)
+    if (not isinstance(pointer, dict) or set(pointer) != {'generation', 'sha256'}
+            or not re.fullmatch('[a-f0-9]{64}', str(pointer.get('sha256', '')))
+            or pointer.get('generation') != 'slsmassnotifyserver-' + pointer['sha256']):
+        raise ValueError('candidate generation reference differs')
+    inventory, _ = _fresh_read(review / 'registry' / pointer['generation'] / 'inventory.json', 8 * MIB)
+    value = _fresh_json(inventory)
+    if (not isinstance(value, dict) or hashlib.sha256(inventory).hexdigest() != pointer['sha256']
+            or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('module') != 'slsmassnotifyserver' or not isinstance(value.get('source'), dict)
+            or value['source'].get('kind') != 'publisher-ed25519'
+            or not re.fullmatch('[a-f0-9]{64}', str(value.get('source', {}).get('archive_sha256', '')))
+            or not isinstance(value.get('version'), str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', value['version'])
+            or not isinstance(value.get('files'), dict) or not 1 <= len(value['files']) <= 5000):
+        raise ValueError('authenticated candidate inventory differs')
+    descriptor = _fresh_directory(candidate)
+    try:
+        if os.fstat(descriptor).st_mode & 0o022: raise ValueError('candidate source is writable')
+    finally: os.close(descriptor)
+    found = {}; count = total = 0
+    for parent, directories, files in os.walk(candidate, followlinks=False):
+        for name in (*directories, *files):
+            count += 1
+            if count > 5000: raise ValueError('candidate inventory bound')
+            path = Path(parent) / name; info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                descriptor = _fresh_directory(path); os.close(descriptor)
+            elif stat.S_ISREG(info.st_mode):
+                body, _ = _fresh_read(path, 50 * MIB, private=False)
+                total += len(body)
+                if total > 50 * MIB: raise ValueError('candidate payload bound')
+                found[path.relative_to(candidate).as_posix()] = hashlib.sha256(body).hexdigest()
+            else: raise ValueError('linked candidate source')
+    expected = value['files']
+    if set(found) != set(expected): raise ValueError('candidate inventory changed')
+    for name, digest in found.items():
+        if expected[name] != {'sha256': digest, 'target': 'admin/modules/slsmassnotifyserver/' + name}:
+            raise ValueError('candidate source changed')
+    try:
+        xml = ET.fromstring(_fresh_read(candidate / 'module.xml', MIB, private=False)[0])
+    except ET.ParseError as error:
+        raise ValueError('candidate module identity is unreadable') from error
+    if xml.findtext('rawname') != 'slsmassnotifyserver' or xml.findtext('version') != value['version']:
+        raise ValueError('candidate module identity differs')
+    return {'candidate_source': str(candidate), 'candidate_files_sha256': _fresh_digest(found),
+            'registry_reference_sha256': hashlib.sha256(reference).hexdigest(),
+            'candidate_inventory_sha256': pointer['sha256'],
+            'previous_root_approval_sha256': hashlib.sha256(previous).hexdigest(),
+            'previous_web_approval_sha256': hashlib.sha256(web).hexdigest()}
+
+def _upgrade_storage_review(review, candidate):
+    """Bind already publisher-approved inputs; confer no executable authority."""
+    binding = _upgrade_candidate_binding(review, candidate)
+    pointer = _fresh_json(_fresh_read(review / 'registry/slsmassnotifyserver.active.json', 1024)[0])
+    generation = review / 'registry' / pointer['generation']
+    inventory = _fresh_json(_fresh_read(generation / 'inventory.json', 8 * MIB)[0])
+    manifest, _ = _fresh_read(generation / 'release-manifest.json', 16384)
+    signature, _ = _fresh_read(generation / 'release-manifest.sig', 64)
+    value = _fresh_json(manifest)
+    version = inventory['version']
+    if (not isinstance(value, dict) or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('version') != version or value.get('tag') != 'v' + version
+            or value.get('package') != 'slsmassnotifyserver-' + version + '.tgz'
+            or value.get('package_sha256') != inventory['source']['archive_sha256']
+            or not isinstance(value.get('installer_sha256'), str)
+            or re.fullmatch('[a-f0-9]{64}', value['installer_sha256']) is None
+            or len(signature) != 64):
+        raise ValueError('approved candidate release inputs differ')
+    binding.update(release_manifest_sha256=hashlib.sha256(manifest).hexdigest(),
+        release_signature_sha256=hashlib.sha256(signature).hexdigest(),
+        package_sha256=value['package_sha256'], installer_sha256=value['installer_sha256'])
+    return binding, generation
+
+def _upgrade_storage_resident(current, review, candidate, binding, generation):
+    # These inputs were copied/moved by begin_install_transaction before the
+    # late admission. Existing free space already excludes their allocation.
+    registered = _upgrade_candidate_binding(review, generation / 'module')
+    expected = {k: v for k, v in binding.items() if k in registered and k != 'candidate_source'}
+    if {k: v for k, v in registered.items() if k != 'candidate_source'} != expected:
+        raise ValueError('prepared candidate approval source differs')
+    hashes = {'installer.sh': (binding['installer_sha256'], 2 * MIB),
+        'package.tgz': (binding['package_sha256'], 52 * MIB),
+        'release-manifest.json': (binding['release_manifest_sha256'], 16384),
+        'release-manifest.sig': (binding['release_signature_sha256'], 64)}
+    for name, (expected_hash, maximum) in hashes.items():
+        body, info = _fresh_read(current / name, maximum)
+        if stat.S_IMODE(info.st_mode) != 0o600 or hashlib.sha256(body).hexdigest() != expected_hash:
+            raise ValueError('prepared release input differs')
+    fd = _fresh_directory(current / 'bootstrap', private=True)
+    try:
+        if set(os.listdir(fd)) != set(_INSTALL_BOOTSTRAP):
+            raise ValueError('prepared bootstrap membership differs')
+    finally:
+        os.close(fd)
+    for name in _INSTALL_BOOTSTRAP:
+        body, info = _fresh_read(current / 'bootstrap' / name, 50 * MIB)
+        source, _ = _fresh_read(candidate / 'bin/sls_mass_notify' / name, 50 * MIB, private=False)
+        if stat.S_IMODE(info.st_mode) != (0o600 if name.endswith('.pub') else 0o700) or body != source:
+            raise ValueError('prepared bootstrap source differs')
+
+_UPGRADE_STORAGE_KIND = 'sll-prepared-upgrade-storage-proof-v3'
+
+
+def _upgrade_previous_binding(review, prefix):
+    """The prior protected source is resident, not absent or newly downloaded."""
+    trust = prefix / 'var/lib/sls-mass-notify-trust'
+    descriptor = _fresh_directory(trust, private=True); os.close(descriptor)
+    for name in ('previous-release', 'previous-registry'):
+        if os.path.lexists(review / name):
+            raise ValueError('previous release acquisition is not fully resident')
+    pointer_raw, _ = _fresh_read(trust / 'slsmassnotifyserver.active.json', 1024)
+    pointer = _fresh_json(pointer_raw)
+    if (type(pointer) is not dict or set(pointer) != {'generation', 'sha256'}
+            or type(pointer['sha256']) is not str or re.fullmatch('[a-f0-9]{64}', pointer['sha256']) is None
+            or pointer['generation'] != 'slsmassnotifyserver-' + pointer['sha256']):
+        raise ValueError('incomplete previous active generation')
+    generation = trust / pointer['generation']
+    descriptor = _fresh_directory(generation, private=True); os.close(descriptor)
+    raw, _ = _fresh_read(generation / 'inventory.json', 8 * MIB)
+    data = _fresh_json(raw)
+    prior = _fresh_json(_fresh_read(review / 'previous-web-approval.json', 8 * MIB)[0])
+    approval = _fresh_json(_fresh_read(review / 'previous-root-approval.json', 8 * MIB)[0])
+    if (type(data) is not dict or hashlib.sha256(raw).hexdigest() != pointer['sha256']
+            or type(data.get('schema')) is not int or data['schema'] != 1
+            or data.get('module') != 'slsmassnotifyserver' or type(data.get('version')) is not str
+            or re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-beta)?', data['version']) is None
+            or type(data.get('source')) is not dict or data['source'].get('kind') != 'publisher-ed25519'
+            or re.fullmatch('[a-f0-9]{64}', str(data['source'].get('archive_sha256', ''))) is None
+            or type(data.get('files')) is not dict or not 1 <= len(data['files']) <= MAX_RELEASE_ENTRIES
+            or type(prior) is not dict or prior.get('slsmassnotifyserver') != data
+            or type(approval) is not dict or type(approval.get('schema')) is not int or approval['schema'] != 1
+            or approval.get('source') != 'publisher-verified-previous-release'
+            or approval.get('version') != data['version']
+            or approval.get('archive_sha256') != data['source']['archive_sha256']):
+        raise ValueError('previous source does not match independent approval')
+    found = {}; total = count = 0
+    for parent, directories, files in os.walk(generation / 'module', followlinks=False):
+        for name in (*directories, *files):
+            count += 1
+            if count > MAX_RELEASE_ENTRIES:
+                raise ValueError('previous source entry bound')
+            path = Path(parent) / name
+            if path.is_symlink():
+                raise ValueError('linked previous source')
+            if path.is_dir():
+                descriptor = _fresh_directory(path); os.close(descriptor)
+            elif path.is_file():
+                body, _ = _fresh_read(path, 50 * MIB)
+                total += len(body)
+                if len(found) >= MAX_RELEASE_ENTRIES or total > 50 * MIB:
+                    raise ValueError('previous source exceeds inventory bound')
+                found[path.relative_to(generation / 'module').as_posix()] = hashlib.sha256(body).hexdigest()
+            else:
+                raise ValueError('special previous source')
+    if set(found) != set(data['files']):
+        raise ValueError('previous source membership differs')
+    expected_runtime = {}
+    for name, digest in found.items():
+        if data['files'][name] != {'sha256': digest, 'target': 'admin/modules/slsmassnotifyserver/' + name}:
+            raise ValueError('previous source bytes differ')
+        if name == 'bin/sign_sls_mass_notify_local_sig.sh': target = '/usr/local/sbin/sign_sls_mass_notify_local_sig.sh'
+        elif name == 'bin/slsconsole': target = '/usr/local/bin/slsconsole'
+        elif name.startswith('bin/sls_mass_notify/'): target = MANAGED_TREES['runtime'] + '/' + name[len('bin/sls_mass_notify/'):]
+        elif name.startswith('bin/') and '/' not in name[4:]: target = MANAGED_TREES['runtime'] + '/' + name[4:]
+        else: continue
+        expected_runtime[target] = digest
+    if approval.get('files') != expected_runtime:
+        raise ValueError('previous root source approval differs')
+    manifest, _ = _fresh_read(generation / 'release-manifest.json', 16384)
+    signature, _ = _fresh_read(generation / 'release-manifest.sig', 64)
+    value = _fresh_json(manifest); version = data['version']
+    tags = ('v' + version, 'slsmassnotifyserver-' + version) + (('V0.1.9-beta', 'release-0.1.9-beta') if version == '0.1.9-beta' else ())
+    if (type(value) is not dict or type(value.get('schema')) is not int or value['schema'] != 1
+            or value.get('version') != version or value.get('tag') not in tags
+            or value.get('package') != 'slsmassnotifyserver-' + version + '.tgz'
+            or value.get('package_sha256') != data['source']['archive_sha256'] or len(signature) != 64):
+        raise ValueError('previous signed inputs differ')
+    try:
+        xml = ET.fromstring(_fresh_read(generation / 'module/module.xml', MIB)[0])
+    except ET.ParseError as error:
+        raise ValueError('previous module identity is unreadable') from error
+    if xml.findtext('rawname') != 'slsmassnotifyserver' or xml.findtext('version') != version:
+        raise ValueError('previous module identity differs')
+    return {'active_reference_sha256': hashlib.sha256(pointer_raw).hexdigest(),
+            'inventory_sha256': pointer['sha256'], 'generation': pointer['generation'],
+            'module_files_sha256': _fresh_digest(found),
+            'release_manifest_sha256': hashlib.sha256(manifest).hexdigest(),
+            'release_signature_sha256': hashlib.sha256(signature).hexdigest()}
+
+
+def _upgrade_native_stock_versions(prefix):
+    account = pwd.getpwnam('asterisk'); result = {}
+    for module in ('dashboard', 'framework'):
+        path = prefix / 'var/www/html/admin/modules' / module / 'module.xml'
+        if path.resolve() != path:
+            raise ValueError('native stock module identity is not canonical')
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(descriptor)
+            stamp = lambda info: tuple(getattr(info, 'st_' + key) for key in
+                ('dev','ino','uid','gid','mode','nlink','size','mtime_ns','ctime_ns'))
+            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                    or before.st_uid not in (0, account.pw_uid) or before.st_gid not in (0, account.pw_gid)
+                    or before.st_mode & 0o7002 or not 0 < before.st_size <= MIB):
+                raise ValueError('native stock module identity is unsafe')
+            with os.fdopen(os.dup(descriptor), 'rb') as stream: body = stream.read(MIB + 1)
+            if len(body) != before.st_size or stamp(before) != stamp(os.fstat(descriptor)) or stamp(before) != stamp(path.lstat()):
+                raise ValueError('native stock module identity changed')
+        finally:
+            os.close(descriptor)
+        if b'<!DOCTYPE' in body.upper() or b'<!ENTITY' in body.upper():
+            raise ValueError('native stock module identity has unsupported declarations')
+        try: xml = ET.fromstring(body)
+        except ET.ParseError as error: raise ValueError('native stock module identity is unreadable') from error
+        version = xml.findtext('version')
+        if xml.findtext('rawname') != module or type(version) is not str or re.fullmatch(r'17\.[0-9]+(?:\.[0-9]+){1,3}', version) is None:
+            raise ValueError('native stock module identity is unsupported')
+        result[module] = version
+    return result
+
+
+def _upgrade_stock_read(path, maximum):
+    body, info = _fresh_read(path, maximum)
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError('private stock storage file mode differs')
+    return body
+
+
+def _upgrade_stock_directory(path):
+    descriptor = _fresh_directory(path, private=True)
+    if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+        os.close(descriptor)
+        raise ValueError('private stock storage directory mode differs')
+    return descriptor
+
+
+def _upgrade_stock_binding(review, prefix):
+    first = _stock_storage_binding(review, prefix / 'var/lib/sls-mass-notify-trust',
+        reader=_upgrade_stock_read,
+        directory=_upgrade_stock_directory)
+    if first != _stock_storage_binding(review, prefix / 'var/lib/sls-mass-notify-trust',
+            reader=_upgrade_stock_read,
+            directory=_upgrade_stock_directory):
+        raise ValueError('stock storage roles changed')
+    versions = _upgrade_native_stock_versions(prefix)
+    if any(first['approved'][module]['version'] != version for module, version in versions.items()):
+        raise ValueError('cached stock does not cover the exact native version')
+    return first
+
+
+def _possible_upgrade_stock_binding(review, prefix):
+    try:
+        return _upgrade_stock_binding(review, prefix)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        # Candidate and previous sources can be complete while cache growth
+        # remains unknown. In that case no stock-specific discount is approved.
+        return None
+
+
+def capture_prepared_upgrade_storage_proof(review, candidate_source, native_state, *, prefix=Path('/')):
+    """Capture only authenticated source/cache facts, never operational authority."""
+    try:
+        if os.geteuid() != 0 or native_state != 'established':
+            return None
+        review, candidate_source, prefix = Path(review), Path(candidate_source), Path(prefix)
+        binding, _ = _upgrade_storage_review(review, candidate_source)
+        previous = _upgrade_previous_binding(review, prefix)
+        stock = _possible_upgrade_stock_binding(review, prefix)
+        if (binding != _upgrade_storage_review(review, candidate_source)[0]
+                or previous != _upgrade_previous_binding(review, prefix)
+                or stock != _possible_upgrade_stock_binding(review, prefix)):
+            return None
+        return {'schema': 3, 'kind': _UPGRADE_STORAGE_KIND, 'capacity_only': True,
+                'prepared_verification_required': True, 'native_state': 'established',
+                'candidate': binding, 'previous': previous, 'stock_cache': stock}
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+def _upgrade_current_journal(raw, current, review):
+    value = _fresh_json(raw)
+    allowed = {'schema', 'directory', 'phase', 'created_at', 'updated_at', 'settings', 'stage', 'stage_at'}
+    if (type(value) is not dict or set(value) - allowed or type(value.get('schema')) is not int
+            or value['schema'] != 1 or value.get('directory') != str(current) or value.get('phase') != 'prepared'
+            or type(value.get('created_at')) is not int or type(value.get('updated_at')) is not int
+            or not 0 <= value['created_at'] <= value['updated_at'] < 2**63):
+        raise ValueError('unqualified prepared upgrade journal')
+    settings = value.get('settings')
+    if (type(settings) is not dict or set(settings) != _FRESH_SETTINGS
+            or any(type(x) is not str or len(x) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in x) for x in settings.values())
+            or settings['HAD_EXISTING_MODULE'] != '1' or settings['MODULE_WAS_ENABLED'] not in ('0', '1')
+            or any(settings[name] != '0' for name in ('MODULE_ACTIVATED', 'STATIC_MUTATION_STARTED', 'SYSTEM_TIMEZONE_CHANGED'))
+            or settings['UPGRADE_TRUST_DIR'] != str(review) or settings['INSTALL_BOOTSTRAP_DIR'] != str(current / 'bootstrap')):
+        raise ValueError('upgrade journal phase or source roles differ')
+    if ('stage' in value or 'stage_at' in value) and (type(value.get('stage')) is not str
+            or len(value['stage']) > 80 or any(ord(c) < 32 or ord(c) == 127 for c in value['stage'])
+            or type(value.get('stage_at')) is not int or not value['created_at'] <= value['stage_at'] <= value['updated_at']):
+        raise ValueError('unqualified prepared upgrade stage')
+    return settings
+
+
+def read_prepared_upgrade_storage_proof(review, candidate_source, *, prefix=Path('/')):
+    """Recheck complete prepared upgrade roles; ambiguity keeps full reserves."""
+    try:
+        if os.geteuid() != 0:
+            return None
+        review, candidate_source, prefix = Path(review), Path(candidate_source), Path(prefix)
+        current = review.parent
+        if (review.name != 'approval' or current.parent != prefix / INSTALLER_JOURNAL.lstrip('/')
+                or re.fullmatch('transaction-[a-f0-9]{24}', current.name) is None):
+            return None
+        raw, _ = _fresh_read(review / _FRESH_FILE, 4 * MIB); value = _fresh_json(raw)
+        if (type(value) is not dict or set(value) != {'schema', 'kind', 'capacity_only', 'prepared_verification_required',
+                'native_state', 'candidate', 'previous', 'stock_cache'}
+                or type(value.get('schema')) is not int or value['schema'] != 3 or value['kind'] != _UPGRADE_STORAGE_KIND
+                or value['capacity_only'] is not True or value['prepared_verification_required'] is not True
+                or value['native_state'] != 'established'):
+            return None
+        binding, generation = _upgrade_storage_review(review, candidate_source)
+        previous = _upgrade_previous_binding(review, prefix); stock = _possible_upgrade_stock_binding(review, prefix)
+        if value['candidate'] != binding or value['previous'] != previous or value['stock_cache'] != stock:
+            return None
+        journal, _ = _fresh_read(current / 'transaction.json')
+        _upgrade_current_journal(journal, current, review)
+        _upgrade_storage_resident(current, review, candidate_source, binding, generation)
+        if (journal != _fresh_read(current / 'transaction.json')[0]
+                or raw != _fresh_read(review / _FRESH_FILE, 4 * MIB)[0]
+                or binding != _upgrade_storage_review(review, candidate_source)[0]
+                or previous != _upgrade_previous_binding(review, prefix) or stock != _possible_upgrade_stock_binding(review, prefix)):
+            return None
+        return value
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+
+
+def probe_prepared_piper_reuse(review, candidate_source, proof):
+    """Invoke only candidate-authenticated validation after the full v3 proof.
+
+    This returns capacity evidence, never execution/restoration authority. A
+    missing, incompatible, changed or unhealthy runtime keeps replacement costs.
+    Periodic runtime/Doctor checks never call this installation-only operation.
+    """
+    try:
+        if (os.geteuid() != 0 or type(proof) is not dict or type(proof.get('schema')) is not int
+                or proof['schema'] != 3 or proof.get('kind') != _UPGRADE_STORAGE_KIND
+                or proof.get('capacity_only') is not True):
+            return None
+        review, candidate_source = Path(review), Path(candidate_source)
+        expected = proof['candidate']['candidate_inventory_sha256']
+        generation = 'slsmassnotifyserver-' + expected
+        if re.fullmatch('[a-f0-9]{64}', expected) is None:
+            return None
+        inventory_raw, _ = _fresh_read(review / 'registry' / generation / 'inventory.json', 8 * MIB)
+        if hashlib.sha256(inventory_raw).hexdigest() != expected:
+            return None
+        inventory = _fresh_json(inventory_raw)
+        relative = 'bin/sls_mass_notify/sls_piper_environment.py'
+        body, _ = _fresh_read(candidate_source / relative, 2 * MIB, private=False)
+        if hashlib.sha256(body).hexdigest() != inventory['files'][relative]['sha256']:
+            return None
+        previous = proof['previous']['generation']
+        if previous != 'slsmassnotifyserver-' + proof['previous']['inventory_sha256']:
+            return None
+        previous_contract = Path('/var/lib/sls-mass-notify-trust') / previous / 'module/bin/sls_mass_notify'
+        module = types.ModuleType('authenticated_candidate_piper_reuse')
+        module.__file__ = str(candidate_source / relative)
+        exec(compile(body, module.__file__, 'exec'), module.__dict__)
+        result = module.probe_runtime_reuse(Path(MANAGED_TREES['runtime']) / 'piper',
+            candidate_source / 'bin/sls_mass_notify', previous_contract)
+        if (type(result) is not dict or type(result.get('schema')) is not int or result['schema'] != 1
+                or result.get('kind') != 'sll-qualified-piper-reuse-v1' or result.get('qualified') is not True
+                or read_prepared_upgrade_storage_proof(review, candidate_source) != proof):
+            return None
+        return result
+    except (OSError, ValueError, RuntimeError, TypeError, KeyError, AttributeError, RecursionError):
+        return None
+
+
+def piper_preparation_requirements(full, *, runtime_audio_bytes=0):
+    """Remaining Piper/writer effects, with all operational floors preserved.
+
+    Already retained release inputs, source/cache publications and prior-static
+    snapshots stay physically occupied; this writer does not create them again.
+    This scope confers no installation, settings or recovery authority.
+    """
+    if type(full) is not dict or full.get('mode') != 'install' or type(runtime_audio_bytes) is not int or runtime_audio_bytes < 0:
+        raise ValueError('Complete install allocation and runtime audio floor required')
+    parts = full['component_budgets_bytes']; temporary = full['temporary_directory']
+    components = {MANAGED_TREES[name]: dict(parts[MANAGED_TREES[name]]) for name in
+        ('data','config_backups','voices','module','web','sip_api','control_api','operator_portal')}
+    components['/var/log'] = dict(parts['/var/log'])
+    components[INSTALLER_JOURNAL] = {name: parts[INSTALLER_JOURNAL][name] for name in
+        ('protected_config_snapshot','journal_metadata')}
+    components['/var/lib/sls-mass-notify-trust'] = {
+        'stock_and_release_manifests': parts['/var/lib/sls-mass-notify-trust']['stock_and_release_manifests']}
+    runtime = MANAGED_TREES['runtime']; environment = full['piper_environment_requirements']; scratch = full['piper_temporary_requirements']
+    components[runtime] = {'replacement_runtime': environment['environment_bytes']}
+    unit = scratch['allocation_unit']
+    components[temporary] = {'pinned_wheel_downloads': rounded(PINNED_WHEEL_BYTES, unit),
+        'wheel_unpack_workspace': scratch['environment_bytes'], 'pip_old_package_recovery': scratch['environment_bytes'],
+        'one_voice_download': parts[temporary]['one_voice_download'],
+        'quarantined_python_caches': parts[temporary]['quarantined_python_caches']}
+    if runtime_audio_bytes:
+        components.setdefault('/tmp', {})['runtime_audio_headroom'] = runtime_audio_bytes
+    budgets = {path: sum(row.values()) for path, row in components.items()}
+    inodes = {path: full['inode_budgets'].get(path, 0) for path in components}
+    inodes[runtime] = environment['required_inodes']
+    inodes[temporary] = 2 * scratch['required_inodes'] + 128
+    if runtime_audio_bytes:
+        inodes['/tmp'] = inodes.get('/tmp', 0) + 32
+    result = {k: v for k, v in full.items() if k not in
+        ('previous_release_required','prepared_release_resident','stock_cache_publication_required','stock_cache_publication_sizes')}
+    result.update(basis='piper_dependency_remaining_effects_2026-11-15', piper_preparation_only=True,
+        qualified_piper_reuse=False, component_budgets_bytes=components, free_budgets_bytes=budgets,
+        inode_budgets=inodes, temporary_free_bytes=budgets[temporary], additional_free_bytes=sum(budgets.values()),
+        sls_persistent_free_bytes=sum(value for path,value in budgets.items() if path not in ('/tmp','/var/tmp',temporary)))
+    return result
+
+
+def _piper_preparation_payloads():
+    """Only a protected active generation matching this helper narrows payloads."""
+    try:
+        trust = Path('/var/lib/sls-mass-notify-trust')
+        reference = _fresh_json(_fresh_read(trust / 'slsmassnotifyserver.active.json', 1024)[0])
+        if (type(reference) is not dict or set(reference) != {'generation','sha256'}
+                or type(reference['sha256']) is not str or re.fullmatch('[a-f0-9]{64}',reference['sha256']) is None
+                or reference['generation'] != 'slsmassnotifyserver-' + reference['sha256']):
+            return None
+        generation = trust / reference['generation']
+        raw, _ = _fresh_read(generation / 'inventory.json', 8 * MIB)
+        inventory = _fresh_json(raw)
+        if (hashlib.sha256(raw).hexdigest() != reference['sha256'] or type(inventory) is not dict
+                or type(inventory.get('schema')) is not int or inventory['schema'] != 1
+                or inventory.get('module') != 'slsmassnotifyserver'
+                or inventory.get('source',{}).get('kind') != 'publisher-ed25519'):
+            return None
+        helper, _ = _fresh_read(Path(__file__), 2 * MIB, private=False)
+        if hashlib.sha256(helper).hexdigest() != inventory['files']['bin/sls_mass_notify/sls_resource_capacity.py']['sha256']:
+            return None
+        return measure_release_payloads(generation / 'module')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        return None
+
+
+def voice_write_budgets(full, name, temporary, stage, *, target_unit, scratch_unit, audio_floor):
+    """Additional blocks and inodes while replacing one voice, including outstanding installation work."""
+    catalog = dict(VOICE_BYTES)
+    for pack in full['optional_voice_packs']:
+        catalog.update(REGIONAL_VOICE_BYTES[pack])
+    if name not in catalog or stage not in ('download', 'promote'):
+        raise ValueError('Unknown voice artifact or write phase')
+    voice = MANAGED_TREES['voices']
+    paths = [MANAGED_TREES[role] for role in
+             ('data', 'config_backups', 'module', 'web', 'sip_api', 'control_api', 'operator_portal')]
+    paths.append('/var/log')
+    budgets = {path: full['free_budgets_bytes'][path] for path in paths}
+    inodes = {path: full['inode_budgets'][path] for path in paths}
+    # The staged runtime and its recovery copies are already resident. The
+    # configuration snapshot, manifests and module activation still lie ahead.
+    parts = full['component_budgets_bytes']
+    budgets[INSTALLER_JOURNAL] = sum(parts[INSTALLER_JOURNAL][key]
+                                     for key in ('protected_config_snapshot', 'journal_metadata'))
+    inodes[INSTALLER_JOURNAL] = JOURNAL_METADATA_ENTRIES
+    trust = '/var/lib/sls-mass-notify-trust'
+    budgets[trust] = parts[trust]['stock_and_release_manifests']
+    inodes[trust] = PREPARE_METADATA_ENTRIES
+    budgets[voice] = rounded(catalog[name], max(4096, target_unit))
+    inodes[voice] = 1
+    budgets[temporary] = rounded(catalog[name], max(4096, scratch_unit)) if stage == 'download' else 0
+    inodes[temporary] = int(stage == 'download')
+    budgets['/tmp'] = budgets.get('/tmp', 0) + audio_floor
+    inodes['/tmp'] = inodes.get('/tmp', 0) + 32
+    return budgets, inodes
+
+
+def admit_voice_write(name, temporary, stage, profile=None):
+    if os.geteuid() != 0:
+        raise ValueError('Voice installation requires the protected writer')
+    if temporary == PRIVATE_INSTALL_TEMP:
+        private_install_temporary_state()
+    elif not trusted_temporary_directory(temporary):
+        raise ValueError('Voice installation workspace is unsafe')
+    config = Path(MANAGED_TREES['data'], 'mass-notifications.config')
+    saved = configured_limits(config) if os.path.lexists(config) else {}
+    selected = profile or saved.get('deployment_profile', 'standard')
+    audio = probe_runtime_speech_scratch(selected, saved)
+    full = probe_storage('install', _piper_preparation_payloads(),
+                         optional_packs=saved.get('speech_optional_voice_packs', ()))
+    budgets, inodes = voice_write_budgets(full, name, temporary, stage,
+        target_unit=os.statvfs(MANAGED_TREES['voices']).f_frsize,
+        scratch_unit=os.statvfs(temporary).f_frsize, audio_floor=audio['required_free_bytes'])
+    for fs in probe_filesystems(budgets, inodes):
+        if not any(budgets.get(path, 0) or inodes.get(path, 0) for path in fs['paths']):
+            continue
+        if (fs['read_only'] or fs['volatile_targets'] or fs['inodes_exhausted']
+                or fs['available_bytes'] < fs['required_free_bytes']
+                or fs['available_inodes'] is not None and fs['available_inodes'] < fs['required_inodes']):
+            raise ResourceProbeError('voice_write_capacity_refused',
+                f"Voice {stage} refused for {name} on {', '.join(fs['paths'])}. "
+                f"Available/required bytes {fs['available_bytes']}/{fs['required_free_bytes']}, "
+                f"inodes {fs['available_inodes']}/{fs['required_inodes']}. "
+                "Check available space, writable mounts and inode capacity.")
+
+
+def admit_piper_preparation_storage(temporary_directory, *, profile=None):
+    """Re-admit actual full replacement before its first stage/target write.
+
+    The caller validates the selected temporary directory's protected identity.
+    All target, data, media, backup, log, remaining module and metadata floors are
+    grouped on their actual filesystems. No existing evidence is removed to fit.
+    """
+    if os.geteuid() != 0 or temporary_directory not in ('/tmp','/var/tmp',PRIVATE_INSTALL_TEMP):
+        raise ResourceProbeError('piper_preparation_unqualified','Piper replacement requires the selected qualified installer workspace.')
+    config = Path(MANAGED_TREES['data']) / 'mass-notifications.config'
+    saved = configured_limits(config) if os.path.lexists(config) else {}
+    if profile is None:
+        profile = saved.get('deployment_profile', 'standard')
+    if profile not in DEPLOYMENT_PROFILES:
+        raise ValueError('Invalid Piper deployment profile')
+    if saved:
+        phone_limit = saved.get('phone_device_limit', PHONE_BASELINE)
+    else:
+        inventory = detect_internal_phones()
+        phone_limit = rounded_phone_capacity(inventory['detected_phone_contacts'], profile)
+    optional = saved.get('speech_optional_voice_packs',())
+    full = probe_storage('install', _piper_preparation_payloads(), optional_packs=optional, verify_voice_content=True)
+    # Rebind only the explicitly selected workspace, never silently choose a new
+    # path after the builder has been given its TMPDIR role.
+    if temporary_directory != full['temporary_directory']:
+        units = {**full.get('allocation_units',{}), temporary_directory: os.statvfs(temporary_directory).f_frsize}
+        payloads = dict(full.get('payloads',{}))
+        if '/tmp' in payloads: payloads[temporary_directory] = payloads.pop('/tmp')
+        full = storage_requirements(full.get('measured_trees'), full.get('missing_voice_bytes'), units,
+            temporary_directory, mode='install', payloads=payloads, optional_packs=optional,
+            pending_voice_files=full.get('pending_voice_files'))
+    audio = probe_runtime_speech_scratch(profile,saved)
+    storage = piper_preparation_requirements(full,runtime_audio_bytes=audio['required_free_bytes'])
+    filesystems = probe_filesystems(storage['free_budgets_bytes'],storage['inode_budgets'])
+    cpu,memory = probe_compute()
+    hardware = {'effective_cpu_count':cpu,'effective_memory_bytes':memory,'cpu_isa':probe_cpu_isa(),
+        'memory_limit_bytes':probe_memory_limit(),'filesystems':filesystems,'storage':storage,'runtime_speech_scratch':audio}
+    result = evaluate(hardware, saved.get('desktop_client_limit', 25), phone_limit, profile)
+    if result['errors']:
+        failure = ResourceProbeError('piper_preparation_capacity_refused',
+            'Full Piper replacement lacks required CPU/RAM, writable bytes, inodes or preserved operational headroom; active and recovery trees were preserved.')
+        failure.capacity_details = {'schema':1,
+            'errors':[{key:row.get(key) for key in ('code','actual','required')} for row in result['errors']],
+            'filesystems':[{key:row.get(key) for key in ('paths','available_bytes','required_free_bytes',
+                'available_inodes','required_inodes','read_only','filesystem_type')} for row in filesystems],
+            'raw_configuration_or_ledger_emitted':False}
+        raise failure
+    return {'schema':1,'temporary_directory':temporary_directory,'replacement_capacity_admitted':True,
+            'filesystems':filesystems,'storage_basis':storage['basis'],'storage_requirements':storage}
 
 
 FREE_BUDGETS = storage_requirements()['free_budgets_bytes']
@@ -3968,6 +6599,52 @@ def probe_cpu_isa():
             'The pinned amd64 speech runtime CPU instruction set could not be verified. Check the supported architecture, readable /proc/cpuinfo and CPU affinity before retrying; no CPU capability was guessed.') from error
 
 
+
+def _private_recovery_stage(parent, name, info):
+    """Recognize only root-validated Piper evidence; never widen its access."""
+    if os.geteuid() == 0 or not re.fullmatch(r'\.replacement-[a-f0-9]{24}', name):
+        return False
+    def identity(value):
+        return {key: int(getattr(value, 'st_' + key)) for key in ('dev', 'ino', 'mode', 'uid', 'gid', 'ctime_ns')}
+    parent = Path(parent)
+    meta = parent.lstat()
+    if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_mode & 0o022
+            or not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o700): return False
+    fd = parent_fd = stage_fd = None
+    try:
+        marker = parent / (name + '.retained.json')
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0
+                or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) != 0o644
+                or not 1 <= before.st_size <= 1024): return False
+        raw = os.read(fd, 1025)
+        after = os.fstat(fd); named = marker.lstat()
+        stamp = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                               value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if len(raw) != before.st_size or stamp(before) != stamp(after) or stamp(before) != stamp(named): return False
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or set(value) != {'schema', 'stage', 'identity'}
+                or type(value['schema']) is not int or value['schema'] != 1 or value['stage'] != name
+                or value['identity'] != identity(info)
+                or not isinstance(value['identity'], dict)
+                or any(type(item) is not int for item in value['identity'].values())): return False
+        parent_fd = os.open(parent, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        stage_fd = os.open(parent / name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        def mount_id(descriptor):
+            with open('/proc/self/fdinfo/' + str(descriptor), encoding='ascii') as stream:
+                text = stream.read(4097)
+            if len(text) > 4096: raise ValueError('Oversized directory descriptor metadata')
+            return next(line.split()[1] for line in text.splitlines() if line.startswith('mnt_id:'))
+        return identity(os.fstat(stage_fd)) == identity(info) and mount_id(parent_fd) == mount_id(stage_fd)
+    except (OSError, ValueError, TypeError, KeyError, StopIteration):
+        return False
+    finally:
+        for descriptor in (fd, parent_fd, stage_fd):
+            if descriptor is not None: os.close(descriptor)
+
+
 def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
     """Metadata only, without following directory/file links or printing names."""
     result = {'allocated_bytes': 0, 'logical_bytes': 0, 'files': 0, 'directories': 0, 'largest_file_bytes': 0}
@@ -4023,6 +6700,9 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
                     except FileNotFoundError:
                         continue
                     if stat.S_ISDIR(metadata.st_mode):
+                        if _private_recovery_stage(directory, entry.name, metadata):
+                            reports[key]['directories'] += 1
+                            continue
                         child = Path(entry.path)
                         children[key].append(child); pending.append((child, False))
                         continue
@@ -4048,7 +6728,104 @@ def measure_tree(path, deadline, maximum_entries=50000, *, cache=None):
     return dict(cache.get(str(root), result))
 
 
-def probe_storage(mode='install', payloads=None, optional_packs=()):
+def _voice_change_watch(content_fd):
+    """Observe modifications of the pinned inode without locking the media file."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None)
+        initialize, add = libc.inotify_init1, libc.inotify_add_watch
+        watch = initialize(os.O_NONBLOCK | os.O_CLOEXEC)
+        if watch < 0:
+            return None
+        # Linux IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_DELETE_SELF | IN_MOVE_SELF.
+        mask = 0x002 | 0x004 | 0x008 | 0x400 | 0x800
+        if add(watch, os.fsencode('/proc/self/fd/' + str(content_fd)), mask) >= 0:
+            return watch
+        os.close(watch)
+    except (ImportError, AttributeError, OSError):
+        pass
+    return None
+
+
+def piper_voice_current(target, expected_sha, expected_bytes, *, deadline=None):
+    """Hash a single approved model through a pinned ordinary-file descriptor."""
+    path = Path(target)
+    if (path.parent != Path(MANAGED_TREES['voices'])
+            or re.fullmatch(r'[a-z]{2}_[A-Z]{2}-[A-Za-z0-9_-]+\.onnx(?:\.json)?', path.name) is None
+            or not isinstance(expected_sha, str) or re.fullmatch(r'[a-f0-9]{64}', expected_sha) is None
+            or type(expected_bytes) is not int or not 0 < expected_bytes <= 128*MIB):
+        return False
+    until = deadline if deadline is not None else time.monotonic() + 30
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode,
+                info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    def mount_id(fd):
+        with open('/proc/self/fdinfo/' + str(fd), encoding='ascii') as stream:
+            return next(int(line.split()[1]) for line in stream if line.startswith('mnt_id:'))
+    parent = pinned = content = watch = None
+    try:
+        account = pwd.getpwnam('asterisk')
+        if account.pw_uid <= 0 or account.pw_gid <= 0 or time.monotonic() >= until:
+            return False
+        flags = os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_RDONLY
+        parent = os.open('/', flags)
+        for component in path.parts[1:-1]:
+            child = os.open(component, flags, dir_fd=parent)
+            os.close(parent); parent = child
+            entry = os.fstat(parent)
+            if (entry.st_uid not in (0, account.pw_uid) or entry.st_mode & 0o002
+                    or entry.st_mode & 0o020 and entry.st_gid not in (0, account.pw_gid)):
+                return False
+        # O_PATH pins metadata first, without opening a device or a FIFO for I/O.
+        pinned = os.open(path.name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        before = os.fstat(pinned)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != expected_bytes
+                or before.st_uid not in (0,account.pw_uid) or before.st_mode & 0o022
+                or mount_id(parent) != mount_id(pinned)):
+            return False
+        content = os.open('/proc/self/fd/' + str(pinned), os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+        stamp = identity(before)
+        if identity(os.fstat(content)) != stamp:
+            return False
+        watch = _voice_change_watch(content)
+        # Coarse filesystem timestamps can hide a same-length write within
+        # one clock tick. If no watch is available, verify two complete bounded
+        # reads against the published digest before skipping the download.
+        for attempt in range(2 if watch is None else 1):
+            if attempt:
+                os.lseek(content, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            remaining = expected_bytes
+            while remaining:
+                if time.monotonic() >= until:
+                    return False
+                data = os.read(content, min(1024*1024, remaining))
+                if not data:
+                    return False
+                remaining -= len(data)
+                digest.update(data)
+            if os.read(content, 1) or digest.hexdigest() != expected_sha:
+                return False
+        if not (time.monotonic() < until and identity(os.fstat(content)) == stamp
+                and identity(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == stamp
+                and identity(path.lstat()) == stamp):
+            return False
+        if watch is not None:
+            try:
+                os.read(watch, 4096)
+            except BlockingIOError:
+                return True
+            return False  # Includes changed content, invalidated watch or queue overflow.
+        return True
+    except (OSError, ValueError, KeyError, StopIteration):
+        return False
+    finally:
+        for fd in (watch,content,pinned,parent):
+            if fd is not None:
+                os.close(fd)
+
+
+def probe_storage(mode='install', payloads=None, optional_packs=(), previous_release_required=True, prepared_release_resident=False, stock_cache_publication_required=True, qualified_piper_reuse=False, stock_cache_publication_sizes=None, verify_voice_content=False):
     deadline = time.monotonic() + (3 if mode == 'runtime' else 15)
     cache = {}
     measured = {name: measure_tree(path, deadline, cache=cache) for name, path in
@@ -4072,6 +6849,8 @@ def probe_storage(mode='install', payloads=None, optional_packs=()):
             measured[key] = {'allocated_bytes': metadata.st_blocks * 512, 'logical_bytes': metadata.st_size}
     units = {}
     for path in FREE_BUDGETS:
+        if path == STOCK_CACHE and mode != 'install':
+            continue  # native runtime/doctor never needs the private stock package directory
         existing = Path(path)
         while not existing.exists():
             existing = existing.parent
@@ -4081,15 +6860,26 @@ def probe_storage(mode='install', payloads=None, optional_packs=()):
     for pack in optional_packs:
         if pack not in REGIONAL_VOICE_BYTES:raise ValueError('Unknown optional speech pack')
         voice_sizes.update(REGIONAL_VOICE_BYTES[pack])
+    pending = [] if verify_voice_content is True and mode == 'install' else None
+    checksum_deadline = time.monotonic() + 45
     for name, expected in voice_sizes.items():
         path = Path(MANAGED_TREES['voices'], name)
+        if pending is not None and not piper_voice_current(path, VOICE_SHA256[name], expected, deadline=checksum_deadline):
+            pending.append(name)
         try:
             metadata = path.lstat()
         except FileNotFoundError:
             metadata = None
-        if metadata is None or not stat.S_ISREG(metadata.st_mode) or metadata.st_size != expected:
+        if (metadata is None or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1 or metadata.st_size != expected
+                or metadata.st_blocks * 512 < expected):
             missing += rounded(expected, max(4096, units[MANAGED_TREES['voices']]))
-    return storage_requirements(measured, missing, units, mode=mode, payloads=payloads, optional_packs=optional_packs)
+    return storage_requirements(measured, missing, units, mode=mode, payloads=payloads, optional_packs=optional_packs,
+                                previous_release_required=previous_release_required,
+                                prepared_release_resident=prepared_release_resident,
+                                stock_cache_publication_required=stock_cache_publication_required,
+                                qualified_piper_reuse=qualified_piper_reuse,
+                                stock_cache_publication_sizes=stock_cache_publication_sizes, pending_voice_files=pending)
 
 
 def measure_release_payloads(source):
@@ -4100,7 +6890,7 @@ def measure_release_payloads(source):
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX:
             raise ResourceProbeError('candidate_source_unprotected', 'The authenticated candidate must be in a root-protected staging directory.')
     targets = [MANAGED_TREES[name] for name in ('module', 'runtime', 'web', 'sip_api', 'control_api', 'operator_portal')]
-    targets += ['/tmp', '/var/lib/sls-mass-notify-trust']
+    targets += ['/tmp', '/var/lib/sls-mass-notify-trust', INSTALLER_JOURNAL]
     payloads = {target: {'bytes': 0, 'entries': 1} for target in targets}
     entries, total = 0, 0
     for directory, dirs, files in os.walk(root, followlinks=False):
@@ -4113,7 +6903,7 @@ def measure_release_payloads(source):
             size = info.st_size if stat.S_ISREG(info.st_mode) else 0
             total += size
             if total > 50 * MIB: raise ResourceProbeError('candidate_source_oversized', 'The candidate exceeds the 50 MiB payload bound.')
-            destinations = [MANAGED_TREES['module'], '/tmp', '/var/lib/sls-mass-notify-trust']
+            destinations = [MANAGED_TREES['module'], '/tmp', '/var/lib/sls-mass-notify-trust', INSTALLER_JOURNAL]
             if relative.startswith('bin/'): destinations.append(MANAGED_TREES['runtime'])
             elif relative.startswith('api/sipnotify/'): destinations.append(MANAGED_TREES['sip_api'])
             elif relative.startswith('api/sls-mass-notify/'): destinations.append(MANAGED_TREES['control_api'])
@@ -4237,7 +7027,9 @@ def filesystem_types():
     for line in Path('/proc/self/mountinfo').read_text().splitlines():
         before, after = line.split(' - ', 1)
         mount = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match.group(1), 8)), before.split()[4])
-        mounts.append((mount.rstrip('/') or '/', after.split()[0]))
+        fields = after.split()
+        options = frozenset(before.split()[5].split(',') + fields[2].split(','))
+        mounts.append((mount.rstrip('/') or '/', fields[0], options))
     return sorted(mounts, key=lambda item: len(item[0]), reverse=True)
 
 
@@ -4252,8 +7044,14 @@ def probe_filesystems(free_budgets=None, inode_budgets=None):
         actual = str(existing.resolve())
         metadata = existing.stat()
         usage = os.statvfs(existing)
-        kind = next((kind for mount, kind in mounts if actual == mount or actual.startswith(mount.rstrip('/') + '/')), '')
-        persistent = path not in ('/tmp', '/var/tmp') and kind not in {'tmpfs', 'ramfs', 'devtmpfs'}
+        matched = next((entry for entry in mounts if actual == entry[0] or actual.startswith(entry[0].rstrip('/') + '/')), ('', '', frozenset()))
+        kind = matched[1]
+        options = matched[2] if len(matched) > 2 else frozenset()
+        # OverlayFS explicitly mounted volatile does not promise durable upper
+        # state. Keep the real filesystem type in diagnostics and reject only
+        # the exact option, without assuming every container overlay is unsafe.
+        persistent = (path not in ('/tmp', '/var/tmp') and kind not in {'tmpfs', 'ramfs', 'devtmpfs'}
+                      and not (kind == 'overlay' and 'volatile' in options))
         record = devices.setdefault(metadata.st_dev, {
             'device': str(metadata.st_dev), 'paths': [], 'total_bytes': usage.f_blocks * usage.f_frsize,
             'available_bytes': usage.f_bavail * usage.f_frsize, 'required_free_bytes': 0, 'persistent': False,
@@ -4270,16 +7068,92 @@ def probe_filesystems(free_budgets=None, inode_budgets=None):
             record['available_inodes'] = min(record['available_inodes'], usage.f_favail) if record['available_inodes'] is not None else usage.f_favail
         record['required_free_bytes'] += free_budgets.get(path, 0)
         record['required_inodes'] += (inode_budgets or {}).get(path, 0)
-        if free_budgets.get(path, 0) and path not in ('/tmp', '/var/tmp') and not persistent:
-            record['volatile_targets'].append(path)
-        if free_budgets.get(path, 0):
+        # Even a complete voice catalog receives ownership/mode verification
+        # and repair. Keep this specific mount writable and persistent when
+        # hashing proves that its files need no additional data blocks.
+        metadata_target = path == MANAGED_TREES['voices'] and path in free_budgets
+        if free_budgets.get(path, 0) or metadata_target:
+            if path not in ('/tmp', '/var/tmp') and not persistent:
+                record['volatile_targets'].append(path)
             record['read_only'] = record['read_only'] or bool(getattr(usage, 'f_flag', 0) & os.ST_RDONLY)
+        if free_budgets.get(path, 0):
             # Filesystems without a fixed inode table may report zero for both.
             record['inodes_exhausted'] = record['inodes_exhausted'] or (
                 getattr(usage, 'f_files', 0) > 0 and getattr(usage, 'f_favail', None) == 0)
         record['persistent'] = record['persistent'] or persistent
     return list(devices.values())
 
+
+
+
+def _private_spool_parent(root):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root = Path(root)
+    if root.resolve() != root:
+        raise ValueError('private installer workspace IO root is not canonical')
+    descriptor = os.open(root, flags)
+    try:
+        for component in ('var', 'spool'):
+            before = os.fstat(descriptor)
+            if before.st_uid != 0 or before.st_mode & 0o022:
+                raise ValueError('unsafe private installer workspace ancestor')
+            named = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            child = os.open(component, flags, dir_fd=descriptor)
+            opened = os.fstat(child)
+            if (named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode) != (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_gid, opened.st_mode):
+                os.close(child)
+                raise ValueError('private installer workspace ancestor changed')
+            os.close(descriptor)
+            descriptor = child
+        parent = os.fstat(descriptor)
+        if parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe private installer workspace parent')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def private_install_temporary_state(root=Path('/'), *, allow_missing=False):
+    """Read only the fixed scratch role; root is an IO root for namespace fixtures."""
+    account = pwd.getpwnam('asterisk')
+    if account.pw_uid <= 0 or account.pw_gid <= 0:
+        raise ValueError('private installer workspace requires a nonroot native account')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    stamp = lambda info: {key: getattr(info, 'st_' + key) for key in ('dev', 'ino', 'uid', 'gid', 'mode')}
+    descriptor = _private_spool_parent(root)
+    leaf = None
+    try:
+        parent = os.fstat(descriptor)
+        if parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe private installer workspace parent')
+        name = Path(PRIVATE_INSTALL_TEMP).name
+        try:
+            leaf = os.open(name, flags, dir_fd=descriptor)
+        except FileNotFoundError:
+            if not allow_missing:
+                raise
+        identity = None
+        if leaf is not None:
+            info = os.fstat(leaf)
+            if (info.st_uid != 0 or info.st_gid != account.pw_gid
+                    or stat.S_IMODE(info.st_mode) != 0o710
+                    or stamp(info) != stamp(os.stat(name, dir_fd=descriptor, follow_symlinks=False))):
+                raise ValueError('private installer workspace must be root:native-primary-GID mode0710')
+            identity = stamp(info)
+        capacity = os.fstatvfs(leaf if leaf is not None else descriptor)
+        if stamp(parent) != stamp(os.fstat(descriptor)):
+            raise ValueError('private installer workspace parent changed')
+        return {'path': PRIVATE_INSTALL_TEMP, 'exists': leaf is not None,
+                'uid': account.pw_uid, 'gid': account.pw_gid, 'identity': identity, 'parent_identity': stamp(parent),
+                'allocation_unit': max(4096, capacity.f_frsize),
+                'available_bytes': capacity.f_bavail * capacity.f_frsize,
+                'available_inodes': capacity.f_favail if capacity.f_files else None,
+                'read_only': bool(capacity.f_flag & os.ST_RDONLY)}
+    finally:
+        if leaf is not None:
+            os.close(leaf)
+        os.close(descriptor)
 
 def trusted_temporary_directory(path):
     if path not in ('/tmp', '/var/tmp'):
@@ -4332,30 +7206,47 @@ def probe_runtime_speech_scratch(profile, saved):
             'inodes_exhausted': getattr(usage, 'f_files', 0) > 0 and getattr(usage, 'f_favail', None) == 0}
 
 
-def probe_storage_filesystems(storage, temporary_directory=None):
+def probe_storage_filesystems(storage, temporary_directory=None, *, reserve_install_workspace=False):
     """Use persistent scratch space when a small /tmp cannot hold the install.
 
     All reservations still apply to their actual filesystem. Moving scratch
     cannot make an insufficient data/runtime filesystem eligible.
     """
-    choices = (temporary_directory,) if temporary_directory else ('/tmp', '/var/tmp')
+    choices = (temporary_directory,) if temporary_directory else (('/tmp', '/var/tmp', PRIVATE_INSTALL_TEMP) if reserve_install_workspace or storage.get('mode') == 'install' else ('/tmp', '/var/tmp'))
     first = None
     for path in choices:
-        if not trusted_temporary_directory(path):
+        private_state = None
+        if path == PRIVATE_INSTALL_TEMP:
+            try:
+                private_state = private_install_temporary_state(allow_missing=reserve_install_workspace or (storage.get('mode') == 'install' and temporary_directory is None))
+            except (OSError, ValueError, KeyError) as error:
+                raise ResourceProbeError('private_install_workspace_unsafe', 'The fixed /var/spool installer workspace or its canonical native-account role is unsafe; no ownership or permissions were changed.') from error
+            if private_state.get('read_only') and not private_state['exists']:
+                continue
+        elif not trusted_temporary_directory(path):
             continue
-        if path == '/tmp':
+        if path == '/tmp' and not reserve_install_workspace:
             candidate = storage
         else:
-            units = {**storage.get('allocation_units', {}), path: os.statvfs(path).f_frsize}
+            units = {**storage.get('allocation_units', {}), path: private_state['allocation_unit'] if private_state else os.statvfs(path).f_frsize}
             payloads = dict(storage.get('payloads', {}))
             if '/tmp' in payloads: payloads[path] = payloads.pop('/tmp')
             candidate = storage_requirements(storage.get('measured_trees'), storage.get('missing_voice_bytes'), units, path,
-                mode=storage.get('mode', 'install'), payloads=payloads, optional_packs=storage.get('optional_voice_packs',()))
+                mode=storage.get('mode', 'install'), payloads=payloads, optional_packs=storage.get('optional_voice_packs',()),
+                reserve_install_workspace=reserve_install_workspace,
+                previous_release_required=storage.get('previous_release_required', True),
+                prepared_release_resident=storage.get('prepared_release_resident', False),
+                stock_cache_publication_required=storage.get('stock_cache_publication_required', True),
+                qualified_piper_reuse=storage.get('qualified_piper_reuse', False),
+                stock_cache_publication_sizes=storage.get('stock_cache_publication_sizes'),
+                pending_voice_files=storage.get('pending_voice_files'))
+        if private_state is not None:
+            candidate['temporary_directory_state'] = private_state
         filesystems = probe_filesystems(candidate['free_budgets_bytes'], candidate.get('inode_budgets'))
         if first is None:
             first = (candidate, filesystems)
         scratch_volatile = any(path in row['paths'] and row.get('filesystem_type') in {'tmpfs', 'ramfs', 'devtmpfs'} for row in filesystems)
-        if scratch_volatile and temporary_directory is None and path == '/tmp' and candidate['temporary_free_bytes']:
+        if scratch_volatile and temporary_directory is None and path in ('/tmp', '/var/tmp') and candidate['temporary_free_bytes']:
             continue
         if all(row['available_bytes'] >= row['required_free_bytes'] and not row.get('read_only')
                and not row.get('inodes_exhausted') and not row.get('volatile_targets')
@@ -4363,7 +7254,7 @@ def probe_storage_filesystems(storage, temporary_directory=None):
             return candidate, filesystems
     if first is None:
         raise ResourceProbeError('temporary_directory_unavailable',
-            'Neither /tmp nor /var/tmp is a safe root-owned temporary directory. Restore the standard directory ownership and sticky permissions before installing.')
+            'No qualified installer scratch filesystem is available. Restore the standard temporary directories or review the fixed private installer workspace; no permissions were changed.')
     return first
 
 
@@ -4734,20 +7625,47 @@ def evaluate(hardware, requested, phone_requested=PHONE_BASELINE, profile='stand
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ['--voice-current']:
+        if len(argv) != 4 or not re.fullmatch(r'[1-9][0-9]{0,8}', argv[3]):
+            return 1
+        return 0 if piper_voice_current(argv[1], argv[2], int(argv[3])) else 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--cpu-isa-only', action='store_true', help='Check frozen wheel instructions before configuration or runtime preparation')
     parser.add_argument('--config', type=Path)
     parser.add_argument('--desktop-limit', type=int)
     parser.add_argument('--profile', choices=DEPLOYMENT_PROFILES)
-    parser.add_argument('--temporary-directory', choices=('/tmp', '/var/tmp'))
+    parser.add_argument('--temporary-directory', choices=('/tmp', '/var/tmp', PRIVATE_INSTALL_TEMP))
+    parser.add_argument('--admit-voice-write', nargs=2, metavar=('FILE', 'STAGE'))
     parser.add_argument('--mode', choices=('runtime', 'prepare', 'install'), default='runtime')
+    parser.add_argument('--reserve-install-workspace', action='store_true',
+                        help='Choose preparation scratch with room for later install workspaces')
     parser.add_argument('--candidate-source', type=Path, help='Authenticated root-private candidate payload for installation budgets')
+    parser.add_argument('--prepared-release-review', type=Path,
+                        help='Protected prepared transaction review; unknown state retains conservative previous-release reserves')
     phone_options = parser.add_mutually_exclusive_group()
     phone_options.add_argument('--phone-limit', type=int)
     phone_options.add_argument('--auto-phone-limit', action='store_true',
                                help='Detect internal phones on a fresh install; retain saved capacities on upgrades')
     options = parser.parse_args(argv)
+    if options.admit_voice_write is not None:
+        name, stage = options.admit_voice_write
+        try:
+            admit_voice_write(name, options.temporary_directory, stage, options.profile)
+        except ResourceProbeError as error:
+            print(error, file=sys.stderr)
+            return 2
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+            print('The voice writer could not verify the protected catalog, workspace or remaining capacity.', file=sys.stderr)
+            return 2
+        return 0
+    if options.temporary_directory == PRIVATE_INSTALL_TEMP and options.mode == 'runtime':
+        parser.error('private installer workspace cannot relocate runtime audio')
+    if options.reserve_install_workspace and options.mode != 'prepare':
+        parser.error('--reserve-install-workspace requires --mode prepare')
+    if options.prepared_release_review is not None and options.mode != 'install':
+        parser.error('--prepared-release-review requires --mode install')
     requested = options.desktop_limit
     phone_requested = options.phone_limit
     stage = 'configuration'
@@ -4774,9 +7692,45 @@ def main(argv=None):
         cpu, memory = probe_compute()
         stage = 'SLL storage'
         payloads = measure_release_payloads(options.candidate_source) if options.candidate_source else None
-        storage = probe_storage(options.mode,payloads,optional_packs=saved['speech_optional_voice_packs']) if saved.get('speech_optional_voice_packs') else probe_storage(options.mode,payloads)
+        upgrade_proof = (read_prepared_upgrade_storage_proof(options.prepared_release_review, options.candidate_source)
+                         if options.prepared_release_review is not None and options.candidate_source is not None else None)
+        proof = (read_install_storage_proof(options.prepared_release_review, options.candidate_source)
+                 if upgrade_proof is None and options.prepared_release_review is not None and options.candidate_source is not None else None)
+        fresh_proof = (read_fresh_release_proof(options.prepared_release_review, options.candidate_source)
+                       if upgrade_proof is None and proof is None and options.prepared_release_review is not None
+                       and options.candidate_source is not None else None)
+        storage_options = ({'previous_release_required': False, 'prepared_release_resident': True}
+                           if upgrade_proof is not None or proof is not None else {'previous_release_required': False}
+                           if fresh_proof is not None else {})
+        if upgrade_proof is not None and upgrade_proof.get('stock_cache') is not None:
+            stock = upgrade_proof['stock_cache']
+            storage_options['stock_cache_publication_sizes'] = [
+                row['bytes'] for name, row in sorted(stock['pending'].items()) if name not in stock['cached']]
+        piper_reuse = (probe_prepared_piper_reuse(options.prepared_release_review, options.candidate_source, upgrade_proof)
+                       if upgrade_proof is not None else None)
+        if (type(piper_reuse) is dict and type(piper_reuse.get('schema')) is int and piper_reuse['schema'] == 1
+                and piper_reuse.get('kind') == 'sll-qualified-piper-reuse-v1' and piper_reuse.get('qualified') is True):
+            storage_options['qualified_piper_reuse'] = True
+        else:
+            piper_reuse = None
+        if (options.mode == 'install' and options.candidate_source is not None and options.prepared_release_review is not None
+                and any(item is not None for item in (upgrade_proof, proof, fresh_proof))):
+            storage_options['verify_voice_content'] = True
+        if saved.get('speech_optional_voice_packs'): storage_options['optional_packs'] = saved['speech_optional_voice_packs']
+        storage = probe_storage(options.mode, payloads, **storage_options)
         stage = 'filesystem free space'
-        storage, filesystems = probe_storage_filesystems(storage, options.temporary_directory)
+        storage, filesystems = probe_storage_filesystems(storage, options.temporary_directory,
+            reserve_install_workspace=options.reserve_install_workspace)
+        if upgrade_proof is not None:
+            storage['release_storage_proof_canonical_sha256'] = _fresh_digest(upgrade_proof)
+            storage['release_storage_proof_kind'] = _UPGRADE_STORAGE_KIND
+        elif proof is not None:
+            storage['release_storage_proof_canonical_sha256'] = _fresh_digest(proof)
+            storage['release_storage_proof_kind'] = _INSTALL_STORAGE_KIND
+        elif fresh_proof is not None:
+            storage['fresh_release_proof_canonical_sha256'] = _fresh_digest(fresh_proof)
+        if piper_reuse is not None:
+            storage['piper_reuse_proof_canonical_sha256'] = _fresh_digest(piper_reuse)
         stage = 'runtime audio temporary workspace'
         runtime_scratch = probe_runtime_speech_scratch(profile, saved)
         result = evaluate({'effective_cpu_count': cpu, 'effective_memory_bytes': memory,
@@ -4844,9 +7798,11 @@ validate_installer_memory_profile() {
 
 preflight_hardware_requirements() {
   local report status state lite_report answer
-  local -a arguments=(--check --mode prepare --desktop-limit 25 --auto-phone-limit)
+  # Select the final installation workspace before retaining any preparation
+  # paths. Inspection has its separate, lighter source-only admission.
+  local -a arguments=(--check --mode prepare --reserve-install-workspace --desktop-limit 25 --auto-phone-limit)
   if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
-    arguments=(--check --mode prepare --config "$CONFIG_FILE")
+    arguments=(--check --mode prepare --reserve-install-workspace --config "$CONFIG_FILE")
   fi
   [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
   if report="$(bootstrap_resource_capacity "${arguments[@]}")"; then status=0; else status=$?; fi
@@ -4902,25 +7858,220 @@ except (ValueError, TypeError, AttributeError):
   return "$status"
 }
 
+install_temporary_root_action() {
+  /usr/bin/python3 -I - "$@" <<'PYSLSINSTALLTEMP'
+from pathlib import Path
+import errno, json, os, pwd, stat, sys
+PRIVATE_INSTALL_TEMP = '/var/spool/sls-mass-notify-installer-tmp'
+
+
+def _private_spool_parent(root):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    root = Path(root)
+    if root.resolve() != root:
+        raise ValueError('private installer workspace IO root is not canonical')
+    descriptor = os.open(root, flags)
+    try:
+        for component in ('var', 'spool'):
+            before = os.fstat(descriptor)
+            if before.st_uid != 0 or before.st_mode & 0o022:
+                raise ValueError('unsafe private installer workspace ancestor')
+            named = os.stat(component, dir_fd=descriptor, follow_symlinks=False)
+            child = os.open(component, flags, dir_fd=descriptor)
+            opened = os.fstat(child)
+            if (named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode) != (opened.st_dev, opened.st_ino, opened.st_uid, opened.st_gid, opened.st_mode):
+                os.close(child)
+                raise ValueError('private installer workspace ancestor changed')
+            os.close(descriptor)
+            descriptor = child
+        parent = os.fstat(descriptor)
+        if parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe private installer workspace parent')
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def private_install_temporary_state(root=Path('/'), *, allow_missing=False):
+    """Read only the fixed scratch role; root is an IO root for namespace fixtures."""
+    account = pwd.getpwnam('asterisk')
+    if account.pw_uid <= 0 or account.pw_gid <= 0:
+        raise ValueError('private installer workspace requires a nonroot native account')
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    stamp = lambda info: {key: getattr(info, 'st_' + key) for key in ('dev', 'ino', 'uid', 'gid', 'mode')}
+    descriptor = _private_spool_parent(root)
+    leaf = None
+    try:
+        parent = os.fstat(descriptor)
+        if parent.st_uid != 0 or parent.st_mode & 0o022:
+            raise ValueError('unsafe private installer workspace parent')
+        name = Path(PRIVATE_INSTALL_TEMP).name
+        try:
+            leaf = os.open(name, flags, dir_fd=descriptor)
+        except FileNotFoundError:
+            if not allow_missing:
+                raise
+        identity = None
+        if leaf is not None:
+            info = os.fstat(leaf)
+            if (info.st_uid != 0 or info.st_gid != account.pw_gid
+                    or stat.S_IMODE(info.st_mode) != 0o710
+                    or stamp(info) != stamp(os.stat(name, dir_fd=descriptor, follow_symlinks=False))):
+                raise ValueError('private installer workspace must be root:native-primary-GID mode0710')
+            identity = stamp(info)
+        capacity = os.fstatvfs(leaf if leaf is not None else descriptor)
+        if stamp(parent) != stamp(os.fstat(descriptor)):
+            raise ValueError('private installer workspace parent changed')
+        return {'path': PRIVATE_INSTALL_TEMP, 'exists': leaf is not None,
+                'uid': account.pw_uid, 'gid': account.pw_gid, 'identity': identity, 'parent_identity': stamp(parent),
+                'allocation_unit': max(4096, capacity.f_frsize),
+                'available_bytes': capacity.f_bavail * capacity.f_frsize,
+                'available_inodes': capacity.f_favail if capacity.f_files else None,
+                'read_only': bool(capacity.f_flag & os.ST_RDONLY)}
+    finally:
+        if leaf is not None:
+            os.close(leaf)
+        os.close(descriptor)
+
+def select_private_install_temporary(report, root=Path('/')):
+    storage = report['requirements']['storage']
+    admitted = storage['temporary_directory_state']
+    current = private_install_temporary_state(root, allow_missing=True)
+    if (storage.get('temporary_directory') != PRIVATE_INSTALL_TEMP
+            or storage.get('mode') not in ('prepare', 'install')
+            or type(admitted.get('exists')) is not bool
+            or type(admitted.get('uid')) is not int
+            or admitted.get('uid') != current['uid']
+            or type(admitted.get('gid')) is not int
+            or admitted.get('gid') != current['gid']
+            or admitted.get('parent_identity') != current['parent_identity']
+            or any(type(v) is not int for v in admitted.get('parent_identity', {}).values())
+            or (admitted['exists'] and admitted.get('identity') != current['identity'])
+            or (not current['exists'] and storage.get('mode') == 'prepare'
+                and storage.get('install_workspace_reserved') is not True)):
+        raise ValueError('private installer workspace admission changed')
+    rows = [row for row in report['hardware']['filesystems'] if PRIVATE_INSTALL_TEMP in row.get('paths', [])]
+    if len(rows) != 1 or rows[0].get('filesystem_type') in ('tmpfs', 'ramfs', 'devtmpfs') or rows[0].get('read_only') or rows[0].get('volatile_targets'):
+        raise ValueError('private installer workspace must be a writable persistent filesystem')
+    row = rows[0]
+    required = row['required_free_bytes']
+    inodes = row.get('required_inodes', 0)
+    if type(required) is not int or required < 0 or type(inodes) is not int or inodes < 0:
+        raise ValueError('invalid aggregate private workspace reservation')
+    parent = _private_spool_parent(root)
+    name = Path(PRIVATE_INSTALL_TEMP).name
+    created = False
+    selected = None
+    try:
+        stamp = lambda info: {key: getattr(info, 'st_' + key) for key in ('dev', 'ino', 'uid', 'gid', 'mode')}
+        if stamp(os.fstat(parent)) != admitted['parent_identity']:
+            raise ValueError('private installer workspace parent changed before creation')
+        if not current['exists']:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent)
+                created = True
+            except FileExistsError:
+                pass
+            if created:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+                try:
+                    selected = stamp(os.fstat(child))
+                    os.fchown(child, 0, current['gid'])
+                    os.fchmod(child, 0o710)
+                    selected = stamp(os.fstat(child))
+                    os.fsync(child)
+                finally:
+                    os.close(child)
+                os.fsync(parent)
+        final = private_install_temporary_state(root)
+        if final['parent_identity'] != admitted['parent_identity'] or final['uid'] != current['uid'] or final['gid'] != current['gid'] or (selected is not None and final['identity'] != selected):
+            raise ValueError('private installer workspace identity changed after creation')
+        if final['read_only'] or final['available_bytes'] < required or (final['available_inodes'] is not None and final['available_inodes'] < inodes):
+            raise ValueError('private installer workspace lost admitted aggregate capacity')
+        return {'path': PRIVATE_INSTALL_TEMP, 'identity': final['identity'], 'created': created}
+    except BaseException:
+        if created and selected is not None:
+            try:
+                if stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) == selected:
+                    os.rmdir(name, dir_fd=parent)
+                    os.fsync(parent)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(parent)
+
+
+def cleanup_private_install_temporary(identity, root=Path('/')):
+    if not isinstance(identity, dict) or set(identity) != {'dev', 'ino', 'uid', 'gid', 'mode'} or any(type(v) is not int for v in identity.values()):
+        raise ValueError('typed selected private workspace identity required')
+    current = private_install_temporary_state(root, allow_missing=True)
+    if not current['exists']:
+        return True
+    if current['identity'] != identity:
+        raise ValueError('selected private workspace changed; preserve it')
+    parent = _private_spool_parent(root)
+    name = Path(PRIVATE_INSTALL_TEMP).name
+    try:
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        try:
+            if os.listdir(child):
+                return False
+            stamp = lambda info: {key: getattr(info, 'st_' + key) for key in ('dev', 'ino', 'uid', 'gid', 'mode')}
+            if stamp(os.fstat(child)) != identity or stamp(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity:
+                raise ValueError('private workspace changed before empty cleanup')
+        finally:
+            os.close(child)
+        try:
+            os.rmdir(name, dir_fd=parent)
+        except OSError as error:
+            if error.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                return False
+            raise
+        os.fsync(parent)
+        return True
+    finally:
+        os.close(parent)
+
+if sys.argv[1] == 'cleanup':
+    print(json.dumps({'removed_if_empty': cleanup_private_install_temporary(json.loads(sys.argv[2]))}))
+else:
+    report = json.loads(sys.argv[2])
+    path = report.get('requirements', {}).get('storage', {}).get('temporary_directory', '/tmp')
+    if path == PRIVATE_INSTALL_TEMP:
+        print(json.dumps(select_private_install_temporary(report), sort_keys=True))
+    else:
+        if path not in ('/tmp', '/var/tmp'):
+            raise ValueError('Unsupported installation workspace')
+        fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in path.split('/')[1:]:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd); fd = child
+                info = os.fstat(fd)
+                if info.st_uid != 0 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                    raise ValueError('Unsafe standard installation workspace')
+        finally:
+            os.close(fd)
+        print(json.dumps({'path': path, 'identity': None, 'created': False}))
+PYSLSINSTALLTEMP
+}
+
 select_install_temp_root() {
-  local directory
-  directory="$(/usr/bin/python3 -I -c '
-import json, os, stat, sys
-path = json.loads(sys.argv[1]).get("requirements", {}).get("storage", {}).get("temporary_directory", "/tmp")
-if path not in ("/tmp", "/var/tmp"): raise SystemExit(1)
-fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-try:
-    for name in path.split("/")[1:]:
-        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-        os.close(fd); fd = child
-        info = os.fstat(fd)
-        if info.st_uid != 0 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX): raise SystemExit(1)
-finally: os.close(fd)
-print(path)
-' "$1")" || { log 'The selected temporary directory is unsafe; no module or dependency changes were started.'; return 1; }
+  local selection directory
+  selection="$(install_temporary_root_action select "$1")" || { log 'The selected temporary directory is unsafe or lost capacity; no module or dependency changes were started.'; return 1; }
+  directory="$(/usr/bin/python3 -I -c 'import json,sys;print(json.loads(sys.argv[1])["path"])' "$selection")" || return 1
+  INSTALL_PRIVATE_WORKSPACE_IDENTITY="$(/usr/bin/python3 -I -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1])["identity"]))' "$selection")" || return 1
   INSTALL_TEMP_ROOT="$directory"
   export TMPDIR="$directory"
   log "Installer workspaces: $INSTALL_TEMP_ROOT (free space verified on its actual filesystem)."
+}
+
+cleanup_install_temp_root() {
+  [ -n "${INSTALL_PRIVATE_WORKSPACE_IDENTITY:-}" ] && [ "$INSTALL_PRIVATE_WORKSPACE_IDENTITY" != null ] || return 0
+  install_temporary_root_action cleanup "$INSTALL_PRIVATE_WORKSPACE_IDENTITY" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 \
+    || log 'Private installer scratch was retained for review; no unknown entries were removed.'
 }
 
 remember_fresh_phone_capacity() {
@@ -4954,12 +8105,21 @@ verify_staged_hardware_requirements() {
     arguments=(--check --config "$CONFIG_FILE")
   fi
   [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
-  report="$(/usr/bin/python3 -I "$helper" "${arguments[@]}" --mode install --candidate-source "$STAGING_DIR/$MODULE" --temporary-directory "$INSTALL_TEMP_ROOT" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}")" || {
+  report="$(/usr/bin/python3 -I "$helper" "${arguments[@]}" --mode install --candidate-source "$STAGING_DIR/$MODULE" --temporary-directory "$INSTALL_TEMP_ROOT" --prepared-release-review "$UPGRADE_TRUST_DIR" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}")" || {
     log "$report"
     log "This PBX does not meet the configured desktop/phone capacities or SLL free-space requirements. See $LOG_FILE."
     return 1
   }
   validate_installer_memory_profile "$report" || return $?
+  CAPACITY_STOCK_CACHE_PROOF_SHA256="$(/usr/bin/python3 -I -c '
+import json,re,sys
+value=json.loads(sys.argv[1]);storage=value.get("requirements",{}).get("storage",{})
+if (storage.get("release_storage_proof_kind")=="sll-prepared-upgrade-storage-proof-v3"
+        and isinstance(storage.get("stock_cache_publication_sizes"),list)):
+    digest=storage.get("release_storage_proof_canonical_sha256")
+    if not isinstance(digest,str)or re.fullmatch("[a-f0-9]{64}",digest)is None:raise SystemExit(1)
+    print(digest)
+' "$report")" || return 1
   printf '%s\n' "$report" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}"
   if [ ! -e "$CONFIG_FILE" ]; then
     remember_fresh_phone_capacity "$report"
@@ -4970,7 +8130,7 @@ preflight_platform() {
   local apache_module apache_modules utility
   # Runtime and dialplan paths are conventional FreePBX paths. Detect a
   # relocated installation explicitly instead of creating a second, unused tree.
-  sls_as_asterisk /usr/bin/timeout 20 /usr/bin/php <<'PHP' || {
+  sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/bin/php <<'PHP' || {
 <?php
 require '/etc/freepbx.conf';
 $expected = ['AMPWEBROOT'=>'/var/www/html', 'ASTETCDIR'=>'/etc/asterisk',
@@ -5262,7 +8422,7 @@ install_dependencies() {
       [ -n "$served_profile" ] || continue
       served_version="${served_profile%:*}"
       for served_package in cli common sqlite3 curl xml mbstring; do
-        dpkg-query -W -f='${Status}' "php${served_version}-${served_package}" 2>/dev/null | grep -Fqx 'install ok installed' \
+        dpkg-query -W -f='${Status}' "php${served_version}-${served_package}" 2>/dev/null | grep -Exq '(install|hold) ok installed' \
           || add_missing_package "php${served_version}-${served_package}"
       done
     done <<<"$SERVED_PHP_PROFILES"
@@ -5413,7 +8573,7 @@ bootstrap_missing_dashboard() {
 detect_served_php_profiles() {
   SERVED_PHP_PROFILES="$(/usr/bin/python3 -I - <<'PYPHPHANDLER'
 from pathlib import Path
-import configparser, os, pwd, re, stat, subprocess
+import configparser, grp, os, pwd, re, stat, subprocess
 
 def protected_config(path, freepbx_managed=False):
     # Validate enabled links and their resolved sources. Only FreePBX-managed
@@ -5447,41 +8607,141 @@ def protected_config(path, freepbx_managed=False):
 def local_socket(path):
     return '/run/php/'+path[len('/var/run/php/'):] if path.startswith('/var/run/php/') else path
 
-result = subprocess.run(['/usr/sbin/apache2ctl','-t','-D','DUMP_INCLUDES'], capture_output=True, text=True, timeout=20)
+result = subprocess.run(['/usr/sbin/apache2ctl','-t','-D','DUMP_INCLUDES','-D','DUMP_CONFIG','-D','DUMP_MODULES','-C','LoadModule info_module /usr/lib/apache2/modules/mod_info.so'], capture_output=True, text=True, timeout=20)
 if result.returncode: raise SystemExit('Apache includes cannot be inspected before dependency repair.')
-files = set(re.findall(r'(/[^\s]+)', result.stdout + '\n' + result.stderr))
-files.update(str(path) for path in Path('/etc/apache2/mods-enabled').glob('php*.load'))
+dump = result.stdout + '\n' + result.stderr
+if len(dump)>4194304 or '# In file:' not in dump:
+    raise SystemExit('Apache effective configuration is unavailable; the native mod_info DUMP_CONFIG adapter is required before PHP qualification.')
+files = list(dict.fromkeys(re.findall(r'^\s*\((?:\*|[0-9]+)\)\s+(/[^\n]+)',dump,re.M)))
+files.extend(str(path) for path in Path('/etc/apache2/mods-enabled').glob('php*.load') if str(path) not in files)
 if len(files)>512: raise SystemExit('Apache include inspection exceeded 512 files.')
-profiles=set(); unknown=[]; apache_users=[]; served_sockets=set()
+profiles=set(); unknown=[]; apache_users=[]; apache_groups=[]; served_sockets=set(); php_versions=set()
 for name in files:
     path=Path(name)
-    if not path.is_file(): continue
+    if not path.is_file(): raise SystemExit('Apache include evidence disappeared during PHP qualification.')
     text=protected_config(path,freepbx_managed=True)
-    active='\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
-    for version in re.findall(r'libphp(\d+\.\d+)\.so', active): profiles.add((version,'apache2'))
-    apache_users.extend(re.findall(r'^\s*User\s+([^\s#]+)',active,re.M))
-    for line in active.splitlines():
+    for version in re.findall(r'^\s*LoadModule\s+php\w*_module\s+[^\n#]*libphp(\d+\.\d+)\.so',text,re.M): php_versions.add(version)
+# DUMP_CONFIG is the native parser's active directive tree. Raw include files
+# contain inactive IfDefine/IfModule bodies and must not establish handlers.
+global_lines=[]; virtual_hosts=[]; current=None; dumping=False
+for line in dump.splitlines():
+    if line.startswith('# In file:'): dumping=True
+    if not dumping or not line.strip() or line.lstrip().startswith('#'): continue
+    if re.match(r'^\s*<VirtualHost\b',line,re.I):
+        if current is not None: raise SystemExit('Nested Apache virtual hosts cannot be qualified.')
+        current=[]
+    elif re.match(r'^\s*</VirtualHost\s*>',line,re.I):
+        if current is None: raise SystemExit('Apache virtual-host evidence is inconsistent.')
+        virtual_hosts.append(current);current=None
+    elif current is not None: current.append(line)
+    else: global_lines.append(line)
+if current is not None: raise SystemExit('Apache virtual-host evidence is incomplete.')
+global_text='\n'.join(global_lines)
+apache_users=re.findall(r'^\s*User\s+([^\s#]+)',global_text,re.M)
+apache_groups=re.findall(r'^\s*Group\s+([^\s#]+)',global_text,re.M)
+routes=[]
+for lines in virtual_hosts:
+    text='\n'.join(lines)
+    roots=re.findall(r'^\s*DocumentRoot\s+[\"\']?([^\"\'\n]+?)[\"\']?\s*$',text,re.M)
+    if not roots: roots=re.findall(r'^\s*DocumentRoot\s+[\"\']?([^\"\'\n]+?)[\"\']?\s*$',global_text,re.M)
+    alias=bool(re.search(r'^\s*Alias\s+[\"\']?/admin/?[\"\']?\s+[\"\']?/var/www/html/admin/?[\"\']?\s*$',text,re.M))
+    if any(str(Path(root.strip()).resolve(strict=False))=='/var/www/html' for root in roots) or alias:
+        routes.append(global_lines+lines)
+if not virtual_hosts: routes=[global_lines]
+if not routes: raise SystemExit('No effective Apache virtual host serves the supported FreePBX web root.')
+php_loaded=bool(re.search(r'^\s*php\w*_module\s+\(shared\)',dump,re.M))
+pbx_urls=('/admin','/api/sipnotify','/api/sls-mass-notify','/sls_mass_notify','/index.php')
+pbx_files=tuple('/var/www/html'+path for path in pbx_urls)
+static_suffixes={'css','js','png','jpg','jpeg','gif','svg','ico','woff','woff2','ttf','eot','map'}
+def static_files_only(value):
+    # Prove only this small static-selector grammar disjoint from PBX PHP.
+    # Unknown PCRE remains in scope; do not simulate Apache with Python regex.
+    value=value.lower()
+    if value.startswith('(?i)'): value=value[4:]
+    if value.startswith('^'): value=value[1:]
+    if value.startswith(('.*','.+')): value=value[2:]
+    if not value.startswith('\\.') or not value.endswith('$'): return False
+    suffix=value[2:-1]
+    if suffix.startswith('(?:') and suffix.endswith(')'): suffix=suffix[3:-1]
+    elif suffix.startswith('(') and suffix.endswith(')'): suffix=suffix[1:-1]
+    return bool(re.fullmatch(r'[a-z0-9]+(?:\|[a-z0-9]+)*',suffix)) and set(suffix.split('|'))<=static_suffixes
+def literal_scope(value,roots):
+    # Wildcards, expressions and regex sections need an explicit adapter rather
+    # than being mistaken for unrelated literal paths.
+    if not value.startswith('/') or any(token in value for token in ('*','?','[','${','%{')): return True
+    value=os.path.normpath(value)
+    return any(value=='/' or root==value or root.startswith(value+'/') or value.startswith(root+'/') for root in roots)
+def section_relevant(sections):
+    for name,value in sections:
+        if name=='directory' and not literal_scope(value,pbx_files): return False
+        if name=='location' and not literal_scope(value,pbx_urls): return False
+        if name=='filesmatch' and static_files_only(value): return False
+    return True
+def proxy_relevant(line):
+    match=re.match(r'^\s*ProxyPass\s+(?:"([^"]+)"|\x27([^\x27]+)\x27|(\S+))',line,re.I)
+    if not match: return True
+    prefix=next(value for value in match.groups() if value is not None)
+    if not prefix.startswith('/') or any(token in prefix for token in ('*','?','[','${','%{')): return True
+    return any(root.startswith(prefix) or prefix==root or prefix.startswith(root+'/') for root in pbx_urls)
+def blanket_php_fpm(line,sections):
+    if not re.match(r'^\s*SetHandler\s+',line,re.I): return False
+    selectors={r'\.php$',r'.+\.php$',r'^.+\.php$',r'\.ph(?:ar|p|tml)$',r'.+\.ph(?:ar|p|tml)$'}
+    for name,value in sections:
+        if name in {'ifmodule','ifdefine','ifversion','ifdirective','iffile','ifsection'}: continue
+        if name=='directory' and value.startswith('/') and os.path.normpath(value) in {'/','/var','/var/www','/var/www/html'}: continue
+        if name=='location' and value=='/': continue
+        if name=='filesmatch' and value in selectors: continue
+        if name=='files' and value=='*.php': continue
+        return False
+    return True
+for lines in routes:
+    blanket_fpm=False;explicit_modphp=False;sections=[]
+    for line in lines:
+        close=re.match(r'^\s*</([A-Za-z]+)\s*>\s*$',line)
+        if close:
+            if not sections or sections[-1][0]!=close[1].lower(): raise SystemExit('Apache handler scope evidence is inconsistent.')
+            sections.pop();continue
+        opening=re.match(r'^\s*<([A-Za-z]+)(?:\s+(.+))?>\s*$',line)
+        if opening:
+            sections.append((opening[1].lower(),(opening[2] or '').strip().strip('\"\x27')));continue
+        if not section_relevant(sections): continue
+        if re.search(r'^\s*(?:SetHandler|AddHandler|AddType)\b.*application/x-httpd-php(?=[\"\x27\s]|$)',line,re.I): explicit_modphp=True
         if not re.search(r'^\s*(?:SetHandler|ProxyPass(?:Match)?|BalancerMember)\b.*(?:fcgi|proxy:balancer)',line,re.I): continue
+        if not proxy_relevant(line): continue
         local=re.findall(r'(?:proxy:)?unix:(/[^\s|"\']+)\|fcgi://(?:localhost|127\.0\.0\.1|\[::1\])(?=[/\s"\']|$)',line,re.I)
         if len(local)!=1 or len(re.findall(r'fcgi://',line,re.I))!=1 or not re.fullmatch(r'/(?:run|var/run)/php/[A-Za-z0-9_.-]{1,128}\.sock',local[0]):
-            unknown.append(name);continue
+            unknown.append('FreePBX route');continue
         served_sockets.add(local_socket(local[0]))
+        blanket_fpm=blanket_fpm or blanket_php_fpm(line,sections)
+    # An explicit mod_php handler can overlap a blanket FPM rule. Qualify
+    # both possible runtimes instead of assuming which handler Apache selects.
+    if php_loaded and (explicit_modphp or not blanket_fpm):
+        if len(php_versions)!=1: raise SystemExit('The active Apache PHP module ABI is ambiguous; qualify its protected module source.')
+        profiles.add((next(iter(php_versions)),'apache2'))
 if unknown: raise SystemExit('Apache has an unidentified or remote FastCGI handler in '+', '.join(sorted(set(unknown)))+'. Use a protected local PHP-FPM pool/socket or qualify an explicit handler adapter; CLI PHP cannot establish its served runtime.')
 if len(served_sockets)>32: raise SystemExit('More than 32 served PHP-FPM sockets require explicit administrator review.')
-try: expected_uid=pwd.getpwnam('asterisk').pw_uid
+try:
+    account=pwd.getpwnam('asterisk');expected_uid=account.pw_uid;expected_gid=account.pw_gid
 except KeyError: raise SystemExit('The nonroot asterisk account is required before PHP-handler qualification.')
-if expected_uid<=0: raise SystemExit('The asterisk account must not be root.')
+if expected_uid<=0 or expected_gid<=0: raise SystemExit('The asterisk account and primary group must not be root.')
 def uid(name):
     try: return int(name) if name.isdecimal() else pwd.getpwnam(name).pw_uid
     except (KeyError,ValueError): return -1
+def gid(name):
+    try: return int(name) if name.isdecimal() else grp.getgrnam(name).gr_gid
+    except (KeyError,ValueError): return -1
 if any(sapi=='apache2' for unused,sapi in profiles):
-    if not apache_users: raise SystemExit('Apache mod_php has no inspectable User directive. Qualify its runtime identity before installation.')
+    if not apache_users or not apache_groups: raise SystemExit('Apache mod_php has no inspectable User/Group directive. Qualify its runtime identity before installation.')
     envvars=Path('/etc/apache2/envvars')
     environment=protected_config(envvars,freepbx_managed=True) if envvars.is_file() else ''
     match=re.search(r'^\s*(?:export\s+)?APACHE_RUN_USER\s*=\s*([A-Za-z0-9_\-]+|\'[A-Za-z0-9_\-]+\'|"[A-Za-z0-9_\-]+")\s*(?:#.*)?$',environment,re.M)
     for name in apache_users:
         if name=='${APACHE_RUN_USER}': name=match.group(1).strip('\'"') if match else ''
         if uid(name)!=expected_uid: raise SystemExit('Apache mod_php must run as the asterisk service account. Review the Apache User directive/envvars; SLL will not change the global web-server user.')
+    group_match=re.search(r'^\s*(?:export\s+)?APACHE_RUN_GROUP\s*=\s*([A-Za-z0-9_\-]+|\'[A-Za-z0-9_\-]+\'|"[A-Za-z0-9_\-]+")\s*(?:#.*)?$',environment,re.M)
+    for name in apache_groups:
+        if name=='${APACHE_RUN_GROUP}': name=group_match.group(1).strip('\'"') if group_match else ''
+        if gid(name)!=expected_gid: raise SystemExit('Apache mod_php must use the asterisk primary group. Review the Apache Group directive/envvars before activation.')
 required_functions={'exec','proc_open','posix_geteuid','posix_getpwnam','openssl_encrypt','openssl_decrypt','sodium_crypto_pwhash','sodium_crypto_pwhash_str','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt','sem_get','sem_acquire','sem_remove'}
 matched={socket:[] for socket in served_sockets}
 if served_sockets:
@@ -5522,6 +8782,8 @@ if served_sockets:
         abi=re.match(r'^PHP (\d+\.\d+)\.\d+[^\n]*\(fpm-fcgi\)',result.stdout)
         if result.returncode or not abi or abi[1]!=version: raise SystemExit('The configured PHP-FPM pool and installed binary ABI disagree: '+listen)
         if uid(pool.get('user','').strip())!=expected_uid: raise SystemExit('The PHP-FPM pool serving '+listen+' must run as asterisk. Configure this pool explicitly; SLL will not grant other web users access to PBX secrets.')
+        if pool.get('group','').strip() and gid(pool['group'].strip())!=expected_gid:
+            raise SystemExit('The PHP-FPM pool serving '+listen+' must use the asterisk primary group before activation.')
         disabled=set(re.split(r'[,\s]+',pool.get('php_admin_value[disable_functions]','')+','+pool.get('php_value[disable_functions]','')))
         blocked=sorted(disabled & required_functions)
         if blocked: raise SystemExit('The PHP-FPM pool serving '+listen+' disables required functions: '+', '.join(blocked)+'. Review this pool before activation.')
@@ -5541,7 +8803,7 @@ verify_php_security_versions_before_mutation() {
 $missing=[]; foreach (["sem_get","sem_acquire","sem_remove"] as $function) { if (!function_exists($function)) $missing[]=$function; }
 if ($missing) { fwrite(STDERR,"Native FreePBX cron coordination requires enabled PHP functions: ".implode(", ",$missing).". Restore sysvsem in the active CLI PHP configuration before retrying; no SLL transaction or native hook was started.".PHP_EOL);exit(1); }
 ' || return 1
-  local profile version policy
+  local profile version policy fpm_banner
   policy="$(cat "$STAGING_DIR/$MODULE/bin/sls_mass_notify/php-security-policy.json")" || return 1
   while IFS= read -r profile; do
     [ -n "$profile" ] || continue
@@ -5553,6 +8815,31 @@ if (($policy["schema"]??null)!==1 || !is_string($floor) || !preg_match("/^[0-9]+
  fwrite(STDERR,"PHP ".PHP_VERSION." does not meet the reviewed PHP security floor ".($floor??"(unqualified branch)").". Update the matching CLI and Apache/FPM packages through the trusted operating-system repository, then retry. No SLL workers were paused.".PHP_EOL);exit(1);
 }
 ' "$policy" || return 1
+    if [ "${profile#*:}" = fpm ]; then
+      # Discovery proves the pool ABI and protected binary identity. Check the
+      # actual served SAPI's full version too: a newer CLI package does not
+      # establish that its separately packaged FPM binary meets this policy.
+      fpm_banner="$(sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=1 5 "/usr/sbin/php-fpm$version" -n -v)" || {
+        log "PHP $version FPM could not report its version before mutation. Repair the matching trusted vendor package; no SLL workers were paused."
+        return 1
+      }
+      [ "${#fpm_banner}" -le 8192 ] || { log 'PHP-FPM returned an unqualified version response; no SLL workers were paused.'; return 1; }
+      /usr/bin/python3 -I - "$policy" "$version" "$fpm_banner" <<'PYFPMSECURITY' || return 1
+import json, re, sys
+policy, branch, banner = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+floor = policy.get('branches', {}).get(branch)
+match = re.match(r'^PHP ([0-9]+\.[0-9]+\.[0-9]+)([^\r\n ]*) \(fpm-fcgi\)(?:[ \r\n]|$)', banner)
+valid = (policy.get('schema') == 1 and isinstance(floor, str)
+         and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', floor) and match
+         and '.'.join(match[1].split('.')[:2]) == branch
+         and not re.search(r'dev|alpha|beta|rc', match[2], re.I)
+         and tuple(map(int, match[1].split('.'))) >= tuple(map(int, floor.split('.'))))
+if not valid:
+    raise SystemExit('The served PHP-FPM binary does not meet its reviewed ABI and stable security floor. '
+                     'Update the matching FPM package through the trusted operating-system repository, then retry. '
+                     'No SLL workers were paused.')
+PYFPMSECURITY
+    fi
   done <<<"$SERVED_PHP_PROFILES"
 }
 
@@ -5756,7 +9043,7 @@ download_tgz() {
 
   [ -f "$TGZ" ] && [ ! -L "$TGZ" ] && [ -s "$TGZ" ] || {
     log "$TGZ is missing. Set SLS_MASS_NOTIFY_TGZ_URL or upload the TGZ to this path first."
-    exit 1
+    return 1
   }
   chmod 0600 "$TGZ"
 }
@@ -5773,20 +9060,20 @@ verify_tgz() {
       log 'The release archive does not match the explicitly trusted SLS_MASS_NOTIFY_SHA256.'
       return 1
     fi
-  elif [ "$requested_basename" = "slsmassnotifyserver-0.1.9-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
-    log "$TGZ does not match the current slsmassnotifyserver-0.1.9-beta package."
+  elif [ "$requested_basename" = "slsmassnotifyserver-0.2.0-beta.tgz" ] && [ "$actual_sha" != "$EXPECTED_TGZ_SHA256" ]; then
+    log "$TGZ does not match the current slsmassnotifyserver-0.2.0-beta package."
     log "Expected SHA256: $EXPECTED_TGZ_SHA256"
     log "Actual SHA256:   $actual_sha"
     log "Remove the stale local TGZ or install with SLS_MASS_NOTIFY_TGZ_URL so the current release is downloaded."
-    exit 1
+    return 1
   else
     printf '%s  %s\n' "$actual_sha" "$TGZ"
   fi
   if [ -n "$URL" ]; then
-    verify_publisher_release
+    verify_publisher_release || return 1
   else
     [ -n "$SHA256" ] || { log 'A local/offline TGZ requires an explicit trusted SLS_MASS_NOTIFY_SHA256.'; return 1; }
-    verify_publisher_release
+    verify_publisher_release || return 1
   fi
   TGZ_PATH="$TGZ" MODULE_NAME="$MODULE" python3 -I - <<'PY'
 import os
@@ -5843,8 +9130,8 @@ with tarfile.open(archive, "r:gz") as handle:
     version = root.findall("version")
     if len(rawname) != 1 or (rawname[0].text or "").strip() != module:
         raise SystemExit("module.xml rawname does not match the requested module")
-    if len(version) != 1 or (version[0].text or "").strip() != "0.1.9-beta":
-        raise SystemExit("module.xml does not contain the expected 0.1.9-beta version")
+    if len(version) != 1 or (version[0].text or "").strip() != "0.2.0-beta":
+        raise SystemExit("module.xml does not contain the expected 0.2.0-beta version")
 PY
 }
 
@@ -5877,8 +9164,77 @@ if match and match.group(1).startswith('V') and match.group(1) != 'V0.1.9-beta':
 reserved_alias = url == 'https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/download/release-0.1.9-beta/slsmassnotifyserver-0.1.9-beta.tgz'
 if url and not (match or reserved_alias):
     raise SystemExit('Use a signed GitHub release URL or a signed offline package.')
-release_tag, version, package = match.groups() if match else ('release-0.1.9-beta', '0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz')
+release_tag, version, package = match.groups() if match else (('release-0.1.9-beta', '0.1.9-beta', 'slsmassnotifyserver-0.1.9-beta.tgz') if reserved_alias else ('v0.2.0-beta', '0.2.0-beta', 'slsmassnotifyserver-0.2.0-beta.tgz'))
 public_key = b'-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=\n-----END PUBLIC KEY-----\n'
+
+def unique(pairs):
+    value = {}
+    for name, item in pairs:
+        if name in value:
+            raise ValueError('Duplicate retained publisher field')
+        value[name] = item
+    return value
+
+def retained_helper_source(directory):
+    # Uninstall removes the runtime but preserves independently approved source.
+    # Authenticate the same protected reference/inventory/hash boundary used by
+    # the bootstrap; downloaded candidate code cannot authorize its own package.
+    def protected_read(path, maximum):
+        for item in (path, *path.parents):
+            metadata = item.lstat()
+            expected = stat.S_ISREG if item == path else stat.S_ISDIR
+            if (not expected(metadata.st_mode) or metadata.st_uid != 0
+                    or metadata.st_mode & 0o022 and not (item != path and metadata.st_mode & stat.S_ISVTX)):
+                raise ValueError('Retained publisher verifier is not root-protected')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > maximum:
+                raise ValueError('Retained publisher verifier evidence is not bounded regular source')
+            with os.fdopen(os.dup(fd), 'rb') as stream:
+                source = stream.read(maximum + 1)
+            after = os.fstat(fd)
+            current = path.lstat()
+            identity = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode,
+                                      value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_nlink)
+            if len(source) != before.st_size or identity(before) != identity(after) or identity(after) != identity(current):
+                raise ValueError('Retained publisher verifier changed during authentication')
+            return source
+        finally:
+            os.close(fd)
+    if directory.lstat().st_mode & 0o077:
+        raise ValueError('Retained publisher directory must remain root-private')
+    reference = json.loads(protected_read(directory / 'slsmassnotifyserver.active.json', 1024), object_pairs_hook=unique)
+    if (not isinstance(reference, dict) or set(reference) != {'generation', 'sha256'}
+            or not isinstance(reference['sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', reference['sha256'])
+            or reference['generation'] != 'slsmassnotifyserver-' + reference['sha256']):
+        raise ValueError('Retained publisher reference is invalid')
+    generation = directory / reference['generation']
+    if generation.lstat().st_mode & 0o077:
+        raise ValueError('Retained publisher generation must remain root-private')
+    raw = protected_read(generation / 'inventory.json', 8388608)
+    if hashlib.sha256(raw).hexdigest() != reference['sha256']:
+        raise ValueError('Retained publisher inventory differs from its protected reference')
+    inventory = json.loads(raw, object_pairs_hook=unique)
+    if (not isinstance(inventory, dict) or type(inventory.get('schema')) is not int or inventory['schema'] != 1
+            or inventory.get('module') != 'slsmassnotifyserver'
+            or not isinstance(inventory.get('source'), dict)
+            or inventory['source'].get('kind') != 'publisher-ed25519'
+            or not re.fullmatch(r'[a-f0-9]{64}', str(inventory['source'].get('archive_sha256', '')))
+            or not isinstance(inventory.get('files'), dict)):
+        raise ValueError('Retained publisher inventory has no independent SLL authority')
+    relative = 'bin/sls_mass_notify/sls_release_trust.py'
+    entry = inventory['files'].get(relative)
+    if (not isinstance(entry, dict) or set(entry) != {'sha256', 'target'}
+            or entry['target'] != 'admin/modules/slsmassnotifyserver/' + relative
+            or not isinstance(entry['sha256'], str) or not re.fullmatch(r'[a-f0-9]{64}', entry['sha256'])):
+        raise ValueError('Retained publisher verifier is absent from the protected inventory')
+    helper = generation / 'module' / relative
+    source = protected_read(helper, 262144)
+    if hashlib.sha256(source).hexdigest() != entry['sha256']:
+        raise ValueError('Retained publisher verifier differs from its approved source')
+    return helper, source
+
 try:
     with tempfile.TemporaryDirectory(prefix='sls-release-verification-') as directory:
         root = Path(directory)
@@ -5914,6 +9270,13 @@ try:
             exec(compile(source, str(trusted_helper), 'exec'), trust.__dict__)
             manifest = trust.authenticate_manifest((root / 'release-manifest.json').read_bytes(),
                 (root / 'release-manifest.sig').read_bytes(), anchor=public_key)
+        elif (trust_state / 'slsmassnotifyserver.active.json').exists() or (trust_state / 'slsmassnotifyserver.active.json').is_symlink():
+            trusted_helper, source = retained_helper_source(trust_state)
+            sys.dont_write_bytecode = True
+            trust = types.ModuleType('retained_publisher_trust'); trust.__file__ = str(trusted_helper)
+            exec(compile(source, str(trusted_helper), 'exec'), trust.__dict__)
+            manifest = trust.authenticate_manifest((root / 'release-manifest.json').read_bytes(),
+                (root / 'release-manifest.sig').read_bytes(), anchor=public_key, directory=trust_state)
         else:
             if any((trust_state / name).exists() or (trust_state / name).is_symlink()
                    for name in ('publisher-trust.json', 'release-trust.initialized')):
@@ -6344,62 +9707,41 @@ snapshot_config() {
   CONFIG_HASH_EXPECTED="$CONFIG_HASH_BEFORE"
 }
 
+run_installer_settings_transform() {
+  local action="$1" requested="$2" request response
+  assert_worker_coordination || return 1
+  request="$(/usr/bin/python3 -I - "$action" "$CONFIG_FILE" "$requested" "$PENDING_CONFIG_STATE" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" <<'PYTRANSFORMREQUEST'
+import json, sys
+print(json.dumps(sys.argv[1:], separators=(',', ':')))
+PYTRANSFORMREQUEST
+  )" || return 1
+  ( trap '' PIPE; printf 'transform-settings %s\n' "$request" >&"$WORKER_LOCK_KEEPALIVE_FD" ) 2>/dev/null || return 1
+  IFS= read -r -t 120 response <&"$WORKER_LOCK_RESPONSE_FD" || return 1
+  if [[ "$response" == 'rejected-settings '* ]]; then
+    # The successful result is captured by the caller. A policy refusal is
+    # actionable diagnostic output, so keep it outside that result channel.
+    log "Protected installer settings transformation refused: ${response#rejected-settings }" >&2
+    return 1
+  fi
+  [[ "$response" == 'transformed-settings '* ]] || return 1
+  assert_worker_coordination || return 1
+  /usr/bin/python3 -I - "$action" "${response#transformed-settings }" <<'PYTRANSFORMRESPONSE'
+import json, re, sys
+value=json.loads(sys.argv[2])
+if (type(value) is not dict or set(value)!={'changed','profile','sha256'} or type(value['changed']) is not bool
+        or value['profile'] not in ('standard','lite') or type(value['sha256']) is not str
+        or not re.fullmatch('[a-f0-9]{64}', value['sha256'])):
+    raise SystemExit('Invalid guarded installer settings response')
+print(('changed' if value['changed'] else 'unchanged') + (':' + value['profile'] if sys.argv[1]=='profile' else ''))
+PYTRANSFORMRESPONSE
+}
+
 apply_requested_deployment_profile() {
   [ -n "$REQUESTED_DEPLOYMENT_PROFILE" ] || return 0
   [ -n "$CONFIG_HASH_BEFORE" ] || return 0
-  local result account_uid account_gid
-  account_uid="$(id -u asterisk)" || return 1
-  account_gid="$(id -g asterisk)" || return 1
-  if ! result="$(/usr/bin/python3 -I - "$INSTALL_BOOTSTRAP_DIR/sls_config_crypto.py" "$CONFIG_FILE" \
-      "$REQUESTED_DEPLOYMENT_PROFILE" "$PENDING_CONFIG_STATE" "$account_uid" "$account_gid" \
-      "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" <<'PYPROFILE'
-import pathlib, sys, types
-helper, config = map(pathlib.Path, sys.argv[1:3])
-requested, pending, uid, gid = sys.argv[3], sys.argv[4], int(sys.argv[5]), int(sys.argv[6])
-try:
-    module = types.ModuleType('sls_profile_config_crypto'); module.__file__ = str(helper)
-    exec(compile(helper.read_bytes(), str(helper), 'exec'), module.__dict__)
-    original = module._read_protected(config, module.MAX_FILE_BYTES)
-    settings = module.decode_config(original)
-    if not isinstance(settings, dict): raise ValueError('invalid settings object')
-    current = settings.get('deployment_profile', 'standard')
-    if current not in ('standard', 'lite') or requested not in ('standard', 'lite'):
-        raise ValueError('invalid deployment profile')
-    if current == requested:
-        print('unchanged:' + current)
-        raise SystemExit(0)
-    if pending == 'present':
-        raise ValueError('pending settings exist')
-    if requested == 'lite':
-        if any(isinstance(settings.get(key), dict) and settings[key].get('enabled') in (True, '1', 1)
-               for key in ('enterprise_labs', 'enterprise_identity')):
-            raise SystemExit('Disable Enterprise Labs and enterprise SSO before converting to Lite. Saved Enterprise configuration is retained; active Enterprise policy is never silently removed.')
-        desktops = settings.get('desktop_client_limit', 25)
-        phones = settings.get('phone_device_limit', 25)
-        if type(desktops) is not int or type(phones) is not int or desktops > 25 or phones > 25:
-            raise ValueError('capacities exceed Lite limits')
-        settings['speech_synthesis_limit'] = 1
-        settings['speech_queue_limit'] = min(settings.get('speech_queue_limit', 8), 2)
-    if current == 'lite' and requested == 'standard':
-        for key in ('enterprise_labs', 'enterprise_identity'):
-            if key in settings:
-                settings[key]['enabled'] = False
-    settings['deployment_profile'] = requested
-    encoded = module.encode_config(settings)
-    transaction = types.ModuleType('sll_profile_write_intent'); transaction.__file__ = sys.argv[7]
-    exec(compile(pathlib.Path(sys.argv[7]).read_bytes(), sys.argv[7], 'exec'), transaction.__dict__)
-    transaction.record_configuration_intent(sys.argv[8], sys.argv[9], original, encoded)
-    module._atomic_write(config, encoded, uid, gid)
-    if module.read_config(config) != settings:
-        raise ValueError('profile write verification failed')
-    print('changed:' + requested)
-except SystemExit:
-    raise
-except Exception:
-    raise SystemExit('The deployment profile could not be changed safely. Resolve pending settings, protected configuration damage, or capacities above the Lite limit before retrying.') from None
-PYPROFILE
-  )"; then
-    log 'The requested deployment profile could not be applied; the original configuration will be restored.'
+  local result
+  if ! result="$(run_installer_settings_transform profile "$REQUESTED_DEPLOYMENT_PROFILE")"; then
+    log 'The requested deployment profile could not be applied safely; settings and protected recovery evidence were preserved.'
     return 1
   fi
   case "$result" in
@@ -6422,53 +9764,15 @@ PYPROFILE
   esac
 }
 
+
 apply_factory_branding_defaults() {
   [ -n "$CONFIG_HASH_BEFORE" ] || return 0
   if [ "$PENDING_CONFIG_STATE" = present ]; then
     log 'Saved factory branding was preserved because staged settings exist. Review those settings before applying them.'
     return 0
   fi
-  local result account_uid account_gid
-  account_uid="$(id -u asterisk)" || return 1
-  account_gid="$(id -g asterisk)" || return 1
-  result="$(/usr/bin/python3 -I - "$INSTALL_BOOTSTRAP_DIR/sls_config_crypto.py" "$CONFIG_FILE" "$account_uid" "$account_gid" \
-      "$TRANSACTION_TOOL" "$RECOVERY_DIR" "$CONFIG_HASH_BEFORE" <<'PYBRANDING'
-import pathlib, sys, types
-helper, path = map(pathlib.Path, sys.argv[1:3])
-uid, gid = map(int, sys.argv[3:5])
-module = types.ModuleType('sll_branding_config_crypto'); module.__file__ = str(helper)
-exec(compile(helper.read_bytes(), str(helper), 'exec'), module.__dict__)
-original = module._read_protected(path, module.MAX_FILE_BYTES)
-settings = module.decode_config(original)
-if not isinstance(settings, dict): raise SystemExit('Factory branding requires valid protected configuration.')
-replacements = {
-    'mail_from_name': {'SLS Mass Notification System': 'SLL Mass Notify Server',
-                       'SLS Mass Notify System': 'SLL Mass Notify Server'},
-    'alert_email_subject': {'Southland Servers Group PBX: EAS alert triggered - {{event}}':
-                            'Southland Labs PBX: EAS alert triggered - {{event}}'},
-    'test_email_subject': {'Southland Servers Mass Notifications Server: NWS test triggered':
-                           'SLL Mass Notify Server: NWS test triggered',
-                          'Southland Servers Group PBX: NWS test triggered':
-                           'Southland Labs PBX: NWS test triggered'},
-}
-changed = False
-for field, mapping in replacements.items():
-    value = settings.get(field)
-    if isinstance(value, str) and value in mapping:
-        settings[field] = mapping[value]
-        changed = True
-if not changed:
-    print('unchanged')
-else:
-    encoded = module.encode_config(settings)
-    transaction = types.ModuleType('sll_branding_write_intent'); transaction.__file__ = sys.argv[5]
-    exec(compile(pathlib.Path(sys.argv[5]).read_bytes(), sys.argv[5], 'exec'), transaction.__dict__)
-    transaction.record_configuration_intent(sys.argv[6], sys.argv[7], original, encoded)
-    module._atomic_write(path, encoded, uid, gid)
-    if module.read_config(path) != settings: raise SystemExit('Factory branding write verification failed.')
-    print('changed')
-PYBRANDING
-  )" || return 1
+  local result
+  result="$(run_installer_settings_transform branding '')" || return 1
   case "$result" in
     unchanged) return 0 ;;
     changed)
@@ -6574,6 +9878,7 @@ PY
 
 verify_config_unchanged() {
   [ -n "$CONFIG_HASH_BEFORE" ] || return 0
+  [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || return 1
   local expected_hash expected_snapshot
   expected_hash="${CONFIG_HASH_EXPECTED:-$CONFIG_HASH_BEFORE}"
   expected_snapshot="${CONFIG_EXPECTED_SNAPSHOT:-$CONFIG_SNAPSHOT}"
@@ -6584,6 +9889,7 @@ verify_config_unchanged() {
   if [ "$current_hash" = "$expected_hash" ]; then
     # Later postconditions can still fail. Retire this snapshot only after the
     # transaction's commit or verified rollback has been recorded durably.
+    [ "$WORKER_COORDINATION_REQUIRED" != 1 ] || assert_worker_coordination || return 1
     return 0
   fi
   current_snapshot="$(mktemp "$INSTALL_TEMP_ROOT/slsmassnotifyserver-config-current.XXXXXX")"
@@ -6593,13 +9899,9 @@ verify_config_unchanged() {
     log "Config drift: the live protected path became missing, non-regular, or unsafe."
   fi
   rm -f "$current_snapshot"
-  if ! ensure_data_directory || ! safe_config_restore "${CONFIG_RECOVERY_SNAPSHOT:-$CONFIG_SNAPSHOT}" "$CONFIG_FILE"; then
-    log "CRITICAL: unable to safely restore the protected central config. The original root-owned snapshot remains at $CONFIG_SNAPSHOT."
-    rollback_failure "protected configuration restoration failed after verification"
-    exit 1
-  fi
-  # Keep the snapshot for the exit guard until rollback is fully verified.
-  log "The installer detected an unexpected central config change, restored the original config, and stopped."
+  # The final verifier has no authority to rewind a live MFA cursor. EXIT may
+  # recover only inside a live lease owner using strict durable targets.
+  log "The installer detected an unexpected central config change and stopped; live settings and the original snapshot were preserved."
   exit 1
 }
 
@@ -6711,38 +10013,47 @@ PYPHP_COMPATIBILITY
 
 stage_module_directory() {
   local state inventory_status
-  state="$(module_registry_state "$MODULE")" || {
-    inventory_status=$?
-    log 'FreePBX could not return its native module registration. Installation stopped before staging; no existing module was classified as absent.'
-    return "$inventory_status"
-  }
-  case "$state" in
-    enabled$'\t'*) HAD_EXISTING_MODULE=1; MODULE_WAS_ENABLED=1 ;;
-    disabled$'\t'*) HAD_EXISTING_MODULE=1; MODULE_WAS_ENABLED=0 ;;
-    absent) HAD_EXISTING_MODULE=0; MODULE_WAS_ENABLED=0 ;;
-    *) log 'FreePBX returned an invalid native module registration; no module was staged.'; return 1 ;;
+  INITIAL_NATIVE_MODULE_REGISTRY_STATE=unknown
+  case "${1:-}" in
+    ''|--source-only) ;;
+    *) log 'Unknown module staging mode; no source was extracted.'; return 2 ;;
   esac
-  if [ "$HAD_EXISTING_MODULE" -eq 1 ]; then
-    [ -e "$CONFIG_FILE" ] || { log "An existing SLL module is missing its protected configuration. Restore a configuration backup before upgrading."; return 1; }
-    log "Existing SLL Mass Notify Server module detected; preserving config and preparing a recoverable upgrade."
+  # Inspection and retained-source review need only the already authenticated
+  # payload. They must not bootstrap mutable FreePBX PHP to query its registry.
+  if [ "${1:-}" != --source-only ]; then
+    state="$(module_registry_state "$MODULE")" || {
+      inventory_status=$?
+      log 'FreePBX could not return its native module registration. Installation stopped before staging; no existing module was classified as absent.'
+      return "$inventory_status"
+    }
+    case "$state" in
+      enabled$'\t'*) HAD_EXISTING_MODULE=1; MODULE_WAS_ENABLED=1; INITIAL_NATIVE_MODULE_REGISTRY_STATE=established ;;
+      disabled$'\t'*) HAD_EXISTING_MODULE=1; MODULE_WAS_ENABLED=0; INITIAL_NATIVE_MODULE_REGISTRY_STATE=established ;;
+      absent) HAD_EXISTING_MODULE=0; MODULE_WAS_ENABLED=0; INITIAL_NATIVE_MODULE_REGISTRY_STATE=known_absent ;;
+      *) log 'FreePBX returned an invalid native module registration; no module was staged.'; return 1 ;;
+    esac
+    if [ "$HAD_EXISTING_MODULE" -eq 1 ]; then
+      [ -e "$CONFIG_FILE" ] || { log "An existing SLL module is missing its protected configuration. Restore a configuration backup before upgrading."; return 1; }
+      log "Existing SLL Mass Notify Server module detected; preserving config and preparing a recoverable upgrade."
+    fi
   fi
-  STAGING_DIR="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-mass-notify-stage.XXXXXX")"
-  tar -xzf "$TGZ" -C "$STAGING_DIR"
+  STAGING_DIR="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-mass-notify-stage.XXXXXX")" || return 1
+  tar -xzf "$TGZ" -C "$STAGING_DIR" || return 1
   if [ ! -d "$STAGING_DIR/$MODULE" ] || [ ! -r "$STAGING_DIR/$MODULE/module.xml" ]; then
     log "The staged module tree is incomplete."
-    exit 1
+    return 1
   fi
   lint_staged_module_php "$STAGING_DIR/$MODULE" || return 1
   while IFS= read -r script; do
     bash -n "$script" || {
       log "The staged module contains an invalid shell script: $script"
-      exit 1
+      return 1
     }
   done < <(find "$STAGING_DIR/$MODULE" -type f -name '*.sh' -print)
   while IFS= read -r script; do
     python3 -I -c 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), sys.argv[1], "exec")' "$script" || {
       log "The staged module contains an invalid Python script: $script"
-      exit 1
+      return 1
     }
   done < <(find "$STAGING_DIR/$MODULE" -type f -name '*.py' -print)
 }
@@ -6935,7 +10246,7 @@ $module = getenv("SLS_MASS_NOTIFY_MODULE") ?: "slsmassnotifyserver";
 $stmt = \FreePBX::Database()->prepare("SELECT version, enabled FROM modules WHERE modulename = ?");
 $stmt->execute([$module]);
 $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
-exit(count($rows) === 1 && ($rows[0]["version"] ?? null) === "0.1.9-beta"
+exit(count($rows) === 1 && ($rows[0]["version"] ?? null) === "0.2.0-beta"
     && in_array($rows[0]["enabled"] ?? null, [1, "1"], true) ? 0 : 1);
 ' >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
 }
@@ -7090,7 +10401,7 @@ ensure_runtime_installed() {
 install_module_with_autoenable() {
   local install_output install_status
 
-  if install_output="$(run_without_install_maintenance_lock install_native_module "$MODULE" 2>&1 | /usr/bin/tail -c 131072)"; then
+  if install_output="$(install_native_module "$MODULE" 2>&1 | /usr/bin/tail -c 131072)"; then
     printf '%s\n' "$install_output" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}"
     return 0
   else
@@ -7119,7 +10430,7 @@ verify_announcement_worker_health() {
   local runtime_dir="${1:-/usr/local/bin/sls_mass_notify}"
   /usr/bin/php -l "$runtime_dir/sls_announcement_jobs.php" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || return $?
   /usr/bin/php -l "$runtime_dir/sls_mass_notify_announcement_worker.php" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || return $?
-  run_without_install_maintenance_lock sls_as_asterisk /usr/bin/timeout 45 \
+  sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 45 \
     /usr/bin/php "$runtime_dir/sls_mass_notify_announcement_worker.php" --health-check --record-health >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
 }
 
@@ -7146,7 +10457,7 @@ EOF
   for model in en_US-lessac-low.onnx en_US-amy-low.onnx en_US-ryan-low.onnx; do
     synthesis_file="$DATA_DIR/sounds/tts/installer-voice-check-${model%.onnx}-$$.wav"
     rm -f "$synthesis_file"
-    if ! printf '%s\n' 'SLL voice check.' | sls_as_asterisk /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/bin/timeout 90 /usr/local/bin/piper \
+    if ! printf '%s\n' 'SLL voice check.' | sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 90 /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/local/bin/piper \
       --model "$voice_dir/$model" --output-file "$synthesis_file" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
       rm -f "$synthesis_file"
       log "Piper could not synthesize audio with $model. See $LOG_FILE."
@@ -7233,7 +10544,7 @@ verify_ami_with_repair() (
   }
   trap 'rm -f -- "$probe_dir/health.json" "$probe_dir/health.err"; rmdir -- "$probe_dir" 2>/dev/null || true' EXIT
   for attempt in 1 2 3; do
-    if sls_as_asterisk /usr/bin/timeout 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --ami-health-json \
+    if sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --ami-health-json \
       >"$probe_dir/health.json" 2>"$probe_dir/health.err"; then
       if validate_ami_health_file "$probe_dir/health.json" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1
       then
@@ -7294,14 +10605,14 @@ verify_phone_collector() (
   }
   probe_dir="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-phone-collector-check.XXXXXX")" || return 1
   trap 'rm -f -- "$probe_dir/ami.json" "$probe_dir/health.json"; rmdir -- "$probe_dir" 2>/dev/null || true' EXIT
-  if ! sls_as_asterisk /usr/bin/timeout --kill-after=1 15 /usr/bin/python3 -I \
+  if ! sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=1 15 /usr/bin/python3 -I \
       /usr/local/bin/sls_mass_notify/sls_phone_admission.py --probe-ami >"$probe_dir/ami.json" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" \
     || ! validate_phone_collector_probe_file ami "$probe_dir/ami.json" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
     log "The SLL phone runtime could not confirm AMI Ping and ShowDialPlan reporting authorization. Review the local AMI connection and run Repair Installation."
     return 1
   fi
   for attempt in 1 2 3; do
-    if sls_as_asterisk /usr/bin/timeout --kill-after=1 5 /usr/bin/python3 -I \
+    if sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=1 5 /usr/bin/python3 -I \
         /usr/local/bin/sls_mass_notify/sls_phone_events.py --health >"$probe_dir/health.json" 2>>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" \
       && validate_phone_collector_probe_file health "$probe_dir/health.json" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
       return 0
@@ -7360,7 +10671,7 @@ except (OSError, ValueError, AssertionError):
 if result.get('ok') is not True or sys.argv[2] != '200':
     missing = [name for name in result['missing'] if name in ('pdo_sqlite','curl','dom','mbstring','posix','openssl','sodium','php_8_2_or_newer','php_security_floor','exec_enabled','proc_open_enabled','posix_geteuid_enabled','posix_getpwnam_enabled','openssl_encrypt_enabled','openssl_decrypt_enabled','sodium_crypto_aead_xchacha20poly1305_ietf_encrypt_enabled','sodium_crypto_pwhash_str_enabled','sem_get_enabled','sem_acquire_enabled','sem_remove_enabled','web_runtime_must_run_as_asterisk')]
     raise SystemExit('The PHP runtime serving Apache is missing: ' + ', '.join(missing) + '. Enable these for the active Apache/FPM PHP version and retry; installing CLI extensions alone does not repair another PHP handler.')
-if result.get('module_version') != '0.1.9-beta':
+if result.get('module_version') != '0.2.0-beta':
     raise SystemExit('The web PHP handler is still serving another SLL release. Review Apache/PHP-FPM reload errors and draining requests, then retry; a CLI file check cannot verify cached web code.')
 print('Served PHP prerequisites verified through the local API route.')
 PY
@@ -7504,8 +10815,9 @@ PY
 }
 
 verify_desktop_transport() {
+  capture_local_web_probe_authority || return 1
   local desktop_status=0
-  php -r '
+  sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 60 /usr/bin/php -r '
 $path = "/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config";
 require_once "/usr/local/bin/sls_mass_notify/sls_config_crypto.php";
 $settings = \FreePBX\modules\SlsConfigCrypto::decode((string)file_get_contents($path));
@@ -7544,6 +10856,7 @@ if (!is_string($password) || $password === "" || $username === "") {
     exit(1);
 }
 require_once "/var/www/html/admin/modules/slsmassnotifyserver/LocalWebProbe.php";
+require_once "/var/www/html/admin/modules/slsmassnotifyserver/api/sls-mass-notify/security.php";
 $authorization = "Authorization: Basic " . base64_encode($username . ":" . $password);
 $pollingAdvertised = false;
 foreach (\FreePBX\modules\SlsLocalWebProbe::responses(
@@ -7620,7 +10933,8 @@ exit(1);
 }
 
 verify_media_access() {
-  if ! sls_as_asterisk /usr/bin/php -r '
+  capture_local_web_probe_authority || return 1
+  if ! sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 60 /usr/bin/php -r '
 require_once "/var/www/html/admin/modules/slsmassnotifyserver/LocalWebProbe.php";
 require_once "/var/www/html/api/sls-mass-notify/media-policy.php";
 require_once "/usr/local/bin/sls_mass_notify/sls_config_crypto.php";
@@ -7629,14 +10943,15 @@ if (!is_array($settings)) { fwrite(STDERR, "Media policy cannot read the protect
 $result = \FreePBX\modules\SlsLocalWebProbe::mediaAccess($settings);
 if (!$result["ok"]) { fwrite(STDERR, $result["message"] . "\n"); exit(1); }
 ' >> "${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
-    log 'Generated-media access enforcement could not be verified. Review the preceding policy/Apache routing error before retrying installation.'
+    log "Generated-media access enforcement could not be verified. Review the protected policy/Apache routing error in $LOG_FILE before retrying installation."
     return 1
   fi
 }
 
 verify_control_api_authentication() {
+  capture_local_web_probe_authority || return 1
   local control_status=0
-  php -r '
+  sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 60 /usr/bin/php -r '
 $path = "/var/lib/asterisk/SLS_Mass_Notifications_Plugin/mass-notifications.config";
 require_once "/usr/local/bin/sls_mass_notify/sls_config_crypto.php";
 $settings = \FreePBX\modules\SlsConfigCrypto::decode((string)file_get_contents($path));
@@ -7764,7 +11079,7 @@ sign_and_verify_touched_modules() {
   for module_name in "${modules_to_sign[@]}"; do
     signed=0
     for attempt in 1 2; do
-      if run_without_install_maintenance_lock /usr/bin/timeout --signal=TERM 360 "$signer" "$module_name" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
+      if run_without_install_maintenance_lock sls_bounded_native_command 360 5 /usr/bin/timeout --signal=TERM --kill-after=5 360 "$signer" "$module_name" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
         signed=1
         break
       fi
@@ -7777,7 +11092,7 @@ sign_and_verify_touched_modules() {
       exit 1
     }
 
-    SLS_MASS_NOTIFY_MODULE="$module_name" run_without_install_maintenance_lock php -r '
+    SLS_MASS_NOTIFY_MODULE="$module_name" php -r '
 require "/etc/freepbx.conf";
 $module = getenv("SLS_MASS_NOTIFY_MODULE");
 $gpg = \FreePBX::GPG();
@@ -7803,6 +11118,36 @@ exit(0);
   done
 }
 
+retire_legacy_framework_menu() {
+  local hashes before after
+  hashes="$(/usr/bin/python3 -I - "$UPGRADE_TRUST_DIR" <<'PYMENU'
+from pathlib import Path
+import json, re, sys
+review = Path(sys.argv[1])
+name = 'amp_conf/htdocs/admin/views/menu_items.php'
+previous = json.loads((review / 'previous-web-approval.json').read_bytes())['framework']
+candidate = json.loads((review / 'framework.json').read_bytes())
+values = []
+for manifest in (previous, candidate):
+    if manifest['module'] != 'framework':
+        raise SystemExit('Framework menu migration needs the protected Framework approvals.')
+    entry = manifest['files'].get(name)
+    if entry is None:
+        values.append('absent')
+    elif entry['target'] == 'admin/views/menu_items.php' and re.fullmatch('[a-f0-9]{64}', entry['sha256']):
+        values.append(entry['sha256'])
+    else:
+        raise SystemExit('The approved Framework menu identity is invalid.')
+if 'absent' in values and values[0] != values[1]:
+    raise SystemExit('The Framework menu was added or removed during the installation review.')
+print(*values)
+PYMENU
+)" || return 1
+  read -r before after <<< "$hashes" || return 1
+  [ "$before" != "$after" ] || return 0
+  php -r 'require "/etc/freepbx.conf"; \FreePBX::Create()->Slsmassnotifyserver->retireLegacyFrameworkMenu($argv[1], $argv[2]);' "$before" "$after"
+}
+
 verify_install_cron() {
   [ -n "$RECOVERY_TOOL" ] && [ -f "$RECOVERY_TOOL" ] && [ ! -L "$RECOVERY_TOOL" ] || {
     log "The authenticated cron inspection helper is unavailable."
@@ -7820,15 +11165,10 @@ verify_install() {
   verify_fresh_install_defaults
   sign_and_verify_touched_modules
   verify_dashboard_integration
-  php -l /var/www/html/admin/views/menu_items.php >/dev/null || {
-    log "FreePBX menu template is invalid after Mass Notify placement was applied."
+  php -r 'require "/etc/freepbx.conf"; \FreePBX::Create()->Slsmassnotifyserver->verifyFrameworkMenuRegistration();' || {
+    log "FreePBX could not verify the native Mass Notify menu registration."
     exit 1
   }
-  grep -Fq 'SLS Mass Notifications menu placement: keep Mass Notify after UCP/User Panel.' \
-    /var/www/html/admin/views/menu_items.php || {
-      log "This FreePBX menu template is not compatible with the Mass Notify top-level placement patch."
-      exit 1
-    }
   module_list="$(fwconsole ma list)"
   printf '%s\n' "$module_list" | grep -Ei 'slsmassnotifyserver|dashboard|framework|Module'
   module_enabled "$MODULE" || {
@@ -8044,11 +11384,11 @@ exit(0);
     log "Piper wrapper was not created at /usr/local/bin/piper."
     exit 1
   fi
-  sls_as_asterisk /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/bin/timeout --kill-after=2 20 /usr/local/bin/piper -h >/dev/null
+  sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/local/bin/piper -h >/dev/null
   if [ -x /usr/local/bin/sls_mass_notify/piper/venv/bin/piper ]; then
-    sls_as_asterisk /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/bin/timeout --kill-after=2 20 /usr/local/bin/sls_mass_notify/piper/venv/bin/piper -h >/dev/null
+    sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/local/bin/sls_mass_notify/piper/venv/bin/piper -h >/dev/null
   elif [ -x /usr/local/bin/sls_mass_notify/piper/venv/bin/python ]; then
-    sls_as_asterisk /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/bin/timeout --kill-after=2 20 /usr/local/bin/sls_mass_notify/piper/venv/bin/python -I -m piper -h >/dev/null
+    sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/bin/env ORT_DISABLE_TELEMETRY=1 /usr/local/bin/sls_mass_notify/piper/venv/bin/python -I -m piper -h >/dev/null
   else
     log "Piper venv runtime is missing or not executable."
     exit 1
@@ -8112,6 +11452,7 @@ exit(0);
     /usr/local/bin/sls_mass_notify/sls_install_transaction.py
     /usr/local/bin/sls_mass_notify/sls_phone_inventory.py
     /usr/local/bin/sls_mass_notify/sls_speech_admission.py
+    /usr/local/bin/sls_mass_notify/sls_render_paging_prompt.py
     /usr/local/bin/sls_mass_notify/sls_desktop_history.py
     /usr/local/bin/sls_mass_notify/sls_desktop_feed_cache.py
     /usr/local/bin/sls_mass_notify/sls_mail_evidence.py
@@ -8209,7 +11550,7 @@ PY
   fi
   verify_phone_collector || exit 1
   notify_capabilities="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-notify-capabilities.XXXXXX")"
-  if ! sls_as_asterisk /usr/bin/timeout 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --notify-capabilities-json >"$notify_capabilities"; then
+  if ! sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --notify-capabilities-json >"$notify_capabilities"; then
     rm -f "$notify_capabilities"
     log "SLL could not inspect Asterisk SIP NOTIFY routing capabilities."
     exit 1
@@ -8245,7 +11586,7 @@ PY
   # differently, and an empty PBX is a valid installation state.
   endpoint_inventory="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-endpoints.XXXXXX")"
   endpoint_inventory_err="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-endpoints-error.XXXXXX")"
-  if ! sls_as_asterisk /usr/bin/timeout 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --list-endpoints-json \
+  if ! sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --list-endpoints-json \
     >"$endpoint_inventory" 2>"$endpoint_inventory_err"; then
     cat "$endpoint_inventory_err" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>/dev/null || true
     rm -f "$endpoint_inventory" "$endpoint_inventory_err"
@@ -8322,22 +11663,73 @@ PY
     exit 1
   }
   verify_install_cron || exit 1
-  if ! sls_as_asterisk /usr/bin/timeout 20 /usr/local/bin/sls_mass_notify/sls_mass_notify_schedule_worker.php --self-test >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
+  if ! sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 20 /usr/local/bin/sls_mass_notify/sls_mass_notify_schedule_worker.php --self-test >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1; then
     log "Scheduled-announcement worker failed its Asterisk-account self-test."
     exit 1
   fi
-  scheduler_probe="$(mktemp -d "$INSTALL_TEMP_ROOT/sls-mass-notify-scheduler-check.XXXXXX")"
-  chown asterisk:asterisk "$scheduler_probe"
-  chmod 0750 "$scheduler_probe"
-  printf '%s\n' '{"enabled":"0","xweather":{"enabled":"0"}}' >"$scheduler_probe/disabled.config"
-  chown asterisk:asterisk "$scheduler_probe/disabled.config"
-  chmod 0640 "$scheduler_probe/disabled.config"
-  if ! sls_as_asterisk /usr/bin/env \
+  # This tiny native-runtime fixture must be readable through its parents.
+  # Protected installer scratch intentionally grants the PBX group search only;
+  # the configuration reader requires directory-read permission as well as search.
+  scheduler_probe="$(/usr/bin/python3 -I - <<'PYSLSWEATHERPROBE'
+import os
+from pathlib import Path
+import pwd
+import stat
+import tempfile
+
+parent_path = Path('/tmp')
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+parent = os.open(parent_path, flags)
+created = None
+child = None
+try:
+    before = os.fstat(parent)
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode)
+    if before.st_uid != 0 or stat.S_IMODE(before.st_mode) != 0o1777:
+        raise ValueError('Native scheduler probe requires the root-owned sticky runtime temporary directory')
+    account = pwd.getpwnam('asterisk')
+    if account.pw_uid <= 0 or account.pw_gid <= 0:
+        raise ValueError('Native scheduler probe requires a nonroot PBX account')
+    created = Path(tempfile.mkdtemp(prefix='sls-mass-notify-scheduler-check.', dir=parent_path))
+    child = os.open(created.name, flags, dir_fd=parent)
+    file = os.open('disabled.config', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=child)
+    try:
+        with os.fdopen(os.dup(file), 'wb') as output:
+            output.write(b'{"enabled":"0","xweather":{"enabled":"0"}}\n')
+        os.fchown(file, account.pw_uid, account.pw_gid)
+        os.fchmod(file, 0o640)
+    finally:
+        os.close(file)
+    if identity(before) != identity(os.stat(parent_path, follow_symlinks=False)):
+        raise ValueError('Native scheduler probe parent changed during creation')
+    # Publish ownership only after all root writes to this private fixture end.
+    os.fchown(child, account.pw_uid, account.pw_gid)
+    os.fchmod(child, 0o750)
+    print(created)
+except BaseException:
+    if child is not None:
+        try:
+            os.unlink('disabled.config', dir_fd=child)
+        except FileNotFoundError:
+            pass
+    if created is not None:
+        os.rmdir(created.name, dir_fd=parent)
+    raise
+finally:
+    if child is not None:
+        os.close(child)
+    os.close(parent)
+PYSLSWEATHERPROBE
+)" || {
+    log "Unable to create the private native scheduler check in the guarded runtime temporary directory."
+    exit 1
+  }
+  if ! sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/env \
     CONFIG_FILE="$scheduler_probe/disabled.config" \
     DATA_DIR="$scheduler_probe" \
     LOG="$scheduler_probe/weather.log" \
     RUNTIME_DIR="/usr/local/bin/sls_mass_notify" \
-    /usr/bin/timeout 15 /usr/local/bin/sls_mass_notify/sls_mass_notify_weather_poll.sh; then
+    /usr/local/bin/sls_mass_notify/sls_mass_notify_weather_poll.sh; then
     rm -rf "$scheduler_probe"
     log "Weather scheduler wrapper failed its disabled-config execution check."
     exit 1
@@ -8351,23 +11743,94 @@ PY
   ls -lh /var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices
 }
 
+run_retained_release_review() {
+  local -a arguments=(--workspace "$INSTALL_BOOTSTRAP_DIR" --trust-root "$TRUST_ROOT")
+  case "$REQUESTED_RETAINED_MODE" in
+    review) arguments+=(--review-retained) ;;
+    approve) arguments+=(--approve-retained "$REQUESTED_RETAINED_APPROVAL" \
+      --operator "$REQUESTED_RETAINED_OPERATOR" --reason "$REQUESTED_RETAINED_REASON") ;;
+    *) return 2 ;;
+  esac
+  # These exact helpers were copied from the publisher-authenticated package.
+  # Review is read-only; only separate explicit approval can create its bounded
+  # receipt under existing live trust. Neither action prepares an installation.
+  run_logged /usr/bin/python3 -I "$INSTALL_BOOTSTRAP_DIR/sls_upgrade_trust.py" "${arguments[@]}"
+}
+
+retained_review_scratch_report() {
+  # Reviewing retained publisher evidence does not deploy a runtime or convert
+  # its profile. Qualify only the bounded authenticated-source scratch space;
+  # installation and ordinary inspection keep their full resource admission.
+  /usr/bin/python3 -I - <<'PYRETAINEDSCRATCH'
+import json
+import os
+import stat
+import sys
+
+MIB = 1024 * 1024
+REQUIRED_INODES = 5000 + 12 + 16
+flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+for path in ('/tmp', '/var/tmp'):
+    fd = None
+    try:
+        fd = os.open('/', flags)
+        for name in path.split('/')[1:]:
+            child = os.open(name, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            metadata = os.fstat(fd)
+            if metadata.st_uid != 0 or (metadata.st_mode & 0o022 and not metadata.st_mode & stat.S_ISVTX):
+                raise ValueError('unsafe scratch parent')
+        capacity = os.fstatvfs(fd)
+        allocation_unit = max(4096, capacity.f_frsize)
+        # Accepted archives are at most52MiB compressed/50MiB expanded and
+        # 5,000 entries. The copied helper subset is at most another50MiB.
+        # Reserve8MiB for bounded metadata/logs, plus allocation rounding for
+        # every archive/helper/metadata entry on this actual filesystem.
+        required_bytes = (52 + 50 + 50 + 8) * MIB + REQUIRED_INODES * allocation_unit
+        if (capacity.f_flag & os.ST_RDONLY or capacity.f_bavail * capacity.f_frsize < required_bytes
+                or capacity.f_favail < REQUIRED_INODES):
+            continue
+        print(json.dumps({'purpose': 'retained_source_review', 'requirements': {'storage': {
+            'temporary_directory': path, 'required_bytes': required_bytes,
+            'required_inodes': REQUIRED_INODES}}}, sort_keys=True))
+        break
+    except (OSError, ValueError):
+        continue
+    finally:
+        if fd is not None:
+            os.close(fd)
+else:
+    print('Retained release review needs a safe writable /tmp or /var/tmp with bounded source scratch space '
+          '(160 MiB plus filesystem allocation overhead and 5,028 available inodes). '
+          'No installation was started.', file=sys.stderr)
+    raise SystemExit(1)
+PYRETAINEDSCRATCH
+}
+
 inspect_installation() {
   # Inspection uses only existing utilities and private evidence. It does not
   # bootstrap PHP/FreePBX, repair packages, acquire/create worker locks or enroll
   # trust pointers. All active and pending settings remain untouched.
+  # Separate explicit retained approval uses the same authenticated scratch path
+  # and may write only its bounded root receipt through helper coordination.
   local utility report inspection_status
   for utility in /usr/bin/python3 /usr/bin/openssl /usr/bin/tar /usr/bin/php /usr/bin/sha256sum; do
     [ -x "$utility" ] || { printf 'Inspection needs the existing utility %s; it will not install packages.\n' "$utility" >&2; return 1; }
   done
   [ -x /usr/bin/curl ] || [ -x /usr/bin/wget ] || { printf 'Inspection needs curl or wget for signed release evidence.\n' >&2; return 1; }
   [ -f /etc/freepbx.conf ] && [ -f /var/www/html/admin/modules/framework/module.xml ] || { printf 'FreePBX is not present at the supported paths.\n' >&2; return 1; }
-  if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
-    local -a capacity_arguments=(--check --mode prepare --config "$CONFIG_FILE")
+  if [ -n "$REQUESTED_RETAINED_MODE" ]; then
+    report="$(retained_review_scratch_report)" || return 1
   else
-    local -a capacity_arguments=(--check --mode prepare --desktop-limit 25 --auto-phone-limit)
+    if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
+      local -a capacity_arguments=(--check --mode prepare --config "$CONFIG_FILE")
+    else
+      local -a capacity_arguments=(--check --mode prepare --desktop-limit 25 --auto-phone-limit)
+    fi
+    [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || capacity_arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
+    report="$(bootstrap_resource_capacity "${capacity_arguments[@]}")" || { printf '%s\n' "$report"; return 1; }
   fi
-  [ -z "$REQUESTED_DEPLOYMENT_PROFILE" ] || capacity_arguments+=(--profile "$REQUESTED_DEPLOYMENT_PROFILE")
-  report="$(bootstrap_resource_capacity "${capacity_arguments[@]}")" || { printf '%s\n' "$report"; return 1; }
   select_install_temp_root "$report" || return 1
   LOG_FILE="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-inspection.XXXXXXXX.log")" || return 1
   chmod 0600 "$LOG_FILE" || return 1
@@ -8375,9 +11838,17 @@ inspect_installation() {
   open_root_owned_file INSTALL_LOG_FD "$LOG_FILE" log || return 1
   INSTALL_LOG_OUTPUT="/proc/${BASHPID}/fd/$INSTALL_LOG_FD"
   printf '%s\n' "$report" >>"$INSTALL_LOG_OUTPUT"
-  validate_installer_memory_profile "$report" || return $?
-  if download_tgz && verify_tgz && stage_module_directory && prepare_installer_bootstrap && prepare_authenticated_installer; then
-    inspection_status=0
+  if [ -z "$REQUESTED_RETAINED_MODE" ]; then
+    validate_installer_memory_profile "$report" || return $?
+  fi
+  if download_tgz && verify_tgz && stage_module_directory --source-only && prepare_installer_bootstrap; then
+    if [ -n "$REQUESTED_RETAINED_MODE" ]; then
+      if run_retained_release_review; then inspection_status=0; else inspection_status=$?; fi
+    elif prepare_authenticated_installer; then
+      inspection_status=0
+    else
+      inspection_status=$?
+    fi
   else
     inspection_status=$?
   fi
@@ -8387,14 +11858,23 @@ inspect_installation() {
   [ -z "$DOWNLOAD_DIR" ] || rm -rf -- "$DOWNLOAD_DIR"
   [ -z "$STAGING_DIR" ] || rm -rf -- "$STAGING_DIR"
   [ -z "$INSTALL_BOOTSTRAP_DIR" ] || rm -rf -- "$INSTALL_BOOTSTRAP_DIR"
+  cleanup_install_temp_root
   DOWNLOAD_DIR=""
   STAGING_DIR=""
   INSTALL_BOOTSTRAP_DIR=""
   if [ "$inspection_status" -ne 0 ]; then
-    printf 'Inspection failed. Evidence and diagnostics: %s\n' "$LOG_FILE" >&2
+    if [ -n "$REQUESTED_RETAINED_MODE" ]; then
+      printf 'Retained release %s failed; no installation was started. Diagnostics: %s\n' "$REQUESTED_RETAINED_MODE" "$LOG_FILE" >&2
+    else
+      printf 'Inspection failed. Evidence and diagnostics: %s\n' "$LOG_FILE" >&2
+    fi
     return "$inspection_status"
   fi
-  printf 'Inspection passed. Evidence: %s; log: %s\n' "$UPGRADE_TRUST_DIR" "$LOG_FILE"
+  if [ -n "$REQUESTED_RETAINED_MODE" ]; then
+    printf 'Retained release %s completed. Diagnostics: %s\n' "$REQUESTED_RETAINED_MODE" "$LOG_FILE"
+  else
+    printf 'Inspection passed. Evidence: %s; log: %s\n' "$UPGRADE_TRUST_DIR" "$LOG_FILE"
+  fi
 }
 
 main() {
@@ -8403,7 +11883,7 @@ main() {
     printf 'Run this installer as root.\n' >&2
     exit 1
   fi
-  if [ "${SLS_MASS_NOTIFY_INVENTORY_ONLY:-0}" = 1 ]; then
+  if [ "${SLS_MASS_NOTIFY_INVENTORY_ONLY:-0}" = 1 ] || [ -n "$REQUESTED_RETAINED_MODE" ]; then
     inspect_installation
     return $?
   fi
@@ -8454,6 +11934,7 @@ main() {
   bootstrap_missing_dashboard
   set_install_stage "publisher and stock approval" "Review the upgrade evidence directory printed in the log. Standard stock modules bootstrap from signed upstream packages; local differences require independently reviewed inventories. No maintenance changes occur before approval."
   prepare_authenticated_installer
+  capture_install_resource_proof
   # Persist authenticated recovery evidence before even the bounded native
   # chown exclusion or legacy metadata repair can change protected state.
   begin_install_transaction
@@ -8514,20 +11995,21 @@ main() {
     log "FreePBX module installation failed (exit $install_status). See $LOG_FILE."
     exit "$install_status"
   fi
+  retire_legacy_framework_menu
   SLS_MASS_NOTIFY_MODULE="$MODULE" sync_module_version
   set_install_stage "runtime integration" "Correct the named integration prerequisite in the installer log; protected operations require the authenticated release and approved stock inventories."
   ensure_runtime_installed
   secure_central_config
   # Fresh installs need the collector running before FreePBX postReload
   # performs readiness checks. Install already wrote the loopback AMI user.
-  sls_as_asterisk /usr/sbin/asterisk -rx "manager reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
+  asterisk -rx "manager reload" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
   protected_install_phase activate --apply
   refresh_served_php_workers
-  SLS_MASS_NOTIFY_PRESERVE_PENDING=1 run_without_install_maintenance_lock fwconsole reload
+  SLS_MASS_NOTIFY_PRESERVE_PENDING=1 fwconsole reload
   verify_phone_collector
   protected_install_phase verify
-  sls_as_asterisk /usr/sbin/asterisk -rx "module reload res_pjsip_notify.so" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
-  sls_as_asterisk /usr/sbin/asterisk -rx "dialplan reload" || true
+  asterisk -rx "module reload res_pjsip_notify.so" >>"${INSTALL_LOG_OUTPUT:-$LOG_FILE}" 2>&1 || true
+  asterisk -rx "dialplan reload" || true
   set_install_stage "post-install verification" "Review the failed verification in /tmp/slsmassnotifyserver-install.log, correct that PBX-specific prerequisite, and rerun the installer or Repair Installation."
   verify_runtime_shell_syntax
   verify_announcement_worker_health

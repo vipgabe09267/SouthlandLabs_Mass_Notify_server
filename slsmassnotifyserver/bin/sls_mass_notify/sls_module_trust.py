@@ -8,6 +8,7 @@ This module never bootstraps PHP or executes a FreePBX module.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import types
 import io
@@ -78,29 +79,35 @@ def directory(path: Path, *, protected=False) -> int:
 
 def read(path: Path, limit: int, *, protected=False) -> bytes:
     parent = directory(path.parent, protected=protected)
+    try:
+        return read_entry(parent, path.name, limit, protected=protected)[0]
+    finally:
+        os.close(parent)
+
+
+def read_entry(parent: int, name: str, limit: int, *, protected=False):
     fd = -1
     try:
-        fd = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         before = os.fstat(fd)
-        current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit
                 or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)
                 or protected and (before.st_uid != 0 or before.st_mode & 0o022)):
-            raise TrustError('unsafe or oversized trust input: ' + path.name)
+            raise TrustError('unsafe or oversized trust input: ' + name)
         with os.fdopen(fd, 'rb') as stream:
             fd = -1
             body = stream.read(limit + 1)
             after = os.fstat(stream.fileno())
-        current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
         if (len(body) > limit or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                 != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
                 or (current.st_dev, current.st_ino, current.st_nlink) != (after.st_dev, after.st_ino, 1)):
-            raise TrustError('trust input changed while reading: ' + path.name)
-        return body
+            raise TrustError('trust input changed while reading: ' + name)
+        return body, after
     finally:
         if fd >= 0:
             os.close(fd)
-        os.close(parent)
 
 
 def atomic(path: Path, body: bytes) -> None:
@@ -224,14 +231,37 @@ def store_manifest(root: Path, data: dict, body: bytes) -> str:
     prepare_root(root)
     name = data['module'] + '-' + digest(body)
     generation = root / name
-    try:
-        generation.mkdir(mode=0o700)
-    except FileExistsError:
+    if generation.exists() or generation.is_symlink():
         private_generation(generation)
         if read(generation / 'inventory.json', MAX_MANIFEST, protected=True) != body:
             raise TrustError('existing generation differs from approved inventory')
     else:
-        atomic(generation / 'inventory.json', body)
+        # Publish only a complete generation. A killed writer may leave private
+        # non-authoritative staging, but cannot reserve the final identity with
+        # a missing inventory and prevent an independently reviewed exact retry.
+        staging = Path(tempfile.mkdtemp(prefix='.reviewed-', dir=root))
+        try:
+            atomic(staging / 'inventory.json', body)
+            descriptor = directory(root, protected=True)
+            try:
+                rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
+                if rename is None:
+                    raise TrustError('Atomic non-replacing generation publication is unavailable')
+                rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+                rename.restype = ctypes.c_int
+                if rename(descriptor, os.fsencode(staging.name), descriptor, os.fsencode(name), 1) != 0:
+                    error = ctypes.get_errno()
+                    raise OSError(error, os.strerror(error), str(generation))
+                os.fsync(descriptor)
+            except FileExistsError:
+                private_generation(generation)
+                if read(generation / 'inventory.json', MAX_MANIFEST, protected=True) != body:
+                    raise TrustError('concurrent generation differs from approved inventory')
+            finally:
+                os.close(descriptor)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
     atomic(root / (data['module'] + '.active.json'), json.dumps({'generation': name, 'sha256': digest(body)}).encode())
     return name
 
@@ -303,16 +333,50 @@ def inventory_tree(root: Path, module: str) -> set[str]:
     return found
 
 
-def check(root: Path, module: str, webroot: Path, *, uninstalled=False) -> dict:
+def check_reviewed_omissions(data, webroot):
+    """A vendor file omitted by an earlier site review must still be absent."""
+    omissions = data['source'].get('carried_stock_omissions', [])
+    if not isinstance(omissions, list) or len(omissions) > MAX_FILES:
+        raise TrustError('invalid reviewed stock omissions')
+    for name in omissions:
+        relative(name)
+        if data['module'] not in ('framework', 'dashboard') or name in data['files']:
+            raise TrustError('reviewed stock omission conflicts with approved inventory')
+        if data['module'] == 'framework' and name.startswith('amp_conf/htdocs/'):
+            target = webroot / relative(name[len('amp_conf/htdocs/'):])
+        else:
+            target = webroot / 'admin/modules' / data['module'] / name
+        try:
+            parent = directory(target.parent)
+            try:
+                os.stat(target.name, dir_fd=parent, follow_symlinks=False)
+            finally:
+                os.close(parent)
+        except FileNotFoundError:
+            continue
+        raise TrustError('previously omitted stock file is present: ' + name)
+
+
+def check(root: Path, module: str, webroot: Path, *, uninstalled=False, uninstalling=False) -> dict:
+    if uninstalled and uninstalling:
+        raise TrustError('Choose final uninstall verification or explicit teardown progress, not both')
     data, generation = load(root, module)
-    if uninstalled:
+    check_reviewed_omissions(data, webroot)
+    if uninstalled or uninstalling:
         if 'uninstall' not in data:
             raise TrustError('reviewed post-uninstall inventory is unavailable; previous signature retained')
         data = json.loads(json.dumps(data))
         for name in data['uninstall']['remove']:
-            del data['files'][name]
-        for name, expected in data['uninstall']['replace'].items():
-            data['files'][name]['sha256'] = expected
+            if uninstalled:
+                del data['files'][name]
+            else:
+                try:
+                    (webroot / data['files'][name]['target']).lstat()
+                except FileNotFoundError:
+                    del data['files'][name]
+        if uninstalled:
+            for name, expected in data['uninstall']['replace'].items():
+                data['files'][name]['sha256'] = expected
     module_path = webroot / 'admin/modules' / module
     actual = inventory_tree(module_path, module)
     expected = {name for name, entry in data['files'].items() if entry['target'].startswith('admin/modules/' + module + '/')}
@@ -343,7 +407,10 @@ def check(root: Path, module: str, webroot: Path, *, uninstalled=False) -> dict:
         total += len(body)
         if total > 1024 * 1024 * 1024:
             raise TrustError('module contents exceed inspection byte limit')
-        if digest(body) != entry['sha256']:
+        allowed = {entry['sha256']}
+        if uninstalling and name in data['uninstall']['replace']:
+            allowed.add(data['uninstall']['replace'][name])
+        if digest(body) not in allowed:
             raise TrustError('file differs from approved inventory: ' + name)
     return data
 
@@ -353,18 +420,209 @@ def emit_hashes(root: Path, module: str, webroot: Path, *, uninstalled=False) ->
     return ''.join(name + ' = ' + data['files'][name]['sha256'] + '\n' for name in sorted(data['files']))
 
 
-def signature_file(module: str, webroot: Path, action: str, path: Path | None, user: str) -> str:
+def file_table_digest(files: dict) -> str:
+    return digest(json.dumps(files, sort_keys=True, separators=(',', ':')).encode())
+
+
+def framework_vendor_signature_digest(root: Path, webroot: Path) -> str | None:
+    """A vendor signature is eligible only on the complete reviewed stock projection."""
+    data, _ = load(root, 'framework')
+    expected = data['source'].get('vendor_signature', {})
+    if (not isinstance(expected, dict) or expected.get('stock_files_sha256') != file_table_digest(data['files'])
+            or not DIGEST.fullmatch(str(expected.get('sha256', '')))):
+        return None
+    try:
+        body = read(webroot / 'admin/modules/framework/module.sig', MAX_MANIFEST)
+    except FileNotFoundError:
+        return None
+    return expected['sha256'] if digest(body) == expected['sha256'] else None
+
+
+def reusable_framework_signature(root: Path, webroot: Path) -> bool:
+    return framework_vendor_signature_digest(root, webroot) is not None
+
+
+def rename_signature(source_dir, source, dest_dir, dest):
+    """Move an entry on the module filesystem only if its destination is absent."""
+    rename = getattr(ctypes.CDLL(None, use_errno=True), 'renameat2', None)
+    if rename is None:
+        raise TrustError('Non-replacing signature publication is unavailable')
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(source_dir, os.fsencode(source), dest_dir, os.fsencode(dest), 1):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), dest)
+
+
+def signature_identity(info, body):
+    return {'device': info.st_dev, 'inode': info.st_ino, 'mode': info.st_mode,
+            'uid': info.st_uid, 'gid': info.st_gid, 'mtime_ns': info.st_mtime_ns,
+            'ctime_ns': info.st_ctime_ns, 'sha256': digest(body)}
+
+
+def matching_signature(parent, name, expected, *, moved=False):
+    body, info = read_entry(parent, name, MAX_MANIFEST)
+    current = signature_identity(info, body)
+    # rename updates ctime. A descriptor to the expected inode remains open
+    # across that rename. Its content, mtime, attributes and identity must match.
+    if moved:
+        expected = {**expected, 'ctime_ns': current['ctime_ns']}
+    if current != expected:
+        raise TrustError('signature changed independently; preserve the signature and signing evidence')
+    return current
+
+
+def guarded_signature(module, module_path, action, path, account, receipt, previous):
+    parent = directory(module_path)
+    try:
+        parent_info = os.fstat(parent)
+        location = [module, str(module_path), parent_info.st_dev, parent_info.st_ino]
+        if action == 'backup':
+            try:
+                body, info = read_entry(parent, 'module.sig', MAX_MANIFEST)
+            except FileNotFoundError:
+                before = None
+            else:
+                atomic(path, body)
+                before = signature_identity(info, body)
+            atomic(receipt, json.dumps({'location': location, 'phase': 'backup', 'before': before}).encode())
+            return 'absent' if before is None else 'present'
+        journal = json.loads(read(receipt, 4096, protected=True))
+        if journal['location'] != location:
+            raise TrustError('signature module directory changed since backup')
+        phase = 'backup' if action == 'publish-guarded' else 'published'
+        if journal['phase'] != phase:
+            raise TrustError('guarded signature operation lacks a matching completed signing stage')
+        candidate = read(path, MAX_MANIFEST, protected=True)
+        if not candidate:
+            raise TrustError('candidate signature is empty')
+        before = journal['before']
+        expected = before if phase == 'backup' else journal['published']
+        if phase == 'published' and expected['sha256'] != digest(candidate):
+            raise TrustError('protected candidate differs from the original publication')
+        if action == 'confirm':
+            matching_signature(parent, 'module.sig', expected)
+            return expected['sha256']
+        if (previous is None) != (before is None):
+            raise TrustError('previous signature evidence disagrees with the guarded backup')
+        prior_body = None if previous is None else read(previous, MAX_MANIFEST, protected=True)
+        if before is not None and digest(prior_body) != before['sha256']:
+            raise TrustError('previous signature bytes disagree with the guarded backup')
+        successor = candidate if phase == 'backup' else prior_body
+        return change_guarded_signature(parent, module_path, receipt, journal, expected, successor, account)
+    finally:
+        os.close(parent)
+
+
+def change_guarded_signature(parent, module_path, receipt, journal, expected, successor, account):
+    # Keep the claimed inode alive between initial validation and the move.
+    # A writer that arrives afterwards always wins a non-replacing publication.
+    stage_name = '.module.sig.sls-' + os.urandom(12).hex()
+    os.mkdir(stage_name, 0o700, dir_fd=parent)
+    stage = os.open(stage_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    held = False
+    prepared = False
+    placed = False
+    private_stage = False
+    pinned = -1
+    try:
+        stage_info = os.fstat(stage)
+        if stage_info.st_uid != 0 or stage_info.st_mode & 0o077 or os.listdir(stage):
+            raise TrustError('private signature staging directory changed')
+        private_stage = True
+        if successor is not None:
+            fd = os.open('next', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=stage)
+            prepared = True
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(successor)
+                stream.flush()
+                os.fchown(stream.fileno(), account.pw_uid, account.pw_gid)
+                os.fchmod(stream.fileno(), 0o644)
+                os.fsync(stream.fileno())
+                next_identity = signature_identity(os.fstat(stream.fileno()), successor)
+        os.fsync(stage)
+        os.fsync(parent)
+        publishing = journal['phase'] == 'backup'
+        atomic(receipt, json.dumps({**journal, 'phase': 'changing', 'stage': stage_name}).encode())
+        if expected is not None:
+            pinned = os.open('module.sig', os.O_PATH | os.O_NOFOLLOW, dir_fd=parent)
+            info = os.fstat(pinned)
+            if (info.st_dev, info.st_ino) != (expected['device'], expected['inode']):
+                raise TrustError('another writer replaced the expected signature')
+            matching_signature(parent, 'module.sig', expected)
+            rename_signature(parent, 'module.sig', stage, 'held')
+            held = True
+            matching_signature(stage, 'held', expected, moved=True)
+        if successor is not None:
+            rename_signature(stage, 'next', parent, 'module.sig')
+            prepared = False
+            placed = True
+            journal['published'] = matching_signature(parent, 'module.sig', next_identity, moved=True)
+        else:
+            try:
+                os.stat('module.sig', dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise TrustError('another writer published a signature during removal')
+        os.fsync(parent)
+        if held:
+            # A native writer can retain an open descriptor across the rename.
+            # Recheck its bytes after placement before retiring the old inode.
+            matching_signature(stage, 'held', expected, moved=True)
+            os.unlink('held', dir_fd=stage)
+            held = False
+            os.fsync(stage)
+        journal['phase'] = 'published' if publishing else 'restored'
+        atomic(receipt, json.dumps(journal).encode())
+        return 'published' if publishing else ('restored' if successor is not None else 'removed')
+    finally:
+        try:
+            if held:
+                if placed:
+                    raise TrustError('Preserve the published path and displaced entry at ' +
+                                     str(module_path / stage_name / 'held'))
+                try:
+                    rename_signature(stage, 'held', parent, 'module.sig')
+                    os.fsync(parent)
+                except OSError as error:
+                    raise TrustError('Concurrent signature retained; preserve displaced entry at ' +
+                                     str(module_path / stage_name / 'held')) from error
+        finally:
+            if pinned >= 0:
+                os.close(pinned)
+            try:
+                if prepared:
+                    os.unlink('next', dir_fd=stage)
+                if private_stage and not os.listdir(stage) and os.path.samestat(
+                        stage_info, os.stat(stage_name, dir_fd=parent, follow_symlinks=False)):
+                    os.rmdir(stage_name, dir_fd=parent)
+            finally:
+                os.close(stage)
+
+
+def signature_file(module: str, webroot: Path, action: str, path: Path | None, user: str, *,
+                   receipt: Path | None = None, previous: Path | None = None) -> str:
     """Replace only module.sig using a pinned directory descriptor.
 
     Neither a signature symlink nor replacing a web-owned parent can redirect
     a privileged signature write. The caller owns transaction rollback.
     """
-    if not MODULE.fullmatch(module) or action not in ('backup', 'publish', 'restore', 'remove'):
+    if not MODULE.fullmatch(module):
         raise TrustError('invalid signature operation')
     account = pwd.getpwnam(user)
     if account.pw_uid == 0:
         raise TrustError('signature owner must be unprivileged')
     module_path = webroot / 'admin/modules' / module
+    if receipt is not None and action in ('backup', 'publish-guarded', 'rollback-guarded', 'confirm'):
+        return guarded_signature(module, module_path, action, path, account, receipt, previous)
+    if receipt is not None or previous is not None or action not in ('backup', 'publish', 'restore', 'remove', 'confirm'):
+        raise TrustError('invalid signature operation or missing protected publication receipt')
+    if action == 'confirm':
+        candidate = read(path, MAX_MANIFEST, protected=True)
+        if not candidate or read(module_path / 'module.sig', MAX_MANIFEST) != candidate:
+            raise TrustError('published signature differs from the protected candidate')
+        return digest(candidate)
     parent = directory(module_path)
     temporary = None
     fd = -1
@@ -422,7 +680,7 @@ def signature_file(module: str, webroot: Path, action: str, path: Path | None, u
         os.close(parent)
 
 
-def enroll_sls(root: Path, archive: Path, manifest_path: Path, signature_path: Path) -> str:
+def enroll_sls(root: Path, archive: Path, manifest_path: Path, signature_path: Path, *, authority_directory=None) -> str:
     package = read(archive, MAX_ARCHIVE)
     manifest = read(manifest_path, 16384)
     signature = read(signature_path, 64)
@@ -436,7 +694,8 @@ def enroll_sls(root: Path, archive: Path, manifest_path: Path, signature_path: P
     publisher = types.ModuleType('sls_publisher_enrollment'); publisher.__file__ = str(path)
     exec(compile(read(path, 256 * 1024), str(path), 'exec'), publisher.__dict__)
     try:
-        release = publisher.authenticate_manifest(manifest, signature, anchor=PUBLIC_KEY, directory=root)
+        release = publisher.authenticate_manifest(manifest, signature, anchor=PUBLIC_KEY,
+                                                  directory=root if authority_directory is None else authority_directory)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         raise TrustError('publisher signature verification failed: ' + str(error)) from error
     if not isinstance(release, dict):
@@ -564,6 +823,9 @@ def main() -> int:
     parser.add_argument('--root', type=Path, default=ROOT)
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('storage')
+    vendor_signature = commands.add_parser('framework-vendor-signature')
+    vendor_signature.add_argument('--web-root', type=Path, required=True)
+    vendor_signature.add_argument('--digest', action='store_true')
     enrollment = commands.add_parser('enroll-reviewed')
     enrollment.add_argument('--inventory', type=Path, required=True)
     enrollment.add_argument('--sha256', required=True)
@@ -575,22 +837,36 @@ def main() -> int:
     signature.add_argument('--module', required=True)
     signature.add_argument('--web-root', type=Path, required=True)
     signature.add_argument('--web-user', required=True)
-    signature.add_argument('--action', choices=('backup', 'publish', 'restore', 'remove'), required=True)
+    signature.add_argument('--action', choices=('backup', 'publish', 'restore', 'remove', 'confirm',
+                                               'publish-guarded', 'rollback-guarded'), required=True)
     signature.add_argument('--path', type=Path)
+    signature.add_argument('--receipt', type=Path)
+    signature.add_argument('--previous', type=Path)
     for operation in ('check', 'hashes'):
         command = commands.add_parser(operation)
         command.add_argument('--module', required=True)
         command.add_argument('--web-root', type=Path, required=True)
-        command.add_argument('--uninstalled', action='store_true')
+        mode = command.add_mutually_exclusive_group()
+        mode.add_argument('--uninstalled', action='store_true')
+        if operation == 'check':
+            mode.add_argument('--uninstalling', action='store_true',
+                              help='Verify only exact reviewed before/after teardown paths; never supplies signing hashes')
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise TrustError('module trust operations require root')
     if args.command == 'storage':
         print(json.dumps(storage_report(args.root), separators=(',', ':')))
+    elif args.command == 'framework-vendor-signature':
+        value = framework_vendor_signature_digest(args.root, args.web_root)
+        if value is None:
+            return 1
+        if args.digest:
+            print(value)
     elif args.command == 'signature-file':
         if args.action != 'remove' and args.path is None:
             raise TrustError('signature operation requires a protected input/output path')
-        print(signature_file(args.module, args.web_root, args.action, args.path, args.web_user))
+        print(signature_file(args.module, args.web_root, args.action, args.path, args.web_user,
+                             receipt=args.receipt, previous=args.previous))
     elif args.command == 'enroll-reviewed':
         print(enroll_reviewed(args.root, args.inventory, args.sha256))
     elif args.command == 'enroll-sls':
@@ -598,7 +874,7 @@ def main() -> int:
     elif args.command == 'hashes':
         print(emit_hashes(args.root, args.module, args.web_root, uninstalled=args.uninstalled), end='')
     else:
-        check(args.root, args.module, args.web_root, uninstalled=args.uninstalled)
+        check(args.root, args.module, args.web_root, uninstalled=args.uninstalled, uninstalling=args.uninstalling)
         print('Approved module inventory matches.')
     return 0
 

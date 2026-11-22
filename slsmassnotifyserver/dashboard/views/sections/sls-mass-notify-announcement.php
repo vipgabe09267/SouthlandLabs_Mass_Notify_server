@@ -24,8 +24,8 @@ foreach ($desktopClients as $desktopClient) {
 ?>
 <style>
 #dashboard-sls-mass-notify-announcement {
-	padding: 5px 7px 10px;
-	color: #1f2937;
+	padding: 5px 15px 10px;
+	color: inherit;
 	box-sizing: border-box;
 	max-width: 100%;
 	min-width: 0;
@@ -39,23 +39,23 @@ foreach ($desktopClients as $desktopClient) {
 #dashboard-sls-mass-notify-announcement .sls-destination-panel { max-width: 100%; min-width: 0; box-sizing: border-box; }
 #dashboard-sls-mass-notify-announcement .sls-widget-intro {
 	margin: 0 0 10px;
-	color: #64748b;
-	font-size: 13px;
+	color: #777;
+	font-size: inherit;
 }
 #dashboard-sls-mass-notify-announcement .sls-step-card {
 	margin: 0 0 10px;
-	padding: 12px;
-	border: 1px solid #dfe5ec;
-	border-radius: 9px;
+	padding: 10px;
+	border: 1px solid #ddd;
+	border-radius: 4px;
 	background: #fff;
-	box-shadow: 0 2px 6px rgba(15, 23, 42, .045);
+	box-shadow: none;
 }
 #dashboard-sls-mass-notify-announcement .sls-step-heading {
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	margin: 0 0 9px;
-	font-size: 15px;
+	font-size: 14px;
 	font-weight: 700;
 }
 #dashboard-sls-mass-notify-announcement .sls-step-number {
@@ -65,18 +65,19 @@ foreach ($desktopClients as $desktopClient) {
 	width: 23px;
 	height: 23px;
 	flex: 0 0 23px;
-	border-radius: 50%;
+	border-radius: 4px;
 	color: #fff;
-	background: #6d28d9;
+	background: #777;
 	font-size: 12px;
 }
 #dashboard-sls-mass-notify-announcement .sls-step-subtitle {
 	margin: -4px 0 10px 31px;
-	color: #64748b;
+	color: #777;
 	font-size: 12px;
 }
 #dashboard-sls-mass-notify-announcement .sls-groups-toolbar {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	justify-content: space-between;
 	gap: 10px;
@@ -88,9 +89,9 @@ foreach ($desktopClients as $desktopClient) {
 #dashboard-sls-mass-notify-announcement .sls-group-list {
 	margin: 7px 0 9px;
 	padding: 8px 10px;
-	border: 1px solid #e5e7eb;
-	border-radius: 7px;
-	background: #f8fafc;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	background: #f5f5f5;
 	max-height: 116px;
 	overflow: auto;
 }
@@ -118,14 +119,14 @@ foreach ($desktopClients as $desktopClient) {
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel {
 	align-self: start;
-	border: 1px solid #dfe5ec;
-	border-radius: 7px;
-	background: #f8fafc;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	background: #f5f5f5;
 	overflow: hidden;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel[open] {
 	background: #fff;
-	box-shadow: 0 1px 4px rgba(15, 23, 42, .05);
+	box-shadow: none;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel summary {
 	display: flex;
@@ -140,12 +141,12 @@ foreach ($desktopClients as $desktopClient) {
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel summary::-webkit-details-marker { display: none; }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel summary:focus {
-	outline: 2px solid #8b5cf6;
+	outline: 2px solid currentColor;
 	outline-offset: -2px;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel summary .fa:first-child {
 	width: 15px;
-	color: #6d28d9;
+	color: #6f6f6f;
 	text-align: center;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel summary .sls-destination-label {
@@ -155,19 +156,19 @@ foreach ($desktopClients as $desktopClient) {
 #dashboard-sls-mass-notify-announcement .sls-destination-count {
 	padding: 1px 7px;
 	border-radius: 999px;
-	background: #e9e4f7;
-	color: #4c1d95;
+	background: #777;
+	color: #fff;
 	font-size: 11px;
 	font-weight: 700;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-chevron {
-	color: #64748b;
+	color: #777;
 	transition: transform .16s ease;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-panel[open] .sls-destination-chevron { transform: rotate(180deg); }
 #dashboard-sls-mass-notify-announcement .sls-destination-body {
 	padding: 0 10px 9px;
-	border-top: 1px solid #e8edf3;
+	border-top: 1px solid #ddd;
 }
 #dashboard-sls-mass-notify-announcement .sls-destination-body > .checkbox-inline {
 	display: block;
@@ -179,14 +180,13 @@ foreach ($desktopClients as $desktopClient) {
 }
 #dashboard-sls-mass-notify-announcement .sls-action-row {
 	display: flex; flex-wrap: wrap; align-items: center; gap: 12px;
-	padding: 14px 0 0; border-top: 1px solid #e2e8f0;
+	padding: 10px 0 0; border-top: 1px solid #ddd;
 }
 #dashboard-sls-mass-notify-announcement .sls-send-button {
-	flex: 0 0 auto; min-height: 38px; min-width: 175px; padding: 9px 16px;
-	border-radius: 6px; font-size: 13px; font-weight: 600; line-height: 20px;
-	white-space: nowrap; box-shadow: none;
+	flex: 0 0 auto; min-height: 34px; min-width: 175px; max-width: 100%;
+	white-space: normal; box-shadow: none;
 }
-#dashboard-sls-mass-notify-announcement .sls-send-button:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+#dashboard-sls-mass-notify-announcement .sls-send-button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
 #dashboard-sls-mass-notify-announcement .sls-send-button:disabled { opacity: .65; }
 #dashboard-sls-mass-notify-announcement .sls-announcement-inline-status {
 	display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0;
@@ -198,8 +198,8 @@ foreach ($desktopClients as $desktopClient) {
 #dashboard-sls-mass-notify-announcement .sls-status-success { color: #166534; background: #f0fdf4; border-color: #bbf7d0; }
 #dashboard-sls-mass-notify-announcement .sls-status-warning,
 #dashboard-sls-mass-notify-announcement .sls-status-danger { color: #92400e; background: #fffbeb; border-color: #fde68a; }
-#dashboard-sls-mass-notify-announcement .sls-announcement-cooldown { margin: 0; font-size: 12px; color: #64748b; }
-#dashboard-sls-mass-notify-announcement .sls-delivery-details { margin-top: 9px; font-size: 12px; color: #64748b; }
+#dashboard-sls-mass-notify-announcement .sls-announcement-cooldown { margin: 0; font-size: 12px; color: #777; }
+#dashboard-sls-mass-notify-announcement .sls-delivery-details { margin-top: 9px; font-size: 12px; color: #777; }
 #dashboard-sls-mass-notify-announcement .sls-delivery-details summary { cursor: pointer; padding: 4px 0; }
 #dashboard-sls-mass-notify-announcement .sls-delivery-details ul { max-height: 180px; overflow-y: auto; padding-left: 20px; margin: 8px 0; }
 #dashboard-sls-mass-notify-announcement .sls-delivery-details li { padding: 3px 0; overflow-wrap: anywhere; }
@@ -211,15 +211,16 @@ foreach ($desktopClients as $desktopClient) {
 #dashboard-sls-mass-notify-announcement .sls-priority-field select { width: auto; max-width: 100%; height: 32px; padding: 4px 8px; }
 #dashboard-sls-mass-notify-announcement .sls-composer-grid {
 	display: grid;
-	grid-template-columns: minmax(0, 1.35fr) minmax(210px, .65fr);
+	grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 	gap: 11px;
 	align-items: start;
 }
+#dashboard-sls-mass-notify-announcement .sls-composer-grid > div { min-width: 0; }
 #dashboard-sls-mass-notify-announcement .sls-option-box {
 	padding: 9px 10px;
-	border: 1px solid #e5e7eb;
-	border-radius: 7px;
-	background: #f8fafc;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	background: #f5f5f5;
 }
 #dashboard-sls-mass-notify-announcement .sls-option-box .form-group:last-child { margin-bottom: 0; }
 #dashboard-sls-mass-notify-announcement .sls-tone-grid {
@@ -235,7 +236,7 @@ foreach ($desktopClients as $desktopClient) {
 	display: block;
 	margin-top: 3px;
 	text-align: right;
-	color: #64748b;
+	color: #777;
 	font-size: 11px;
 }
 #dashboard-sls-mass-notify-announcement .sls-target-list {
@@ -294,11 +295,16 @@ foreach ($desktopClients as $desktopClient) {
 	margin-bottom: 8px;
 }
 #dashboard-sls-mass-notify-announcement .sls-preview-actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); max-width:640px; gap:8px; margin:12px 0 8px; }
-#dashboard-sls-mass-notify-announcement .sls-preview-actions .btn { min-height:36px; padding:7px 12px; font-size:13px; }
-#dashboard-sls-mass-notify-announcement .sls-rendered-preview { max-width:640px; padding:14px; margin:8px 0 14px; border:1px solid #d9e2eb; border-radius:6px; background:#f7f9fc; }
+#dashboard-sls-mass-notify-announcement .sls-preview-actions .btn { min-height:34px; white-space:normal; overflow-wrap:anywhere; }
+#dashboard-sls-mass-notify-announcement .sls-rendered-preview { max-width:640px; padding:10px; margin:8px 0 10px; border:1px solid #ddd; border-radius:4px; background:#f5f5f5; }
 #dashboard-sls-mass-notify-announcement .sls-rendered-preview img { display:block; width:480px; max-width:100%; height:auto; border-radius:4px; margin:10px 0; }
 #dashboard-sls-mass-notify-announcement .sls-rendered-preview audio { display:block; width:100%; max-width:480px; margin:10px 0; }
 #dashboard-sls-mass-notify-announcement .sls-preview-text { white-space:pre-wrap; overflow-wrap:anywhere; margin-top:8px; }
+#dashboard-sls-mass-notify-announcement .sls-source-picker { border-color:#ddd; border-radius:4px; background:#f5f5f5; margin:10px 0; }
+#dashboard-sls-mass-notify-announcement .sls-source-picker > summary { padding:9px 10px; color:inherit; font-size:inherit; }
+#dashboard-sls-mass-notify-announcement .sls-source-picker-body { padding:0 10px 10px; }
+#dashboard-sls-mass-notify-announcement .sls-color-designer > .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:10px; margin:0; }
+#dashboard-sls-mass-notify-announcement .sls-color-designer > .row > div { float:none; width:auto; min-width:0; padding:0; }
 @media (max-width: 767px) {
 	#dashboard-sls-mass-notify-announcement .sls-preview-actions { grid-template-columns:repeat(2,minmax(0,1fr)); }
 	#dashboard-sls-mass-notify-announcement .sls-preview-actions .btn { white-space:normal; overflow-wrap:anywhere; }

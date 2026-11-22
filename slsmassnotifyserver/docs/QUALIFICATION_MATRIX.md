@@ -1,5 +1,20 @@
 # Qualification boundaries
 
+
+## Unpublished 0.2.0-beta candidate
+
+The `0.2.0-beta` candidate is unpublished and under private development qualification. Installer fixtures run in disposable mount, network and PID namespaces. Release qualification requires recording the full suite and native installation results against the exact installer and package hashes. Physical handset delivery requires a separate device test. Earlier 424-suite and VM results below belong to their identified historical artifacts.
+
+The candidate also includes concurrent delivery-inventory inspection and fault
+email confirmation, retained leases for maintenance and standalone Piper,
+publisher-policy continuity and explicit expired-retained review, exact partial
+uninstall retry, total local HTTP deadlines, Weather form decoding and phone
+visual evidence, and Dashboard card-width styling. Browser fixtures exercise the
+actual Weather form POST and narrow/wide Dashboard cards. Image fixtures render
+real private PNG/XML payloads with inert notification sinks; they do not prove
+physical handset display. AMI integration retains loopback-only client/account
+policy and does not change the shared listener bind or firewall.
+
 `0.1.9-beta` is the published correction L, immutable reserved tag `release-0.1.9-beta`. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. Historical uppercase V0.1.9-beta and v0.1.10-beta releases remain withdrawn. No entry certifies every FreePBX layout, crash window, sustained load or delivery provider.
 
 ## Published reserved-tag 0.1.9-beta correction — 2026-11-04
@@ -28,7 +43,7 @@ The immutable tag and signed package retain their prepublication documentation s
 
 ## Historical K — unpublished lower-v candidate
 
-K passed the full 424-suite gate and a fresh installation with 16/16 doctor checks. Publication did not occur because immutable tag history blocked recreating v0.1.9-beta and the legacy slsmassnotifyserver-0.1.9-beta name. These exact K results are archived separately and are not L qualification. L retains software version 0.1.9-beta and uses the reserved release-0.1.9-beta alias; its new full gate and fresh/FPM cases remain pending.
+K passed the full 424-suite gate and a fresh installation with 16/16 doctor checks. Publication did not occur because immutable tag history blocked recreating v0.1.9-beta and the legacy slsmassnotifyserver-0.1.9-beta name. These exact K results are archived separately and are not L qualification. L retains software version 0.1.9-beta and uses the reserved release-0.1.9-beta alias; its completed full gate and fresh/FPM cases are recorded in the L section above.
 
 ## Withdrawals and reported actual target
 

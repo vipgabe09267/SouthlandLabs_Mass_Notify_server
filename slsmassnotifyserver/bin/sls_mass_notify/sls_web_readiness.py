@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import math
 import re
 import socket
 import ssl
@@ -37,20 +38,100 @@ def targets(dump):
     return result
 
 
-class LoopbackTLS(http.client.HTTPSConnection):
-    def __init__(self, address, port, host, timeout):
+class LoopbackHTTP(http.client.HTTPConnection):
+    def __init__(self, address, port, timeout, deadline):
+        super().__init__(address, port, timeout=timeout)
+        self.deadline = deadline
+        self.auto_open = 0
+        self._socket_lock = threading.Lock()
+        self._expired = threading.Event()
+        self._owned_sockets = []
+
+    def phase_timeout(self):
+        remaining = self.deadline - time.monotonic()
+        if self._expired.is_set() or remaining <= 0:
+            raise TimeoutError('Local web probe exceeded its total deadline')
+        return min(self.timeout, remaining)
+
+    def expire(self):
+        with self._socket_lock:
+            self._expired.set()
+            # HTTPConnection may clear self.sock after headers while the
+            # response file still owns its descriptor. Keep the actual sockets
+            # so the guardian also interrupts that buffered body read.
+            for active in self._owned_sockets:
+                try: active.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+                try: active.close()
+                except OSError: pass
+
+    def connect(self):
+        with self._socket_lock:
+            self.phase_timeout()
+            self.sock = socket.socket(socket.AF_INET6 if self.host == '::1' else socket.AF_INET,
+                                      socket.SOCK_STREAM)
+            self._owned_sockets.append(self.sock)
+        self.sock.settimeout(self.phase_timeout())
+        self.sock.connect((self.host, self.port))
+        self.sock.settimeout(self.phase_timeout())
+
+
+class LoopbackTLS(LoopbackHTTP):
+    def __init__(self, address, port, host, timeout, deadline):
         # This identifies a local web handler; it does not certify the public
         # certificate chain. No credentials, DNS, proxies or redirects are used.
-        super().__init__(address, port, timeout=timeout, context=ssl._create_unverified_context())
+        super().__init__(address, port, timeout, deadline)
+        self._context = ssl._create_unverified_context()
         self.server_name = host
 
     def connect(self):
-        sock = socket.create_connection((self.host, self.port), self.timeout)
-        try:
-            self.sock = self._context.wrap_socket(sock, server_hostname=self.server_name)
-        except BaseException:
-            sock.close()
-            raise
+        super().connect()
+        with self._socket_lock:
+            self.phase_timeout()
+            # No handshake I/O occurs while the guardian is excluded. Publish
+            # the wrapped socket before the first blocking TLS operation.
+            self.sock = self._context.wrap_socket(self.sock, server_hostname=self.server_name,
+                                                 do_handshake_on_connect=False)
+            self._owned_sockets.append(self.sock)
+        self.sock.settimeout(self.phase_timeout())
+        self.sock.do_handshake()
+        self.sock.settimeout(self.phase_timeout())
+
+
+def read_response(scheme, address, port, host, path, accept, deadline, limit, statuses):
+    """One credential-free loopback response under its caller's original deadline."""
+    if (scheme not in ('http', 'https') or address not in ('127.0.0.1', '::1')
+            or type(port) is not int or not 1 <= port <= 65535
+            or not isinstance(host, str) or not re.fullmatch(r'(?=.{1,253}$)[a-z0-9.-]+', host)
+            or not isinstance(path, str) or not re.fullmatch(r'/[A-Za-z0-9/_?&=.-]{1,511}', path)
+            or accept not in ('text/html', 'application/json')
+            or type(deadline) not in (int, float) or not math.isfinite(deadline)
+            or not 0 < deadline - time.monotonic() <= 30
+            or type(limit) is not int or not 1 <= limit <= MAX_BODY
+            or not isinstance(statuses, tuple) or not 1 <= len(statuses) <= 8
+            or any(type(status) is not int or not 100 <= status <= 599 for status in statuses)):
+        raise ValueError('Invalid bounded local web request')
+    connection = (LoopbackTLS(address, port, host, .8, deadline) if scheme == 'https'
+                  else LoopbackHTTP(address, port, .8, deadline))
+    response = timer = None
+    try:
+        timer = threading.Timer(deadline - time.monotonic(), connection.expire)
+        timer.daemon = True
+        timer.start()
+        connection.connect()
+        connection.sock.settimeout(connection.phase_timeout())
+        connection.request('GET', path, headers={'Host': host + ':' + str(port), 'Accept': accept,
+                                                 'Connection': 'close'})
+        response = connection.getresponse()
+        connection.phase_timeout()
+        raw = response.read(limit + 1) if response.status in statuses else b''
+        connection.phase_timeout()
+        return response.status, raw
+    finally:
+        if timer is not None: timer.cancel()
+        connection.expire()
+        if response is not None: response.close()
+        connection.close()
 
 
 def probe(candidates, timeout=4):
@@ -65,26 +146,14 @@ def probe(candidates, timeout=4):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        connection = timer = None
         try:
-            connection = LoopbackTLS(address, port, host, min(.8, remaining)) if scheme == 'https' else http.client.HTTPConnection(address, port, timeout=min(.8, remaining))
-            connection.connect()
-            def expire(expired_socket=connection.sock):
-                try: expired_socket.shutdown(socket.SHUT_RDWR)
-                except OSError: pass
-                try: expired_socket.close()
-                except OSError: pass
-            timer = threading.Timer(remaining, expire)
-            timer.daemon = True
-            timer.start()
-            connection.request('GET', '/admin/config.php', headers={'Host': host + ':' + str(port), 'Accept': 'text/html', 'Connection': 'close'})
-            response = connection.getresponse()
-            if response.status in (301, 302, 303, 307, 308, 401, 403):
-                limited = {'available': True, 'ok': True, 'http_status': response.status, 'access_limited': True, 'authenticated': False}
+            status, raw = read_response(scheme, address, port, host, '/admin/config.php',
+                                        'text/html', deadline, MAX_BODY, (200,))
+            if status in (301, 302, 303, 307, 308, 401, 403):
+                limited = {'available': True, 'ok': True, 'http_status': status, 'access_limited': True, 'authenticated': False}
                 continue
-            if response.status != 200:
+            if status != 200:
                 continue
-            raw = response.read(MAX_BODY + 1)
             if len(raw) > MAX_BODY:
                 failure = {'available': True, 'ok': False, 'http_status': 200, 'failure_code': 'freepbx_web_response_oversized', 'authenticated': False}
                 continue
@@ -92,14 +161,17 @@ def probe(candidates, timeout=4):
             if re.search(r'\bscript error:.{0,200}ioncube.{0,200}(?:loader|encoded)', prefix):
                 failure = {'available': True, 'ok': False, 'http_status': 200, 'failure_code': 'freepbx_vendor_loader_unavailable', 'authenticated': False}
                 continue
-            if re.search(br'<!doctype\s+html\b|<html(?:\s|>)', raw.lower()):
+            html = raw.lower()
+            # A cohost's generic HTTP 200 must not mask a later broken PBX.
+            # Native Framework login IDs survive branding and translation.
+            native_marker = re.search(br'\bid\s*=\s*[\"\'](?:loginform|login_admin|fpbx-container)[\"\']', html)
+            if re.search(br'<!doctype\s+html\b|<html(?:\s|>)', html) and native_marker:
+                if time.monotonic() >= deadline: break
                 return {'available': True, 'ok': True, 'http_status': 200, 'authenticated': False}
-            failure = {'available': True, 'ok': False, 'http_status': 200, 'failure_code': 'freepbx_web_response_not_html', 'authenticated': False}
+            if failure.get('failure_code') != 'freepbx_vendor_loader_unavailable':
+                failure = {'available': True, 'ok': False, 'http_status': 200, 'failure_code': 'freepbx_web_response_not_identified', 'authenticated': False}
         except (OSError, ValueError, http.client.HTTPException):
             pass
-        finally:
-            if timer is not None: timer.cancel()
-            if connection is not None: connection.close()
     return failure if failure['available'] or limited is None else limited
 
 

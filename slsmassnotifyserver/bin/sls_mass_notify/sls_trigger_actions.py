@@ -94,14 +94,33 @@ def restricted_command(descriptor, interpreter):
         if not os.access(binary,os.X_OK):raise OSError('bubblewrap is not executable')
     except OSError as error:
         raise ActionError('Restricted scripts require a root-owned operating-system bubblewrap installation with user namespaces enabled. No unrestricted fallback was attempted.') from error
-    command=[str(binary),'--unshare-all','--die-with-parent','--new-session','--disable-userns','--cap-drop','ALL',
+    command=[str(binary),'--unshare-all','--unshare-user','--die-with-parent','--new-session','--disable-userns','--cap-drop','ALL',
              '--clearenv','--setenv','PATH','/usr/bin:/bin','--setenv','LANG','C.UTF-8','--setenv','SLS_EVENT_SCHEMA','1',
              '--ro-bind','/usr/bin','/usr/bin','--ro-bind','/usr/lib','/usr/lib']
-    for path in ('/bin','/lib','/lib64'):
+    # Debian's merged /usr layout points /lib64 at the interpreter in /usr/lib64.
+    for path in ('/usr/lib64','/bin','/lib','/lib64'):
         if Path(path).is_symlink():command+=['--symlink',os.readlink(path),path]
         elif Path(path).is_dir():command+=['--ro-bind',path,path]
+    if interpreter == '/usr/bin/node':
+        # Debian's libnode loads these distribution builtins during startup.
+        # Other builds embed them. A shell action needs none of these files.
+        root = Path('/usr/share/nodejs')
+        for name in ('acorn-walk/dist/walk.js', 'acorn/dist/acorn.js',
+                     'cjs-module-lexer/dist/lexer.js', 'cjs-module-lexer/lexer.js', 'undici/undici-fetch.js'):
+            path = root / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise ActionError('A distribution JavaScript builtin is not a protected regular file.')
+            for parent in path.parents:
+                directory = parent.lstat()
+                if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o022:
+                    raise ActionError('A distribution JavaScript builtin directory is not root-protected.')
+            command.extend(['--ro-bind', str(path), str(path)])
     command+=['--proc','/proc','--dev','/dev','--size','16777216','--tmpfs','/tmp','--dir','/run',
-              '--ro-bind','/proc/self/fd/'+str(descriptor),'/run/action'+('.js' if interpreter.endswith('/node') else '.sh'),
+              '--ro-bind-data',str(descriptor),'/run/action'+('.js' if interpreter.endswith('/node') else '.sh'),
               '--remount-ro','/','--remount-ro','/dev','--remount-ro','/proc','--chdir','/tmp','--',interpreter]
     if interpreter.endswith('/node'):command+=['--preserve-symlinks-main','--max-old-space-size=64']
     command+=['/run/action'+('.js' if interpreter.endswith('/node') else '.sh')]

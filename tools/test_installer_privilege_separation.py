@@ -86,7 +86,7 @@ class InstallerPrivilegeTests(unittest.TestCase):
 
     def test_fwconsole_root_dependent_commands_are_refused(self):
         for action in ('chown','start','stop','restart'):
-            result=self.shell('log() { :; }; sls_as_asterisk() { echo EXECUTED; }; fwconsole '+action)
+            result=self.shell('log() { :; }; sls_as_asterisk() { echo EXECUTED; }; sls_bounded_as_asterisk() { echo EXECUTED; }; fwconsole '+action)
             self.assertNotEqual(result.returncode,0)
             self.assertNotIn('EXECUTED',result.stdout)
 
@@ -152,11 +152,13 @@ release_worker_coordination
     def test_failed_settings_preparation_does_not_send_guard_command(self):
         data=self.root/'data';data.mkdir()
         config=data/'mass-notifications.config';config.write_bytes(b'{}')
-        mutex=data/'mass-notifications.config.lock';os.mkfifo(mutex)
+        mutex=data/'mass-notifications.config.lock'
         result=self.shell('''DATA_DIR="$DATA"; CONFIG_FILE="$DATA/mass-notifications.config"; SETTINGS_LOCK="$CONFIG_FILE.lock"
 ensure_data_directory() { :; }
 acquire_worker_coordination
 trap release_worker_coordination EXIT
+mv "$SETTINGS_LOCK" "$SETTINGS_LOCK.retained"
+mkfifo "$SETTINGS_LOCK"
 if acquire_settings_coordination; then exit 90; fi
 kill -0 "$WORKER_LOCK_PID"
 printf safely-refused
@@ -164,6 +166,7 @@ printf safely-refused
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         self.assertIn('safely-refused',result.stdout)
         self.assertEqual(config.read_bytes(),b'{}')
+        self.assertTrue(mutex.is_fifo())
 
     @unittest.skipUnless(os.geteuid()==0,'requires root for actual worker and service-account descendants')
     def test_parent_death_releases_guard_while_descendant_remains_alive(self):
@@ -229,7 +232,7 @@ kill -KILL "$$"
         for _ in range(5):
             result=self.shell('DATA_DIR="$DATA"; ensure_data_directory() { :; }; acquire_worker_coordination',DATA=str(data))
             self.assertEqual(result.returncode,1,result.stdout+result.stderr)
-            self.assertIn('Unable to pause active notification workers safely',result.stdout)
+            self.assertIn('could not prepare retained worker descriptors',result.stdout)
             self.assertEqual(lock.stat().st_mode & 0o777,0o644)
 
     def test_releasing_closed_guard_pipe_does_not_terminate_parent(self):
@@ -241,8 +244,14 @@ kill -KILL "$$"
     def test_guard_exit_before_coprocess_capture_is_actionable(self):
         data=self.root/'data';data.mkdir()
         account=pwd.getpwnam('asterisk')
-        lock=data/'enterprise-worker.lock';lock.touch();lock.chmod(0o644)
+        lock=data/'enterprise-worker.lock';lock.touch();lock.chmod(0o640)
         os.chown(lock,account.pw_uid,account.pw_gid)
+        # Preparation must succeed before this fixture rejects the actual
+        # holder. Exec preserves the PID used to pin preparation descriptors.
+        original=self.root/'real-guard.py';original.write_bytes(self.guard.read_bytes());original.chmod(0o700)
+        self.guard.write_text('import os,sys\n'
+            'if sys.argv[-1]=="hold": raise SystemExit(1)\n'
+            'os.execv("/usr/bin/python3",["/usr/bin/python3","-I",'+repr(str(original))+',*sys.argv[1:]])\n')
         marker='  WORKER_LOCK_PID="${SLS_INSTALL_WORKER_GUARD_PID:-}"'
         self.assertIn(marker,SOURCE)
         self.installer.write_text(SOURCE.replace(marker,'  sleep .2\n'+marker))

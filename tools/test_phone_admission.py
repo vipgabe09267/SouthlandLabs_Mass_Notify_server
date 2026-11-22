@@ -301,6 +301,160 @@ class PhoneAdmissionTests(unittest.TestCase):
             with self.assertRaisesRegex(phone.PhoneAdmissionError, 'state_busy'): self.admit()
         self.assertEqual(external.read_text(), '{}')
 
+    def test_stopped_collector_retirement_preserves_legacy_marker_lock_closed_rows_and_budget(self):
+        token = self.admit()
+        with self.store.locked() as state:
+            state['batches'][token]['status'] = 'closed'
+            self.store.reserve_outbound_budget(state, 1, 2, self.now)
+        self.store.display_snapshot()
+        lifetime = self.root/'phone-events.lock'
+        lifetime.touch(mode=0o640)
+        os.chown(lifetime, *phone._account_ids())
+        for key in ('phone-admission.json','phone-collector-display.json'):
+            (self.root/key).chmod(0o600)
+        marker = self.root/'.phone-admission-required'
+        marker.write_bytes(b'SLS_PHONE')
+        lock = self.root/'phone-admission.lock'
+        lock.chmod(0o600)
+        self.now += phone.HISTORY_SECONDS + 10
+        before = self.contents()
+        with lifetime.open('rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with self.assertRaisesRegex(phone.PhoneAdmissionError, 'still_running'):
+                self.store.retire_stopped_collector()
+        self.assertEqual(self.contents(), before)
+        self.store.retire_stopped_collector()
+        self.assertEqual(self.contents(), {**before,'collector':None})
+        self.assertEqual(marker.read_bytes(), b'SLS_PHONE')
+        self.assertEqual(lock.stat().st_mode&0o777, 0o600)
+        for key in ('phone-admission.json','phone-collector-display.json'):
+            self.assertEqual((self.root/key).stat().st_mode&0o777, 0o600)
+        display=self.root/'phone-collector-display.json'
+        self.assertIs(json.loads(display.read_text())['connected'],False)
+        before_files={p.name:(p.stat().st_ino,p.stat().st_mtime_ns,p.read_bytes()) for p in self.root.iterdir()}
+        self.store.retire_stopped_collector()
+        self.assertEqual(before_files,{p.name:(p.stat().st_ino,p.stat().st_mtime_ns,p.read_bytes()) for p in self.root.iterdir()})
+        marker.unlink()
+        self.store.retire_stopped_collector()
+        self.assertFalse(marker.exists())
+
+    def test_stopped_collector_retirement_refuses_unknown_active_or_missing_evidence(self):
+        with tempfile.TemporaryDirectory() as empty:
+            phone.PhoneAdmissionStore(empty).retire_stopped_collector()
+            self.assertEqual(list(Path(empty).iterdir()),[])
+        before=self.contents()
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'lifetime_lock_missing'):
+            self.store.retire_stopped_collector()
+        lifetime=self.root/'phone-events.lock';lifetime.touch(mode=0o640);os.chown(lifetime,*phone._account_ids())
+        self.admit()
+        active=self.contents()
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'not_idle'):
+            self.store.retire_stopped_collector()
+        self.assertEqual(self.contents(),active)
+        path=self.root/'phone-admission.json'
+        invalid={**before,'collector':{'extra':True}}
+        path.write_text(json.dumps(invalid))
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'state_invalid'):
+            self.store.retire_stopped_collector()
+        self.assertEqual(self.contents(),invalid)
+        path.unlink()
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'history_missing'):
+            self.store.retire_stopped_collector()
+        self.assertFalse(path.exists())
+        (self.root/'.phone-admission-required').unlink()
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'history_missing'):
+            self.store.mark_event_gap(generation=self.generation,offline_display=True)
+        self.assertFalse(path.exists())
+
+    def test_retired_generation_does_not_clear_another_owners_anchor_or_display(self):
+        self.store.display_snapshot()
+        before=self.contents();display=self.root/'phone-collector-display.json'
+        view=display.read_bytes()
+        self.store.mark_event_gap(generation='e'*32,offline_display=True)
+        self.assertEqual(self.contents(),before)
+        self.assertEqual(display.read_bytes(),view)
+
+    def test_offline_display_requires_existing_files_and_preserves_unrecognized_data(self):
+        self.store.display_snapshot();display=self.root/'phone-collector-display.json'
+        lock=self.root/'phone-collector-display.json.lock';original=display.read_bytes()
+        lock.unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.store.mark_event_gap(generation=self.generation,offline_display=True)
+        self.assertFalse(lock.exists());self.assertEqual(display.read_bytes(),original)
+        self.store.collector_heartbeat(self.generation);self.store.display_snapshot()
+        old=json.loads(display.read_text());old['connected']=1
+        display.write_text(json.dumps(old))
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'display_invalid'):
+            self.store.mark_event_gap(generation=self.generation,offline_display=True)
+        self.assertEqual(json.loads(display.read_text()),old)
+
+    def test_collector_process_shutdown_stop_and_kill_recovery_preserve_history(self):
+        import select
+        import signal
+        # Only transport and independent work queues are synthetic. The child's
+        # entrypoint, service-lifetime flock, signal handling and private files are real.
+        child = """
+import sys,threading,time
+from pathlib import Path
+sys.path.insert(0,sys.argv.pop(1)); directory=Path(sys.argv.pop(1))
+import sls_phone_events as events
+import sls_phone_admission as phone
+class Ami:
+    def __init__(self,*args,**kwargs): pass
+    def __enter__(self):return self
+    def __exit__(self,*args):pass
+    def action(self,request):return {}
+    def receive(self,deadline):
+        if not getattr(self,'ready',False):
+            print('ready',flush=True);self.ready=True
+        time.sleep(.02);raise TimeoutError()
+events.DATA=directory;events.PhoneAdmissionStore=lambda:phone.PhoneAdmissionStore(directory,clock=lambda:1000.)
+events.read_settings=lambda:{};real_collect=events.collect
+events.collect=lambda store,settings,**kw:real_collect(store,settings,ami_factory=Ami,**kw)
+events.start_refresh_worker=events.start_voicemail_worker=lambda directory:threading.Event()
+sys.exit(events.main())
+"""
+        def ready_process():
+            proc = subprocess.Popen([sys.executable, '-IB', '-c', child, str(Path(phone.__file__).parent), str(self.root)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            def finish():
+                if proc.poll() is None: proc.kill()
+                proc.communicate(timeout=5)
+            self.addCleanup(finish)
+            self.assertTrue(select.select([proc.stdout], [], [], 5)[0], 'Collector never established the synthetic current generation')
+            self.assertEqual(proc.stdout.readline(), 'ready\n')
+            return proc
+        closed = self.admit()
+        with self.store.locked() as state:
+            state['batches'][closed]['status'] = 'closed'
+        history = self.contents()['batches'][closed]
+        daemon = ready_process()
+        self.generation = self.contents()['collector']['generation']
+        pending = self.admit()
+        daemon.send_signal(signal.SIGTERM)
+        self.assertEqual(daemon.wait(timeout=5), 0, 'Normal systemd termination bypassed ledger finalization')
+        stopped = self.contents()
+        self.assertIsNone(stopped['collector'])
+        self.assertEqual(stopped['batches'][closed], history)
+        self.assertTrue(stopped['batches'][pending]['outcome_uncertain'])
+        self.assertEqual(stopped['batches'][pending]['status'], 'reserved')
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'collector_unavailable'):
+            self.store.require_collector(stopped)
+        display = json.loads((self.root/'phone-collector-display.json').read_text())
+        self.assertIs(display['connected'], False)
+        restarted = ready_process()
+        generation = self.contents()['collector']['generation']
+        self.assertNotEqual(generation, self.generation)
+        restarted.kill(); restarted.wait(timeout=5)
+        self.now += 16
+        with self.assertRaisesRegex(phone.PhoneAdmissionError,'collector_unavailable'):
+            self.store.require_collector(self.contents())
+        self.now -= 16
+        recovered = ready_process()
+        self.assertNotEqual(self.contents()['collector']['generation'], generation)
+        self.assertEqual(self.contents()['batches'][closed], history)
+        recovered.terminate(); self.assertEqual(recovered.wait(timeout=5), 0)
+
     def test_collector_gap_fences_old_tickets_and_unknown_outcomes(self):
         token = self.admit()
         self.store.mark_event_gap()

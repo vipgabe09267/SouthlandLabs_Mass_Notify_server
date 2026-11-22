@@ -321,6 +321,14 @@ class TrustStore:
 
 
 def authenticate_manifest(body, signature, anchor=ANCHOR_PEM, directory=DIRECTORY, now=None):
+    return _authenticate_manifest(body, signature, anchor, directory, now)
+
+
+def _authenticate_manifest(body, signature, anchor=ANCHOR_PEM, directory=DIRECTORY, now=None,
+                           *, retained_review=False):
+    # The private review primitive changes only release-metadata expiration.
+    # Its caller must prove the complete protected active generation and require
+    # a separate root challenge approval before using that generation again.
     now = int(time.time() if now is None else now)
     state, initialized = TrustStore(directory, anchor).load()
     # Try only root-approved keys. Unauthenticated manifest fields never select
@@ -342,7 +350,7 @@ def authenticate_manifest(body, signature, anchor=ANCHOR_PEM, directory=DIRECTOR
             or key['expires_at'] and metadata['issued_at'] >= key['expires_at'] \
             or key['revoked_at'] and metadata['issued_at'] >= key['revoked_at'] \
             or not metadata['issued_at'] < metadata['expires_at'] <= metadata['issued_at'] + 2 * 366 * 86400 \
-            or now >= metadata['expires_at']:
+            or now >= metadata['expires_at'] and not retained_review:
         raise ValueError('Signed release metadata is missing, expired or has an invalid validity window')
     return data
 

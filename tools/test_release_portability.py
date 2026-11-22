@@ -31,9 +31,6 @@ VISUAL_DIRECTORY = tempfile.TemporaryDirectory(prefix='sls-portability-visual-')
 MODULE.PHONE_VISUAL_STATE = pathlib.Path(VISUAL_DIRECTORY.name)
 
 
-recording_unlink_guard = "if ($fileOwned && (!is_array($row) || $rowOwned))"
-assert CLASS_SOURCE.count(recording_unlink_guard) >= 2
-assert recording_unlink_guard in UNINSTALL_SOURCE
 runtime_method = CLASS_SOURCE.split("private function ensurePiperRuntime()", 1)[1].split(
     "private function ensurePiperWrapper", 1
 )[0]

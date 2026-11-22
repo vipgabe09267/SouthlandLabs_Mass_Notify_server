@@ -58,6 +58,9 @@ namespace {
         public function getDefaultSettings() { return ["enabled" => "0", "marker" => "fresh-default"]; }
         public function normalizeSettings($settings) { return $settings; }
         public function normalizeEmailSenderDomain($domain) { return $domain; }
+        // This fixture isolates protected configuration storage. Mutable native
+        // targets are qualified in test_installer_managed_target_preflight.py.
+        private function preflightManagedIntegrationTargets() {}
         public function ensurePluginDataDir() {
             $this->calls[] = "ensurePluginDataDir";
             if (!is_dir(dirname(self::SETTINGS_JSON)) && !mkdir(dirname(self::SETTINGS_JSON), 0700, true)) {
@@ -80,7 +83,7 @@ namespace {
         public function setPrivateOwnership($path) { chmod($path, 0640); }
         public function __call($name, $arguments) {
             if (!in_array($name, ["migrateLegacyTestStatus", "ensureBundledSystemRecordings", "ensureAmiUser",
-                "ensureDialplan", "ensureSipNotifyTemplates", "ensureMenuPlacement", "ensureDashboardWidget",
+                "ensureDialplan", "ensureSipNotifyTemplates", "ensureDashboardWidget",
                 "ensureCronJob", "ensureFreePbxBackupEnrollment"], true)) { throw new \\LogicException($name); }
             $this->calls[] = $name;
             return $name === "ensureFreePbxBackupEnrollment" ? ["success" => true] : null;

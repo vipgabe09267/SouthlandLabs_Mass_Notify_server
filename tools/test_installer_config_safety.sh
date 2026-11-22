@@ -198,7 +198,9 @@ grep -Fq 'if temporary and bin_fd >= 0:' "$piper_installer"
 grep -Fq 'mktemp /usr/local/bin/.sls-piper.XXXXXX' "$piper_installer"
 grep -Fq 'close_inherited_maintenance_lock' "${ROOT_DIR}/slsmassnotifyserver/bin/sign_sls_mass_notify_local_sig.sh"
 grep -Fq '/usr/bin/timeout --signal=TERM --kill-after=10 300 /usr/bin/php' "$maintenance_script"
-grep -Fq 'run_without_install_maintenance_lock /usr/bin/timeout --signal=TERM 360' "${ROOT_DIR}/tools/install_release.sh"
+# Native deadlines and root lease ownership are exercised by the actual
+# process/signal fixtures in test_installer_asterisk_cli_deadline.py. The old
+# bare-timeout command spelling is no longer the protected signer boundary.
 if grep -Fq 'chown -R root:root /usr/local/bin/sls_mass_notify' "${ROOT_DIR}/tools/install_release.sh" \
   || grep -Fq 'chown -R root:root "$RUNTIME_DIR"' "$maintenance_script"; then
   printf 'Runtime permission repair reverted to a recursive path-following chown.\n' >&2

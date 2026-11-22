@@ -284,6 +284,12 @@ external uncertainty and lost audit evidence remain for review.
 
 Worker probes older than ten minutes and storage health older than five minutes
 are stale. Stable fault identities and shared limits bound fault email.
+Delivery inventory inspection retries briefly when a normal writer is busy or
+atomically replaces a snapshot. If contention persists, counts remain incomplete
+and fault email requires a newer matching observation at least two minutes later.
+Corrupt or unsafe data, read failures and scan limits remain reportable faults.
+`storage-summary.json` retains bounded inspection reason codes for the external,
+Weather and audit subsystems; the maintenance log records those same safe codes.
 Deployment readiness checks runtime, queues, clock, local HTTPS and resources;
 device-acceptance records save administrator observations, not automated proof.
 See [readiness and separate-host monitoring](DEPLOYMENT_READINESS.md).

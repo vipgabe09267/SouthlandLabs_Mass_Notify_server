@@ -203,6 +203,182 @@ class ModuleTrust(unittest.TestCase):
         self.assertEqual(victim.read_bytes(), b'private')
         self.assertEqual(victim.stat().st_mode & 0o777, 0o600)
 
+    def guarded_signatures(self, prior):
+        signature = self.module / 'module.sig'
+        if prior is not None:
+            signature.write_bytes(prior)
+        backup = self.base / 'previous.sig'
+        receipt = self.base / 'publication.json'
+        candidate = self.base / 'candidate.sig'
+        candidate.write_bytes(b'locally signed candidate')
+        def run(action):
+            return TRUST.signature_file('dashboard', self.web, action,
+                backup if action == 'backup' else candidate, 'asterisk', receipt=receipt,
+                previous=backup if prior is not None and action != 'backup' else None)
+        self.assertEqual(run('backup'), 'present' if prior is not None else 'absent')
+        return signature, candidate, run
+
+    def test_guarded_publication_and_rollback_respect_both_original_states(self):
+        for prior in (b'original', None):
+            with self.subTest(prior=prior):
+                signature, candidate, run = self.guarded_signatures(prior)
+                self.assertEqual(run('publish-guarded'), 'published')
+                self.assertEqual(run('confirm'), TRUST.digest(candidate.read_bytes()))
+                self.assertEqual(run('rollback-guarded'), 'restored' if prior is not None else 'removed')
+                self.assertEqual(signature.read_bytes() if signature.exists() else None, prior)
+                self.assertFalse(list(self.module.glob('.module.sig.sls-*')))
+                signature.unlink(missing_ok=True)
+
+    def test_guarded_publication_does_not_replace_an_external_publication_since_backup(self):
+        for prior in (b'original', None):
+            with self.subTest(prior=prior):
+                signature, candidate, run = self.guarded_signatures(prior)
+                other = self.base / 'incoming.sig'
+                other.write_bytes(prior or b'new external signature')
+                other.replace(signature)
+                inode = signature.stat().st_ino
+                with self.assertRaises((OSError, TRUST.TrustError)): run('publish-guarded')
+                self.assertEqual(signature.stat().st_ino, inode)
+                self.assertEqual(signature.read_bytes(), prior or b'new external signature')
+                signature.unlink()
+
+    def test_guarded_rollback_preserves_external_writers_presence_and_identity(self):
+        for prior in (b'original', None):
+            for change in ('modified', 'identical-replacement', 'deleted', 'linked', 'fifo'):
+                with self.subTest(prior=prior, change=change):
+                    signature, candidate, run = self.guarded_signatures(prior)
+                    run('publish-guarded')
+                    if change == 'modified': signature.write_bytes(b'external publisher')
+                    elif change == 'identical-replacement':
+                        other = self.base / 'same-bytes'
+                        other.write_bytes(candidate.read_bytes()); other.replace(signature)
+                    else:
+                        signature.unlink()
+                        if change == 'linked': signature.symlink_to(candidate)
+                        elif change == 'fifo': os.mkfifo(signature)
+                    state = signature.lstat() if change != 'deleted' else None
+                    for action in ('confirm','rollback-guarded'):
+                        with self.assertRaises((OSError, TRUST.TrustError)): run(action)
+                    if state is None: self.assertFalse(signature.exists())
+                    else:
+                        self.assertEqual(signature.lstat().st_ino, state.st_ino)
+                        if change == 'modified': self.assertEqual(signature.read_bytes(), b'external publisher')
+                    signature.unlink(missing_ok=True)
+
+    def test_signature_rollover_at_claim_and_nonreplacing_install_preserves_newest_writer(self):
+        for boundary in ('claim', 'install'):
+            with self.subTest(boundary=boundary):
+                signature, candidate, run = self.guarded_signatures(b'previous local signature')
+                run('publish-guarded')
+                real = TRUST.rename_signature
+                raced = []
+                def crossing(source_dir, source, dest_dir, dest):
+                    if not raced and (source == 'module.sig' if boundary == 'claim' else dest == 'module.sig'):
+                        external = self.base / 'external.sig'
+                        external.write_bytes(b'newest independent signature')
+                        external.replace(signature)
+                        raced.append(signature.stat().st_ino)
+                    real(source_dir, source, dest_dir, dest)
+                with mock.patch.object(TRUST, 'rename_signature', side_effect=crossing):
+                    with self.assertRaises((OSError, TRUST.TrustError)): run('rollback-guarded')
+                self.assertEqual(signature.read_bytes(), b'newest independent signature')
+                self.assertEqual([signature.stat().st_ino], raced)
+                signature.unlink()
+
+    def test_two_independent_updates_during_rollback_remain_recoverable(self):
+        signature, candidate, run = self.guarded_signatures(b'original')
+        run('publish-guarded')
+        real = TRUST.rename_signature
+        def crossing(source_dir, source, dest_dir, dest):
+            body = b'first external writer' if source == 'module.sig' else b'newest external writer'
+            external = self.base / 'incoming.sig'
+            external.write_bytes(body)
+            external.replace(signature)
+            real(source_dir, source, dest_dir, dest)
+        with mock.patch.object(TRUST, 'rename_signature', side_effect=crossing):
+            with self.assertRaisesRegex(TRUST.TrustError, 'preserve displaced entry'): run('rollback-guarded')
+        self.assertEqual(signature.read_bytes(), b'newest external writer')
+        journal = json.loads((self.base / 'publication.json').read_text())
+        self.assertEqual(journal['phase'], 'changing')
+        stage = self.module / journal['stage']
+        self.assertEqual(stage.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((stage / 'held').read_bytes(), b'first external writer')
+        self.assertEqual((self.base / 'previous.sig').read_bytes(), b'original')
+
+    def test_external_deletion_after_guarded_placement_is_preserved(self):
+        signature, candidate, run = self.guarded_signatures(b'original')
+        real = TRUST.rename_signature
+        def remove_after_install(source_dir, source, dest_dir, dest):
+            real(source_dir, source, dest_dir, dest)
+            if source == 'next':
+                signature.unlink()
+        with mock.patch.object(TRUST, 'rename_signature', side_effect=remove_after_install):
+            with self.assertRaisesRegex(TRUST.TrustError, 'displaced entry'): run('publish-guarded')
+        self.assertFalse(signature.exists())
+        journal = json.loads((self.base / 'publication.json').read_text())
+        self.assertEqual((self.module / journal['stage'] / 'held').read_bytes(), b'original')
+
+    def test_late_write_through_open_descriptor_keeps_displaced_inode_and_evidence(self):
+        signature, candidate, run = self.guarded_signatures(b'original')
+        real = TRUST.rename_signature
+        with signature.open('r+b', buffering=0) as writer:
+            def change_displaced(source_dir, source, dest_dir, dest):
+                real(source_dir, source, dest_dir, dest)
+                if source == 'next':
+                    writer.write(b'external write to original open descriptor')
+            with mock.patch.object(TRUST, 'rename_signature', side_effect=change_displaced):
+                with self.assertRaisesRegex(TRUST.TrustError, 'displaced entry'): run('publish-guarded')
+        journal = json.loads((self.base / 'publication.json').read_text())
+        self.assertEqual(journal['phase'], 'changing')
+        self.assertEqual((self.module / journal['stage'] / 'held').read_bytes(),
+                         b'external write to original open descriptor')
+
+    def test_vendor_signer_receipt_binds_protected_bytes_and_separates_native_output(self):
+        module = self.web / 'admin/modules/framework'
+        module.mkdir()
+        xml = self.files['module.xml']
+        (module / 'module.xml').write_bytes(xml)
+        files = {'module.xml': {'sha256': TRUST.digest(xml), 'target': 'admin/modules/framework/module.xml'}}
+        signature = module / 'module.sig'
+        vendor = b'authenticated vendor signature from the package'
+        expected = TRUST.digest(vendor)
+        self.enroll({'schema': 1, 'module': 'framework', 'version': '1.0', 'files': files,
+                     'source': {**self.data['source'], 'vendor_signature': {
+                         'sha256': expected, 'stock_files_sha256': TRUST.file_table_digest(files)}}})
+        program = '''source "$1"
+MODULE=framework
+TRUST_HELPER="$2"; TRUST_ROOT="$3"; FREEPBX_WEB_ROOT="$4"; mode="$5"; flag="$6"
+acquire_signing_lock() { :; }
+load_freepbx_metadata() { :; }
+validate_freepbx_metadata() { :; }
+verify_published_signature() {
+  echo '{"status":129,"details":[]}'
+  printf '%064d\\n' 0
+  if [ "$mode" = changed ]; then printf 'replacement' >"$FREEPBX_WEB_ROOT/admin/modules/framework/module.sig"; fi
+  [ "$mode" != failed ]
+}
+signer_storage() { echo unexpected-local-key-path >&2; exit 2; }
+if [ "$flag" = digest ]; then run_signer framework --verified-digest; else run_signer framework; fi'''
+        signer = ROOT / 'slsmassnotifyserver/bin/sign_sls_mass_notify_local_sig.sh'
+        helper = self.base / 'sls_module_trust.py'
+        helper.write_bytes(Path(SPEC.origin).read_bytes())
+        helper.chmod(0o600)
+        for mode, flag, succeeds in [('ok', 'default', True), ('ok', 'digest', True),
+                                     ('changed', 'digest', False), ('failed', 'digest', False)]:
+            with self.subTest(mode=mode, flag=flag):
+                signature.write_bytes(vendor)
+                result = subprocess.run(['bash', '-c', program, 'fixture', str(signer), str(helper),
+                                         str(self.store), str(self.web), mode, flag],
+                                        capture_output=True, text=True, timeout=12)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+                diagnostic = '{"status":129,"details":[]}\n' + '0' * 64 + '\n'
+                self.assertNotIn('unexpected-local-key-path', result.stderr)
+                if flag == 'digest':
+                    self.assertEqual(result.stdout, expected + '\n' if succeeds else '')
+                    self.assertIn(diagnostic, result.stderr)
+                else:
+                    self.assertEqual(result.stdout, diagnostic)
+
     def test_signature_directory_swap_cannot_redirect_root_write(self):
         candidate = self.base / 'candidate.sig'
         candidate.write_bytes(b'candidate'); candidate.chmod(0o600)

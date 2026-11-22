@@ -13,6 +13,8 @@ MODULE_DIR=""
 MODULE_SIG=""
 PREVIOUS_SIG=""
 SIGNATURE_PUBLISHED=0
+PRESERVE_SIGNATURE_EVIDENCE=0
+VERIFIED_SIGNATURE_DIGEST=""
 FREEPBX_WEB_USER=""
 FREEPBX_WEB_GROUP=""
 FREEPBX_WEB_ROOT=""
@@ -47,6 +49,23 @@ close_inherited_maintenance_lock() {
 	done
 }
 
+run_without_signing_lock() (
+	# Root retains the shared signing lease until the actual native child exits.
+	# Mutable FreePBX PHP and its descendants receive no unlock-capable FD9.
+	trap ':' TERM INT HUP
+	(
+		trap - TERM INT HUP
+		exec 9>&-
+		"$@"
+	) <&0 &
+	child=$!; status=0
+	while true; do
+		if wait "$child"; then status=0; break; else status=$?; fi
+		kill -0 "$child" 2>/dev/null || break
+	done
+	exit "$status"
+)
+
 signature_operation() {
 	local action="$1"
 	shift
@@ -55,28 +74,29 @@ signature_operation() {
 }
 
 restore_previous_signature() {
+	[ "$PRESERVE_SIGNATURE_EVIDENCE" -eq 0 ] || return 1
 	[ "$SIGNATURE_PUBLISHED" -eq 1 ] || return 0
-	if [ -n "$PREVIOUS_SIG" ]; then
-		if ! signature_operation restore --path "$PREVIOUS_SIG" >/dev/null; then
-			log "CRITICAL: unable to restore the previous signature for $MODULE."
-			return 1
-		fi
-	else
-		if ! signature_operation remove >/dev/null; then
-			log "CRITICAL: unable to remove the rejected signature for $MODULE."
-			return 1
-		fi
+	local -a previous=()
+	if [ -n "$PREVIOUS_SIG" ]; then previous=(--previous "$PREVIOUS_SIG"); fi
+	if ! signature_operation rollback-guarded --path "$WORKDIR/module.sig.candidate" \
+		--receipt "$WORKDIR/module.sig.publication" "${previous[@]}" >/dev/null; then
+		PRESERVE_SIGNATURE_EVIDENCE=1
+		log "Signature ownership changed or rollback could not be verified for $MODULE."
+		return 1
 	fi
 	SIGNATURE_PUBLISHED=0
 }
 
 cleanup() {
-	local status=$?
+	local status=$? preserve_evidence=0
 	trap - EXIT
 	if [ "$status" -ne 0 ]; then
-		restore_previous_signature || true
+		if ! restore_previous_signature; then
+			preserve_evidence=1
+			log "Signature recovery evidence retained at $WORKDIR; preserve this directory until restoration is verified."
+		fi
 	fi
-	if [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
+	if [ "$preserve_evidence" -eq 0 ] && [ -n "$WORKDIR" ] && [ -d "$WORKDIR" ]; then
 		find "$WORKDIR" -depth -delete 2>/dev/null || true
 	fi
 	exit "$status"
@@ -89,10 +109,10 @@ decode_metadata_field() {
 }
 
 load_freepbx_metadata() {
-	local metadata_file="$WORKDIR/freepbx-signing-metadata"
+	local metadata_text
 	local -a metadata
 
-	if ! /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- /usr/bin/php -d pcre.jit=0 -r '
+	if ! metadata_text="$(run_without_signing_lock /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u asterisk -- /usr/bin/php -d pcre.jit=0 -r '
 $bootstrap_settings = ["freepbx_auth" => false, "skip_astman" => true];
 require "/etc/freepbx.conf";
 $webUser = trim((string)\FreePBX::Config()->get("AMPASTERISKWEBUSER"));
@@ -103,25 +123,33 @@ if (!is_array($account) || $webRoot === "") {
 	fwrite(STDERR, "Unable to resolve the configured FreePBX web account or web root; PHP POSIX support is required.\n");
 	exit(1);
 }
-$gpg = \FreePBX::GPG();
-$gpgHome = rtrim(trim((string)$gpg->getGpgLocation()), "/");
+// Framework 17 chooses the account home, falling back to ASTSPOOLDIR.
+// Its GPG getter creates .gnupg and requires write access. Discovery must
+// also work for a missing keyring or one restored with the wrong owner.
+$userHome = rtrim((string)($account["dir"] ?? ""), "/");
+$base = is_dir($userHome) ? $userHome : $astSpool;
+if ($base === "" || !is_dir($base)) {
+    fwrite(STDERR, "Unable to find the FreePBX signing home or spool.\n");
+    exit(1);
+}
+$gpgHome = $base . "/.gnupg";
 $values = [
 	$webUser,
 	$webRoot,
 	$gpgHome,
-	rtrim((string)($account["dir"] ?? ""), "/"),
+	$userHome,
 	$astSpool,
 ];
 foreach ($values as $value) {
 	echo base64_encode($value), "\n";
 }
 exit(0);
-' >"$metadata_file"; then
+' | bounded_signer_stream 32768)"; then
 		log "FreePBX could not provide its signing metadata."
 		return 1
 	fi
 
-	mapfile -t metadata <"$metadata_file"
+	mapfile -t metadata <<<"$metadata_text"
 	if [ "${#metadata[@]}" -ne 5 ]; then
 		log "FreePBX returned incomplete signing metadata."
 		return 1
@@ -237,9 +265,250 @@ validate_freepbx_metadata() {
 	fi
 }
 
+# The native module, temporary workspace, two GPG homes and signing lock may
+# all live on different filesystems. Inspect metadata before each writer.
+signer_storage() {
+    /usr/bin/python3 -I - "$1" "$LOCK_FILE" "${WORKDIR:-/tmp}" "$MODULE_DIR" "$SIGN_HOME" "$FREEPBX_GPG_HOME" "${2:-0}" <<'PYSIGN_STORAGE_PY'
+import contextlib
+import os
+from pathlib import Path
+import stat
+import sys
+import time
+
+MAX_SIGNATURE = 8 * 1024 * 1024  # sls_module_trust.signature_file
+# Fixed RSA3072/single-UID generation and import profile, including GPG controls.
+# Existing databases and arbitrary existing public-key exports are measured separately.
+CONTROL_BYTES = 65536
+CONTROL_NODES = 48
+DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+@contextlib.contextmanager
+def open_directory(path, *, allow_missing=False):
+    location = Path(path)
+    if not location.is_absolute() or '..' in location.parts:
+        raise ValueError('noncanonical signing directory')
+    fd = os.open('/', DIRECTORY)
+    try:
+        missing = 0
+        for index, name in enumerate(location.parts[1:], 1):
+            try:
+                child = os.open(name, DIRECTORY, dir_fd=fd)
+            except FileNotFoundError:
+                if not allow_missing:
+                    raise
+                missing = len(location.parts) - index
+                break
+            except OSError as error:
+                raise ValueError('unreadable or aliased signing directory') from error
+            os.close(fd)
+            fd = child
+        yield fd, missing
+    finally:
+        os.close(fd)
+
+
+def observe_storage(path):
+    with open_directory(path, allow_missing=True) as (fd, missing):
+        usage = os.fstatvfs(fd)
+        return {'device': os.fstat(fd).st_dev, 'allocation_unit': usage.f_frsize,
+                'available_bytes': usage.f_bavail * usage.f_frsize,
+                'available_inodes': usage.f_favail if usage.f_files else None,
+                'read_only': bool(usage.f_flag & os.ST_RDONLY)}
+
+
+def role(name, path, size, nodes=1):
+    return {'name': name, 'path': str(path), 'bytes': size, 'inodes': nodes}
+
+
+def admit_roles(roles, observe=observe_storage):
+    groups = {}
+    observed = {}
+    for item in roles:
+        path = item['path']
+        if path not in observed:
+            observed[path] = observe(path)
+        state = observed[path]
+        unit = state['allocation_unit']
+        free = state['available_bytes']
+        inodes = state['available_inodes']
+        size = item['bytes']
+        nodes = item['inodes']
+        if (any(type(n) is not int or n < 0 for n in (size, nodes, unit, free, state['device']))
+                or not unit or inodes is not None and (type(inodes) is not int or inodes < 0)
+                or state['read_only'] is not False):
+            raise ValueError(f"{item['name']} signing filesystem is read-only or has invalid capacity counters")
+        group = groups.setdefault(state['device'], {'roles': set(), 'required_bytes': 0,
+                                  'required_inodes': 0, 'available_bytes': free, 'available_inodes': None})
+        group['roles'].add(item['name'])
+        # For aggregate metadata, allow a final partial block per extra inode.
+        blocks = (size + unit - 1) // unit + max(0, nodes - 1)
+        group['required_bytes'] += blocks * unit
+        group['required_inodes'] += nodes
+        group['available_bytes'] = min(group['available_bytes'], free)
+        if inodes is not None:
+            old = group['available_inodes']
+            group['available_inodes'] = inodes if old is None else min(old, inodes)
+    for group in groups.values():
+        group['roles'] = sorted(group['roles'])
+        missing_bytes = group['required_bytes'] > group['available_bytes']
+        missing_inodes = (group['available_inodes'] is not None
+                          and group['required_inodes'] > group['available_inodes'])
+        if missing_bytes or missing_inodes:
+            raise ValueError(f"insufficient signing capacity for {', '.join(group['roles'])}: "
+                             f"{group['required_bytes']} bytes and {group['required_inodes']} inodes "
+                             f"required, {group['available_bytes']} bytes and "
+                             f"{group['available_inodes']} inodes available")
+    return {'admitted': True, 'filesystems': list(groups.values())}
+
+
+def keyring_rewrite_roles(name, home):
+    # A keybox/trustdb rewrite can retain the entire old file alongside its
+    # replacement. Count logical sizes even for sparse databases; never read a key.
+    deadline = time.monotonic() + 10
+
+    def inspect(fd, path):
+        nonlocal total, entries
+        amount = nodes = 0
+        with os.scandir(fd) as listing:
+            for entry in listing:
+                entries += 1
+                if entries > 5000 or time.monotonic() > deadline:
+                    raise ValueError('signing keyring exceeds its metadata inspection bound')
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    child = os.open(entry.name, DIRECTORY, dir_fd=fd)
+                    try:
+                        if not os.path.samestat(info, os.fstat(child)):
+                            raise ValueError('signing directory changed during measurement')
+                        inspect(child, path / entry.name)
+                    finally:
+                        os.close(child)
+                elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                    amount += max(info.st_blocks * 512, info.st_size)
+                    total += info.st_size
+                    nodes += 1
+                elif not stat.S_ISSOCK(info.st_mode):
+                    raise ValueError('unexpected link or special file in signing keyring')
+        if nodes:
+            roles.append(role(name, path, amount, nodes))
+
+    for attempt in range(3):
+        roles = []
+        total = entries = 0
+        try:
+            with open_directory(home, allow_missing=True) as (fd, missing):
+                if missing:
+                    roles.append(role(name, home, 1, missing + 1))
+                else:
+                    inspect(fd, Path(home))
+            return roles, total
+        except FileNotFoundError:
+            # GPG can retire a transient socket or lock during discovery.
+            if attempt == 2:
+                raise
+
+
+def regular_size(directory, leaf, *, optional=False):
+    with open_directory(directory) as (fd, unused):
+        try:
+            info = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if optional:
+                return 0
+            raise
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_SIGNATURE:
+            raise ValueError('unsafe or oversized signature input')
+        return info.st_size
+
+
+def main():
+    stage, lock, work, module, private, native, hash_bytes = sys.argv[1:]
+    if stage == 'lock':
+        parent = Path(lock).parent
+        with open_directory(parent, allow_missing=True) as (fd, missing):
+            if missing or not os.path.lexists(lock):
+                admit_roles([role('signing lock', parent, 1, missing + 1)])
+        return
+
+    previous = regular_size(module, 'module.sig', optional=True)
+    roles = []
+    if stage == 'prepare':
+        hashes = int(hash_bytes)
+        if not 0 < hashes <= MAX_SIGNATURE:
+            raise ValueError('empty or oversized reviewed hash list')
+        plain = hashes + 2048  # fixed header, at most 253 hostname bytes
+        # A hash row has at least 68 bytes and dash escaping adds at most two.
+        candidate = min(MAX_SIGNATURE, plain + plain // 32 + CONTROL_BYTES)
+        private_roles, private_bytes = keyring_rewrite_roles('private keyring', private)
+        roles.extend(private_roles)
+        # Any single existing public key fits within the measured keyring, plus
+        # ASCII armor. Enforce this limit at the output pipe as well.
+        public = min(MAX_SIGNATURE, private_bytes * 2 + CONTROL_BYTES)
+        measured_devices = set()
+        for directory in (private, os.path.join(private, 'private-keys-v1.d'),
+                          os.path.join(private, 'openpgp-revocs.d')):
+            device = observe_storage(directory)['device']
+            if device not in measured_devices:
+                roles.append(role('private keyring', directory, CONTROL_BYTES, CONTROL_NODES))
+                measured_devices.add(device)
+            else:
+                roles.append(role('private keyring', directory, 0, 0))
+        roles.extend([role('signer workspace', work, hashes + plain + candidate + public, 4),
+                      role('signer controls', work, CONTROL_BYTES, 12)])
+    elif stage in ('import', 'publish'):
+        candidate = regular_size(work, 'module.sig.candidate')
+        if not candidate:
+            raise ValueError('empty local signature candidate')
+        if stage == 'import':
+            public = regular_size(work, 'public.asc')
+            if not public:
+                raise ValueError('empty local public key')
+    else:
+        raise ValueError('unknown signing capacity phase')
+
+    if stage in ('prepare', 'import'):
+        native_roles, unused = keyring_rewrite_roles('FreePBX keyring', native)
+        roles.extend(native_roles)
+        roles.append(role('FreePBX keyring', native, CONTROL_BYTES + public * 2, CONTROL_NODES))
+    # A retry may still hold the previous private backup while replacing it.
+    roles.extend([role('signature backup', work, previous * 2, 2),
+                  role('signature publication receipt', work, 8192, 2),
+                  role('module signature', module, max(previous, candidate), 2)])
+    admit_roles(roles)
+    if stage == 'prepare':
+        print(candidate, public)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, RecursionError) as error:
+        sys.exit(f'SLL local signer storage: {error}')
+PYSIGN_STORAGE_PY
+}
+
+# Read at most one byte past the admitted producer size, before writing any
+# output. Pipefail also propagates a producer failure after a partial stream.
+bounded_signer_stream() {
+    /usr/bin/python3 -I -c '
+import sys
+limit = int(sys.argv[1])
+data = sys.stdin.buffer.read(limit + 1)
+if len(data) > limit:
+    sys.exit("Local signing output exceeds its admitted size")
+if sys.argv[2] == "count":
+    print(len(data))
+else:
+    sys.stdout.buffer.write(data)
+' "$1" "${2:-copy}"
+}
+
 acquire_signing_lock() {
     local lock_identity
     validate_absolute_path "$LOCK_FILE" || { log 'Unsafe signer lock path.'; return 1; }
+    signer_storage lock || return 1
     lock_identity="$(/usr/bin/python3 -I - "$LOCK_FILE" <<'PYSIGNLOCK'
 import os
 from pathlib import Path
@@ -371,23 +640,16 @@ secret_fingerprints() {
 
 fingerprint_can_sign() {
 	local fingerprint="$1"
-	local probe_signature="$WORKDIR/key-probe-${fingerprint}.asc"
-
+	KEY_PROBE_ERROR=""
 	[[ "$fingerprint" =~ ^[A-F0-9]{40,64}$ ]] || return 1
-	if signing_home_gpg 60 --pinentry-mode loopback --passphrase '' \
-		--local-user "${fingerprint}!" --clearsign \
-		--output "$probe_signature" "$WORKDIR/key-probe.txt" \
-		>"$WORKDIR/key-probe.stdout" 2>"$WORKDIR/key-probe.stderr"; then
-		rm -f -- "$probe_signature"
-		return 0
-	fi
-	rm -f -- "$probe_signature"
-	return 1
+	KEY_PROBE_ERROR="$(signing_home_gpg 60 --pinentry-mode loopback --passphrase '' \
+		--local-user "${fingerprint}!" --clearsign --output - "$WORKDIR/key-probe.txt" \
+		2>&1 >/dev/null | bounded_signer_stream 8192)"
 }
 
 select_usable_signing_key() {
 	local fingerprint_file="$SIGN_HOME/sls-signing-fingerprint"
-	local fingerprints_file="$WORKDIR/secret-fingerprints"
+	local fingerprint_text
 	local candidate=""
 	local -a fingerprints
 
@@ -400,11 +662,11 @@ select_usable_signing_key() {
 	fi
 
 	if [ -z "$SIGNING_FINGERPRINT" ]; then
-		if ! secret_fingerprints >"$fingerprints_file"; then
+		if ! fingerprint_text="$(secret_fingerprints | bounded_signer_stream 325000)"; then
 			log "Unable to inventory the private local signing keys."
 			return 1
 		fi
-		mapfile -t fingerprints <"$fingerprints_file"
+		mapfile -t fingerprints <<<"$fingerprint_text"
 		for candidate in "${fingerprints[@]}"; do
 			if fingerprint_can_sign "$candidate"; then
 				SIGNING_FINGERPRINT="$candidate"
@@ -432,11 +694,11 @@ EOF
 			log "Local signing-key generation failed."
 			return 1
 		fi
-		if ! secret_fingerprints >"$fingerprints_file"; then
+		if ! fingerprint_text="$(secret_fingerprints | bounded_signer_stream 325000)"; then
 			log "Unable to inventory the generated local signing key."
 			return 1
 		fi
-		mapfile -t fingerprints <"$fingerprints_file"
+		mapfile -t fingerprints <<<"$fingerprint_text"
 		for candidate in "${fingerprints[@]}"; do
 			if fingerprint_can_sign "$candidate"; then
 				SIGNING_FINGERPRINT="$candidate"
@@ -447,9 +709,7 @@ EOF
 
 	[ -n "$SIGNING_FINGERPRINT" ] || {
 		log "No usable private local signing key is available in $SIGN_HOME."
-		if [ -s "$WORKDIR/key-probe.stderr" ]; then
-			tail -20 "$WORKDIR/key-probe.stderr" >&2 || true
-		fi
+		[ -z "${KEY_PROBE_ERROR:-}" ] || printf '%s\n' "$KEY_PROBE_ERROR" >&2
 		return 1
 	}
 	printf '%s\n' "$SIGNING_FINGERPRINT" >"$WORKDIR/signing-fingerprint" || return 1
@@ -537,7 +797,7 @@ run_freepbx_gpg() {
 	local attempt
 
 	for attempt in 1 2 3; do
-		if timeout 45 /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u "$FREEPBX_WEB_USER" -- \
+		if run_without_signing_lock timeout 45 /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u "$FREEPBX_WEB_USER" -- \
 			env HOME="$(dirname "$FREEPBX_GPG_HOME")" PATH="$PATH" \
 			gpg --homedir "$FREEPBX_GPG_HOME" --batch --yes --no-permission-warning "$@" \
 			<"$stdin_file" >"$stdout_file"; then
@@ -552,9 +812,8 @@ run_freepbx_gpg() {
 trust_signing_key_in_freepbx() {
 	local public_key="$WORKDIR/public.asc"
 	local ownertrust="$WORKDIR/ownertrust.txt"
-	local exported_trust="$WORKDIR/exported-ownertrust.txt"
 
-	if ! signing_home_gpg 60 --armor --export "$SIGNING_FINGERPRINT" >"$public_key"; then
+	if ! signing_home_gpg 60 --armor --export "$SIGNING_FINGERPRINT" | bounded_signer_stream "$SIGNER_PUBLIC_LIMIT" >"$public_key"; then
 		log "Unable to export the PBX-local public signing key."
 		return 1
 	fi
@@ -567,14 +826,14 @@ trust_signing_key_in_freepbx() {
 		return 1
 	}
 
+	signer_storage import || return 1
 	prepare_freepbx_gpg_home || return 1
 	run_freepbx_gpg "FreePBX public-key import" "$public_key" /dev/null --import || return 1
 	run_freepbx_gpg "FreePBX owner-trust import" "$ownertrust" /dev/null --import-ownertrust || return 1
 	run_freepbx_gpg "FreePBX public-key lookup" /dev/null /dev/null \
 		--list-keys "$SIGNING_FINGERPRINT" || return 1
-	run_freepbx_gpg "FreePBX owner-trust verification" /dev/null "$exported_trust" \
-		--export-ownertrust || return 1
-	grep -Fqx "${SIGNING_FINGERPRINT}:6:" "$exported_trust" || {
+	run_freepbx_gpg "FreePBX owner-trust verification" /dev/null /dev/stdout \
+		--export-ownertrust | grep -Fx "${SIGNING_FINGERPRINT}:6:" >/dev/null || {
 		log "FreePBX did not retain ultimate trust for the PBX-local signing key."
 		return 1
 	}
@@ -620,7 +879,7 @@ build_candidate_signature() {
 		log "Unable to create the module signature timestamp."
 		return 1
 	fi
-	if ! approved_module_hashes >"$approved_hash_file"; then
+	if ! approved_module_hashes | bounded_signer_stream "$SIGNER_HASH_BYTES" >"$approved_hash_file"; then
 		log "No reviewed inventory authorizes this module tree. Existing signatures are preserved."
 		return 1
 	fi
@@ -650,17 +909,46 @@ EOF
 
 	if ! signing_home_gpg 90 --pinentry-mode loopback --passphrase '' \
 		--local-user "${SIGNING_FINGERPRINT}!" --clearsign \
-		--output "$WORKDIR/module.sig.candidate" "$WORKDIR/module.plain"; then
+		--output - "$WORKDIR/module.plain" | bounded_signer_stream "$SIGNER_CANDIDATE_LIMIT" >"$WORKDIR/module.sig.candidate"; then
 		log "GPG could not create the candidate module signature."
 		return 1
 	fi
 }
 
 verify_published_signature() {
-	SIGN_MODULE="$MODULE" /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u "$FREEPBX_WEB_USER" -- /usr/bin/php -d pcre.jit=0 -r '
+	SIGN_MODULE="$MODULE" SIGN_PATH="$MODULE_SIG" SIGN_DIGEST="${1:-}" run_without_signing_lock /usr/bin/env -u GITHUB_TOKEN -u GH_TOKEN -u SLS_MASS_NOTIFY_GITHUB_TOKEN /usr/sbin/runuser -u "$FREEPBX_WEB_USER" -- /usr/bin/php -d pcre.jit=0 -r '
 $bootstrap_settings = ["freepbx_auth" => false, "skip_astman" => true];
 require "/etc/freepbx.conf";
 $module = (string)getenv("SIGN_MODULE");
+function verifiedSignatureIdentity() {
+	$path = getenv("SIGN_PATH");
+	$expected = getenv("SIGN_DIGEST");
+	clearstatcache(true, $path);
+	$before = @lstat($path);
+	if (!$before || ($before["mode"] & 0170000) !== 0100000 || $before["nlink"] !== 1 ||
+		$before["size"] <= 0 || $before["size"] > 8388608) { return false; }
+	// Linux nonblocking mode prevents a concurrent FIFO replacement from
+	// hanging the native cache refresh.
+	$stream = @fopen($path, "rbne");
+	if (!$stream) { return false; }
+	$identity = static function($info) {
+		if (!$info) { return false; }
+		return array_intersect_key($info, array_flip(["dev","ino","mode","nlink","size","mtime","ctime"]));
+	};
+	try {
+		$opened = $identity(fstat($stream));
+		if ($identity($before) !== $opened) { return false; }
+		$bytes = stream_get_contents($stream, 8388609);
+		clearstatcache(true, $path);
+		if ($opened !== $identity(fstat($stream)) || $opened !== $identity(@lstat($path)) ||
+			!is_string($bytes) || strlen($bytes) !== $before["size"] || !hash_equals($expected, hash("sha256",$bytes))) {
+			return false;
+		}
+		return $opened;
+	} finally { fclose($stream); }
+}
+$verified = verifiedSignatureIdentity();
+if ($verified === false) { exit(1); }
 $gpg = \FreePBX::GPG();
 $gpg->timeout = 30;
 $result = $gpg->verifyModule($module);
@@ -672,33 +960,60 @@ $valid = is_array($result)
 	&& array_key_exists("details", $result)
 	&& is_array($result["details"])
 	&& count($result["details"]) === 0;
-if (!$valid) {
+if (!$valid || verifiedSignatureIdentity() !== $verified) {
 	exit(1);
 }
-\FreePBX::Database()
-	->prepare("UPDATE modules SET signature = ? WHERE modulename = ?")
+$db = \FreePBX::Database();
+$db->beginTransaction();
+$db->prepare("UPDATE modules SET signature = ? WHERE modulename = ?")
 	->execute([json_encode($result), $module]);
+if (verifiedSignatureIdentity() !== $verified) {
+	$db->rollBack();
+	exit(1);
+}
+$db->commit();
+if ($module === "framework") {
+	// The visible tamper notification aggregates all cached module results.
+	// Leave verification of unrelated uncached modules to their native cycle.
+	try {
+		$missing = $db->prepare("SELECT COUNT(*) FROM modules WHERE modulename <> ? AND (signature IS NULL OR LENGTH(signature) = 0)");
+		$missing->execute(["fw_ari"]);
+		if ((string)$missing->fetchColumn() === "0") {
+			\module_functions::create()->getAllSignatures(true, false);
+		}
+	} catch (\Throwable $error) {
+		fwrite(STDERR, "FreePBX will refresh the aggregate signature notification on its next check.\n");
+	}
+}
 exit(0);
 '
 }
 
 publish_candidate_transactionally() {
-	local previous_state
+	local previous_state candidate_digest confirmed_digest
+	local -a previous=()
+	[ "$SIGNATURE_PUBLISHED" -eq 0 ] || {
+		log "An earlier signature publication has not been restored; preserve $WORKDIR before retrying."
+		return 1
+	}
 	PREVIOUS_SIG=""
-	if ! previous_state="$(signature_operation backup --path "$WORKDIR/module.sig.previous")"; then
+	signer_storage publish || return 1
+	if ! previous_state="$(signature_operation backup --path "$WORKDIR/module.sig.previous" --receipt "$WORKDIR/module.sig.publication")"; then
 		log "Unable to preserve the previous module signature safely."
 		return 1
 	fi
 	if [ "$previous_state" = "present" ]; then
 		PREVIOUS_SIG="$WORKDIR/module.sig.previous"
+		previous=(--previous "$PREVIOUS_SIG")
 	elif [ "$previous_state" != "absent" ]; then
 		log "Unexpected module signature backup state."
 		return 1
 	fi
 	SIGNATURE_PUBLISHED=1
-	if ! signature_operation publish --path "$WORKDIR/module.sig.candidate" >/dev/null; then
-		log "Unable to publish the candidate module signature safely."
-		restore_previous_signature || true
+	if ! signature_operation publish-guarded --path "$WORKDIR/module.sig.candidate" \
+		--receipt "$WORKDIR/module.sig.publication" "${previous[@]}" >/dev/null; then
+		PRESERVE_SIGNATURE_EVIDENCE=1
+		log "Unable to establish ownership of the candidate module signature."
 		return 1
 	fi
 	SIGNATURE_PUBLISHED=1
@@ -707,9 +1022,13 @@ publish_candidate_transactionally() {
 		restore_previous_signature
 		return 1
 	fi
-	if approved_module_hashes >"$WORKDIR/postpublication-hashes" \
-		&& cmp -s "$WORKDIR/approved-hashes" "$WORKDIR/postpublication-hashes" \
-		&& verify_published_signature; then
+	if approved_module_hashes | cmp -s "$WORKDIR/approved-hashes" - \
+		&& candidate_digest="$(signature_operation confirm --path "$WORKDIR/module.sig.candidate" --receipt "$WORKDIR/module.sig.publication")" \
+		&& [[ "$candidate_digest" =~ ^[0-9a-f]{64}$ ]] \
+		&& verify_published_signature "$candidate_digest" \
+		&& confirmed_digest="$(signature_operation confirm --path "$WORKDIR/module.sig.candidate" --receipt "$WORKDIR/module.sig.publication")" \
+		&& [ "$confirmed_digest" = "$candidate_digest" ]; then
+		VERIFIED_SIGNATURE_DIGEST="$candidate_digest"
 		SIGNATURE_PUBLISHED=0
 		return 0
 	fi
@@ -724,8 +1043,12 @@ sign_module_transaction() {
 	publish_candidate_transactionally
 }
 
+authenticated_framework_signature() {
+	/usr/bin/python3 -I "$TRUST_HELPER" --root "$TRUST_ROOT" framework-vendor-signature --web-root "$FREEPBX_WEB_ROOT" --digest
+}
+
 main() {
-	local attempt
+	local attempt limits vendor_digest confirmed_digest
 
 	[ "${EUID:-$(id -u)}" -eq 0 ] || {
 		log "Run the local signer as root."
@@ -748,21 +1071,39 @@ main() {
 	SLS_SIGNER_HOSTNAME="$(hostname -f 2>/dev/null || hostname || true)"
 	SLS_SIGNER_HOSTNAME="$(printf '%s' "$SLS_SIGNER_HOSTNAME" | tr -cd 'A-Za-z0-9.-')"
 	[ -n "$SLS_SIGNER_HOSTNAME" ] || SLS_SIGNER_HOSTNAME="localhost"
+	[ "${#SLS_SIGNER_HOSTNAME}" -le 253 ] || { log "Signing hostname exceeds the DNS name length limit."; return 1; }
 
-	acquire_signing_lock
-	WORKDIR="$(mktemp -d "/tmp/${MODULE}-sls-local-sign.XXXXXX")"
-	chmod 0700 "$WORKDIR"
-	load_freepbx_metadata
-	validate_freepbx_metadata
-	approved_module_hashes >"$WORKDIR/preflight-hashes"
-	prepare_signing_home
-	select_usable_signing_key
+	acquire_signing_lock || return 1
+	load_freepbx_metadata || return 1
+	validate_freepbx_metadata || return 1
+	SIGNER_HASH_BYTES="$(approved_module_hashes | bounded_signer_stream 8388608 count)" || return 1
+	if [ "$MODULE" = framework ] && [ "${SLS_LOCAL_TRUST_MODE:-installed}" = installed ] \
+		&& vendor_digest="$(authenticated_framework_signature)"; then
+		if [[ "$vendor_digest" =~ ^[0-9a-f]{64}$ ]] && verify_published_signature "$vendor_digest" \
+			&& approved_module_hashes >/dev/null \
+			&& confirmed_digest="$(authenticated_framework_signature)" && [ "$confirmed_digest" = "$vendor_digest" ]; then
+			VERIFIED_SIGNATURE_DIGEST="$vendor_digest"
+			log "Retained the authenticated Framework vendor signature with FreePBX trusted status 129."
+			return 0
+		fi
+		log "FreePBX rejected the original Framework vendor signature or the checked files changed. Preserving the evidence for review."
+		return 1
+	fi
+	limits="$(signer_storage prepare "$SIGNER_HASH_BYTES")" || return 1
+	read -r SIGNER_CANDIDATE_LIMIT SIGNER_PUBLIC_LIMIT <<<"$limits" || return 1
+	WORKDIR="$(mktemp -d "/tmp/${MODULE}-sls-local-sign.XXXXXX")" || return 1
+	chmod 0700 "$WORKDIR" || return 1
+	prepare_signing_home || return 1
+	select_usable_signing_key || return 1
 
 	for attempt in 1 2; do
 		if sign_module_transaction; then
 			log "Verified $MODULE with FreePBX trusted status 129."
 			return 0
 		fi
+		# A second backup must not replace the only exact old signature with
+		# rejected bytes while the first restoration remains outstanding.
+		[ "$SIGNATURE_PUBLISHED" -eq 0 ] || return 1
 		[ "$attempt" -eq 2 ] || {
 			log "Retrying $MODULE after a transient signing or module-file race."
 			sleep 2
@@ -772,6 +1113,21 @@ main() {
 	return 1
 }
 
+run_signer() {
+	if [ "$#" -le 1 ]; then
+		main "$@"
+	elif [ "$#" -eq 2 ] && [ "$2" = --verified-digest ]; then
+		# Native PHP may write diagnostics to stdout. Only the protected
+		# candidate or authenticated vendor manifest can supply the receipt.
+		main "$@" >&2 || return $?
+		[[ "$VERIFIED_SIGNATURE_DIGEST" =~ ^[0-9a-f]{64}$ ]] || return 1
+		printf '%s\n' "$VERIFIED_SIGNATURE_DIGEST"
+	else
+		log 'Usage: sign_sls_mass_notify_local_sig.sh [MODULE [--verified-digest]]'
+		return 2
+	fi
+}
+
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-	main "$@"
+	run_signer "$@"
 fi

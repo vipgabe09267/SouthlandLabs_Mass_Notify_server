@@ -274,13 +274,13 @@ class PhoneAdmissionStore:
             raise PhoneAdmissionError('phone_boot_identity_unavailable')
 
     @contextmanager
-    def locked(self):
+    def locked(self, *, compact=True, existing_only=False):
         directory_fd = _open_directory(self.directory)
         temporary = None
         retention = None
         try:
             _validate_parent_directory(directory_fd)
-            fd = os.open('phone-admission.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o640, dir_fd=directory_fd)
+            fd = os.open('phone-admission.lock', os.O_RDWR | (0 if existing_only else os.O_CREAT) | os.O_NOFOLLOW | os.O_NONBLOCK, 0o640, dir_fd=directory_fd)
             with os.fdopen(fd, 'a+') as lock:
                 checked_lock_metadata(os.fstat(lock.fileno()))
                 deadline = time.monotonic() + self.lock_seconds
@@ -297,17 +297,19 @@ class PhoneAdmissionStore:
                 checked_lock_metadata(opened)
                 if file_identity(opened) != file_identity(named):
                     raise PhoneAdmissionError('phone_state_lock_changed')
-                _secure_file_metadata(lock.fileno())
+                if not existing_only:
+                    _secure_file_metadata(lock.fileno())
                 self.verify_directory_identity(directory_fd)
                 # Keep a granted shared retention lease through the durable
                 # commit, so an installer cannot capture a pre-prune baseline
                 # while a normal writer is about to publish pruned state.
-                retention = self.retention_lease(directory_fd)
+                if compact:
+                    retention = self.retention_lease(directory_fd)
                 history_marker = self.read_history_marker(directory_fd)
                 try:
                     source = os.open('phone-admission.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
                 except FileNotFoundError:
-                    if history_marker is not None:
+                    if history_marker is not None or existing_only:
                         raise PhoneAdmissionError('phone_state_history_missing') from None
                     state = {'schema': 1, 'batches': {}, 'collector': None}
                 else:
@@ -316,6 +318,8 @@ class PhoneAdmissionStore:
                         owner, group = _account_ids()
                         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > MAX_BYTES
                                 or metadata.st_uid != owner or metadata.st_gid != group or stat.S_IMODE(metadata.st_mode) & 0o137):
+                            raise PhoneAdmissionError('phone_state_unsafe')
+                        if existing_only and stat.S_IMODE(metadata.st_mode) not in (0o600, 0o640):
                             raise PhoneAdmissionError('phone_state_unsafe')
                         raw = handle.read(MAX_BYTES + 1)
                         if len(raw.encode()) > MAX_BYTES:
@@ -343,13 +347,18 @@ class PhoneAdmissionStore:
                 encoded = json.dumps(state, separators=(',', ':'), allow_nan=False).encode()
                 if len(encoded) > MAX_BYTES:
                     raise PhoneAdmissionError('phone_state_capacity_exceeded')
+                if existing_only and self.read_history_marker(directory_fd) != history_marker:
+                    raise PhoneAdmissionError('phone_state_history_marker_changed')
                 if encoded == previous and 'metadata' in locals():
-                    self.commit_history_marker(directory_fd, history_marker)
+                    if not existing_only:
+                        self.commit_history_marker(directory_fd, history_marker)
                     return
                 temporary = '.phone-admission-' + os.urandom(16).hex()
                 target = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640, dir_fd=directory_fd)
                 with os.fdopen(target, 'wb') as handle:
                     _secure_file_metadata(handle.fileno())
+                    if existing_only:
+                        os.fchmod(handle.fileno(), stat.S_IMODE(metadata.st_mode))
                     if handle.write(encoded) != len(encoded):
                         raise PhoneAdmissionError('phone_state_write_failed')
                     handle.flush(); os.fsync(handle.fileno())
@@ -361,7 +370,8 @@ class PhoneAdmissionStore:
                     # The mutation may already be visible. Do not return a token
                     # or replay a channel action after this uncertain commit.
                     raise PhoneAdmissionError('phone_state_commit_uncertain') from None
-                self.commit_history_marker(directory_fd, history_marker)
+                if not existing_only:
+                    self.commit_history_marker(directory_fd, history_marker)
         finally:
             if temporary is not None:
                 try:
@@ -1016,13 +1026,8 @@ class PhoneAdmissionStore:
         parent = _open_directory(self.directory)
         try:
             _validate_parent_directory(parent)
-            fd = os.open('phone-admission.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            fd, info = _open_private_snapshot('phone-admission.json', parent)
             try:
-                info = os.fstat(fd)
-                owner, group = _account_ids()
-                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_BYTES
-                        or info.st_uid not in (0, owner) or info.st_gid != group or stat.S_IMODE(info.st_mode) & 0o137):
-                    raise PhoneAdmissionError('phone_config_unsafe')
                 return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
                         info.st_uid, info.st_gid, info.st_mode, info.st_nlink)
             finally:
@@ -1242,14 +1247,89 @@ class PhoneAdmissionStore:
             self.validate(state)
         return True
 
-    def mark_event_gap(self):
-        with self.locked() as state:
-            state['collector'] = None
+    def mark_event_gap(self, *, generation=None, offline_display=False, stopped_idle=False):
+        # Losing a collector invalidates its own current evidence. This is never
+        # a retention sweep and never closes a reservation or rewrites history.
+        with self.locked(compact=False, existing_only=stopped_idle or generation is not None) as state:
+            anchor = state.get('collector')
+            if stopped_idle and anchor is not None:
+                if (not isinstance(anchor, dict) or set(anchor) != {'generation', 'boot_id', 'heartbeat_tick'}
+                        or not isinstance(anchor['generation'], str) or not TOKEN.fullmatch(anchor['generation'])
+                        or not isinstance(anchor['boot_id'], str) or not re.fullmatch(r'[A-Za-z0-9-]{1,64}', anchor['boot_id'])):
+                    raise PhoneAdmissionError('phone_state_invalid')
+                checked_time(anchor['heartbeat_tick'])
+            if generation is not None and anchor is not None and anchor.get('generation') != generation:
+                return
+            if stopped_idle and any(batch['status'] != 'closed' for batch in state['batches'].values()):
+                raise PhoneAdmissionError('phone_stopped_collector_not_idle')
+            if not stopped_idle or 'collector' in state:
+                state['collector'] = None
             for batch in state['batches'].values():
                 if batch['status'] != 'closed':
                     batch['outcome_uncertain'] = True
                     if any(VOICE_ID.fullmatch(row['recipient']) and row['kind'] == 'origin' for row in batch['channels'].values()):
                         batch['external_event_gap'] = True
+
+        if offline_display:
+            try:
+                (self.directory / 'phone-collector-display.json').lstat()
+            except FileNotFoundError:
+                return
+            self._write_display(state, self.monotonic(), connected=False)
+
+    def retire_stopped_collector(self):
+        try:
+            directory = _open_directory(self.directory)
+        except FileNotFoundError:
+            return
+        lifetime = None
+        try:
+            _validate_parent_directory(directory)
+            try:
+                lifetime = os.open('phone-events.lock', os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            except FileNotFoundError:
+                pass  # A never-started installation has no singleton to acquire.
+            if lifetime is not None:
+                checked_lock_metadata(os.fstat(lifetime))
+                try:
+                    fcntl.flock(lifetime, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise PhoneAdmissionError('phone_event_collector_still_running') from None
+                named = os.stat('phone-events.lock', dir_fd=directory, follow_symlinks=False)
+                if file_identity(os.fstat(lifetime)) != file_identity(named):
+                    raise PhoneAdmissionError('phone_state_lock_changed')
+            self.verify_directory_identity(directory)
+            try:
+                os.stat('phone-collector-display.json', dir_fd=directory, follow_symlinks=False)
+                has_display = True
+            except FileNotFoundError:
+                has_display = False
+            try:
+                state = read_private_json('phone-admission.json', self.directory)
+            except FileNotFoundError:
+                if self.read_history_marker(directory) is not None or has_display:
+                    raise PhoneAdmissionError('phone_state_history_missing') from None
+                try:
+                    os.stat('phone-collector-heartbeat.json', dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    return
+                raise PhoneAdmissionError('phone_state_history_missing') from None
+            self.validate(state)
+            if any(batch['status'] != 'closed' for batch in state['batches'].values()):
+                raise PhoneAdmissionError('phone_stopped_collector_not_idle')
+            if state.get('collector') is None and not has_display:
+                return
+            if lifetime is None:
+                raise PhoneAdmissionError('phone_collector_lifetime_lock_missing')
+            self.mark_event_gap(offline_display=has_display, stopped_idle=True)
+            self.verify_directory_identity(directory)
+            named = os.stat('phone-events.lock', dir_fd=directory, follow_symlinks=False)
+            if file_identity(os.fstat(lifetime)) != file_identity(named):
+                raise PhoneAdmissionError('phone_state_lock_changed')
+        finally:
+            if lifetime is not None:
+                os.close(lifetime)
+            os.close(directory)
 
     def has_open_batches(self):
         revision = self._ledger_revision()
@@ -1269,11 +1349,24 @@ class PhoneAdmissionStore:
             self._display_revision = revision
         state = self._display_state
         health = self.require_collector(state)
+        self._write_display(state, health['heartbeat_tick'], connected=True)
+
+    def _write_display(self, state, tick, *, connected):
         from sls_atomic_json import locked_json
-        with locked_json(self.directory / 'phone-collector-display.json', maximum=1024, runtime_owner=True) as view:
+        with locked_json(self.directory / 'phone-collector-display.json', maximum=1024,
+                         runtime_owner=True, existing_only=not connected) as view:
+            if not connected:
+                if (set(view) != {'schema','connected','boot_id','heartbeat_tick','updated_at','active_batches','reserved_contacts'}
+                        or type(view['schema']) is not int or view['schema'] != 1 or type(view['connected']) is not bool
+                        or not isinstance(view['boot_id'], str) or not re.fullmatch(r'[A-Za-z0-9-]{1,64}', view['boot_id'])
+                        or any(type(view[k]) is not int or view[k] < 0 for k in ('updated_at','active_batches','reserved_contacts'))):
+                    raise PhoneAdmissionError('phone_collector_display_invalid')
+                checked_time(view['heartbeat_tick'])
+                if not view['connected']:
+                    return
             view.clear()
-            view.update({'schema': 1, 'connected': True, 'boot_id': self.boot_id,
-                         'heartbeat_tick': health['heartbeat_tick'], 'updated_at': int(self.clock()),
+            view.update({'schema': 1, 'connected': connected, 'boot_id': self.boot_id,
+                         'heartbeat_tick': tick, 'updated_at': int(self.clock()),
                          'active_batches': sum(batch['status'] != 'closed' for batch in state['batches'].values()),
                          'reserved_contacts': self.used_contacts(state)})
 
@@ -1425,19 +1518,45 @@ def operator_message(code):
     return 'Phone delivery could not be safely admitted. Check the selected recipients, runtime integration, and SLL phone-events service before trying again.'
 
 
+
+def _open_private_snapshot(name, parent):
+    """Reopen a normal atomically replaced inode without accepting unsafe files."""
+    owner, group = _account_ids()
+    def valid(info, links):
+        return (stat.S_ISREG(info.st_mode) and info.st_nlink in links and info.st_size <= MAX_BYTES
+                and info.st_uid in (0, owner) and info.st_gid == group
+                and not stat.S_IMODE(info.st_mode) & 0o137)
+    for unused in range(4):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            info = os.fstat(fd)
+            if valid(info, (1,)):
+                return fd, info
+            # A normal locked writer retires the old snapshot by rename. Only
+            # this detached, otherwise safe inode may cause a bounded reopen;
+            # hard-linked/current unsafe files and missing replacements fail.
+            if not valid(info, (0,)):
+                raise PhoneAdmissionError('phone_config_unsafe')
+            try: current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError: raise PhoneAdmissionError('phone_config_unsafe') from None
+            if (not valid(current, (1,))
+                    or (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino)):
+                raise PhoneAdmissionError('phone_config_unsafe')
+        except BaseException:
+            os.close(fd)
+            raise
+        os.close(fd)
+    raise PhoneAdmissionError('phone_state_busy')
+
+
 def read_private_json(name, directory=DATA):
     if name not in {'mass-notifications.config', 'phone-admission.json', 'phone-collector-heartbeat.json'}:
         raise PhoneAdmissionError('phone_config_unsafe')
     directory_fd = _open_directory(Path(directory))
     try:
         _validate_parent_directory(directory_fd)
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        descriptor, metadata = _open_private_snapshot(name, directory_fd)
         with os.fdopen(descriptor, 'r', encoding='utf-8') as handle:
-            metadata = os.fstat(handle.fileno())
-            owner, group = _account_ids()
-            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > MAX_BYTES
-                    or metadata.st_uid not in {0, owner} or metadata.st_gid != group or stat.S_IMODE(metadata.st_mode) & 0o137):
-                raise PhoneAdmissionError('phone_config_unsafe')
             raw = handle.read(MAX_BYTES + 1)
             if len(raw.encode()) > MAX_BYTES:
                 raise PhoneAdmissionError('phone_config_unsafe')
@@ -2060,8 +2179,14 @@ def main():
     parser.add_argument('--correlation', default='')
     parser.add_argument('--wait', type=int, default=30)
     parser.add_argument('--format', choices=('json', 'lines'), default='json')
+    parser.add_argument('--retire-stopped-collector', action='store_true')
     args = parser.parse_args()
     try:
+        if args.retire_stopped_collector:
+            if sys.argv[1:] != ['--retire-stopped-collector']:
+                raise PhoneAdmissionError('phone_request_invalid')
+            PhoneAdmissionStore().retire_stopped_collector()
+            return 0
         if args.probe_ami:
             with PhoneAmi(read_settings()) as ami:
                 ami.action({'Action': 'Ping'})

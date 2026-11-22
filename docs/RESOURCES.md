@@ -108,8 +108,8 @@ component, path, required byte count and inode requirement.
 
 | Component | Reserved workspace |
 | --- | --- |
-| Runtime replacement | Larger of measured runtime or the pinned environment plus a permitted package payload. |
-| Voices | Missing catalog bytes, or one largest model for atomic repair, whichever is larger. |
+| Runtime replacement | Complete measured/reference environment files, directories and standard aliases plus signed helper payload; qualified unchanged-environment reuse keeps helper promotion space. |
+| Voices | A qualified install hashes the selected models and metadata against the signed catalog. Only pending files require target space and download scratch. Without verified content, admission keeps the catalog growth and atomic replacement allowance. |
 | State and configuration | Phone/Weather journal replacements; actual schedule journal or its 10 MiB backup limit; a 3 MiB encrypted write; up to 25 concurrent 2 MiB job writes; remaining space for 20 retained 3 MiB config backups. |
 | Module, assets, APIs and portal | Measured authenticated destination payloads and per-entry allocation overhead; bounded catalog before verification. |
 | Event-log compaction | Two 64 MiB copies; logs are compacted sequentially. |
@@ -118,10 +118,28 @@ component, path, required byte count and inode requirement.
 | Temporary installation | Bounded 52 MiB release download and metadata, extraction, failed-release recovery, wheel downloads, unpacking, old packages and one largest voice download. |
 | Package review | Previous/candidate sources, previous-release download, two signed upstream packages, GPG workspace, missing helper repairs and bounded cache quarantine. |
 
+The final upgrade check verifies the protected candidate and previous source
+copies. Stock cache checks have their own evidence. A newly approved Dashboard
+or Framework release uses its measured signed package size and directory growth
+on the cache filesystem. Packages already present need no second copy. Unknown
+cache contents retain the full publication budget. Re-verifying upstream
+signatures uses the installer temporary filesystem. The writer checks any
+interrupted evidence copies on the trust filesystem before retiring a package.
+See [installer operations](INSTALLER_OPERATIONS.md).
+
+At final admission, the installer reads each selected core or optional voice
+through a bounded descriptor and checks the expected size, SHA-256, ownership,
+permissions and file identity. Matching files need no promotion or download.
+Changed files still need space for an atomic replacement on the voice volume
+and a download on the selected temporary filesystem. These costs add when
+both paths share a device. An ordinary readiness check uses the conservative
+estimate and does not rehash the voice catalog.
+
 State writes, bounded backup growth and log compaction account for approximately
 283 MiB. These are workspaces, not installed size or disk quotas. Sparse/compressed
-recovery copies use logical size when larger than allocated size. Budgets add
-only when paths share a filesystem; separate or bind-mounted destinations are
+recovery copies retain the larger source allocation or logical bytes plus
+per-entry/directory allocation on the recovery destination; the existing metadata
+floor remains reserved. Budgets add only when paths share a filesystem; separate or bind-mounted destinations are
 checked by device identity. Persistent SLL paths cannot use tmpfs.
 
 Scratch uses `/tmp`, or `/var/tmp` when the first is too small and the complete
@@ -130,10 +148,20 @@ volume has no separate minimum. Genuine destination or scratch shortages still
 block installation before dependency or module changes.
 
 The current voice catalog contains eight models and eight metadata files,
-approximately 482 MiB total. The pinned Python 3.11 environment measured
-207.69 MiB on the reference amd64 host; its ten compatible wheels total
-77,802,965 bytes. Different platforms and package allocations can differ.
+approximately 482 MiB total. The complete pinned Python 3.11 reference includes 4,383 regular files,
+538 directories and four standard aliases. Its conservative 4 KiB allocation
+projection is 220,450,816 bytes; its ten compatible wheels total 77,861,012 bytes.
+Filesystem fragments and measured retained trees can increase requirements.
 Pip uses compatible binary wheels without a persistent download cache.
+At the final authenticated upgrade check, only matching prior/candidate pins,
+protected runtime structure, the qualified ABI and clean native-user health
+checks can remove an unchanged environment's rebuild and wheel workspaces.
+Periodic Doctor/runtime checks do not start these probes. A later failed check
+requires full replacement admission before any stage or build write; it keeps
+operational, voice, backup, log, remaining module and recovery-metadata floors
+on their actual filesystems. Existing source, trust and snapshot copies remain
+occupied rather than being charged as new copies again. Directory/alias inode
+counts and larger-fragment growth apply to early and replacement admission.
 Unsupported wheel availability produces an actionable error.
 See [dependency inventory](DEPENDENCIES.md).
 
@@ -171,3 +199,8 @@ between successful cleanup runs. Add that growth over the chosen retention
 window to the measured footprint and workspace. Monitor free space and deferred
 cleanup; retention ages are not storage quotas. PBX recordings, voicemail, backups
 and operating-system package work need separate provisioning.
+
+
+### Installation scratch on partitioned hosts
+
+The unpublished 0.2 installer chooses scratch using the full future installation byte and inode budget before it prepares files. It tries qualified `/tmp`, `/var/tmp`, then the fixed protected `/var/spool/sls-mass-notify-installer-tmp`. The third location must use persistent writable storage; its bytes and inodes are combined with other SLL requirements on the same filesystem. Root creates an absent directory only after admission, with mode `0710` and the canonical native primary group. Existing unsafe metadata is preserved and refused. Capacity lost before the final measured check remains a refusal. Lighter inspection does not create this private root, and changing installer scratch never moves or waives runtime audio `/tmp` requirements.

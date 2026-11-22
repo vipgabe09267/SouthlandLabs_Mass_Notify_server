@@ -21,6 +21,7 @@ trait SlsPhoneEventService
 			'phone_event_collector_state_missing' => 'The private phone admission ledger has not been created. Check whether sls-mass-notify-phone-events.service is running and authenticating to local AMI.',
 			'phone_event_collector_state_permission' => 'The runtime cannot read the private phone admission ledger. Review its asterisk ownership and protected data-directory permissions without changing unrelated PBX files.',
 			'phone_event_collector_never_connected' => 'No authenticated collector heartbeat has been recorded. Check the collector service journal and the saved loopback AMI login and permissions.',
+			'phone_event_collector_disconnected' => 'The phone outcome collector recorded a disconnect. Check its service status and local AMI connection.',
 			'phone_event_collector_stale' => 'The authenticated collector heartbeat is older than fifteen seconds. Check service status, AMI connectivity and CPU/storage pressure.',
 			'phone_event_collector_rebooted' => 'The recorded heartbeat belongs to an earlier boot. Wait for a current authenticated AMI heartbeat; if it does not arrive, inspect the collector service journal.',
 			'phone_event_collector_clock_invalid' => 'The recorded monotonic heartbeat is invalid or in the future. Inspect boot/time evidence and the collector journal; do not edit the ledger to fabricate a heartbeat.',
@@ -68,13 +69,16 @@ trait SlsPhoneEventService
 			if(!is_string($raw)||strlen($raw)!==$opened['size']){throw new \RuntimeException('changed');}
 			$value=json_decode($raw,true,4,JSON_THROW_ON_ERROR);
 			$boot=trim((string)@file_get_contents('/proc/sys/kernel/random/boot_id'));
-			if (!is_array($value) || ($value['schema']??null)!==1 || ($value['connected']??null)!==true
+			if (!is_array($value) || ($value['schema']??null)!==1 || !is_bool($value['connected']??null)
 					|| $boot==='' || ($value['boot_id']??null)!==$boot
 					|| !(is_int($value['heartbeat_tick']??null) || is_float($value['heartbeat_tick']??null))
+				|| $value['heartbeat_tick']<0 || !is_int($value['updated_at']??null) || $value['updated_at']<0
 				|| !is_int($value['active_batches']??null) || $value['active_batches']<0
 				|| !is_int($value['reserved_contacts']??null) || $value['reserved_contacts']<0) { throw new \RuntimeException('invalid'); }
 			$age=hrtime(true)/1000000000-(float)$value['heartbeat_tick'];
-			if (!is_finite($age) || $age<0 || $age>15) { return $this->phoneCollectorFailure('phone_event_collector_stale'); }
+			if (!is_finite($age) || $age<0) { return $this->phoneCollectorFailure('phone_event_collector_clock_invalid'); }
+			if (!$value['connected']) { return $this->phoneCollectorFailure('phone_event_collector_disconnected'); }
+			if ($age>15) { return $this->phoneCollectorFailure('phone_event_collector_stale'); }
 			return ['state'=>'ok','ok'=>true,'display_only'=>true,'failure_code'=>'','issues'=>[],
 				'message'=>_('Phone outcome collector has a current authenticated AMI heartbeat.'),
 				'heartbeat_age_seconds'=>$age,'active_batches'=>$value['active_batches'],'reserved_contacts'=>$value['reserved_contacts']];

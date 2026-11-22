@@ -1,6 +1,7 @@
 <?php
 namespace FreePBX\modules;
 require_once __DIR__ . '/DeviceAcceptance.php';
+require_once __DIR__ . '/StatusHealth.php';
 
 /** A small allowlisted report, never a dump of configuration or raw logs. */
 trait SlsSupportDiagnostics
@@ -157,11 +158,15 @@ trait SlsSupportDiagnostics
         } catch (\Throwable $error) { $report['devices']['available'] = false; }
         try {
             $summary = $this->loadJsonFile(self::PLUGIN_DATA_DIR . '/storage-summary.json');
+            $weatherIncomplete = ($summary['weather_scan_incomplete'] ?? false) === true;
             foreach (['pending_external', 'expired_external', 'queue_errors', 'queue_files_scanned', 'queue_files_seen', 'audit_failed_records', 'pending_weather', 'failed_weather', 'uncertain_weather', 'expired_weather', 'weather_running', 'weather_max_workers', 'weather_oldest_queued_age_seconds', 'weather_oldest_running_age_seconds', 'weather_deadline_misses'] as $key) {
                 $value = $summary[$key] ?? null;
-                $report['queue_counts'][$key] = is_int($value) && $value >= 0 && $value <= 1000000 ? $value : null;
+                $report['queue_counts'][$key] = !($weatherIncomplete && strpos($key, 'weather') !== false)
+                    && is_int($value) && $value >= 0 && $value <= 1000000 ? $value : null;
             }
             $report['queue_scan_incomplete'] = ($summary['queue_scan_incomplete'] ?? false) === true;
+            $report['weather_scan_incomplete'] = $weatherIncomplete;
+            $report['inspection_issues'] = SlsStatusHealth::inspectionIssues($summary);
             $report['retained_components'] = [];
             foreach (['configuration','configuration_backups','announcement_jobs','desktop_journal','phone_evidence','weather_evidence','incident_evidence','sms_evidence','enterprise_evidence','floorplan_images','other_state'] as $name) {
                 $row=$summary['retained_components'][$name] ?? [];

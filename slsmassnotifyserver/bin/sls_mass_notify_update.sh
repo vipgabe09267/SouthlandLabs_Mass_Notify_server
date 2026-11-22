@@ -12,7 +12,7 @@ STATUS_FILE="${STATUS_FILE:-/var/lib/asterisk/SLS_Mass_Notifications_Plugin/upda
 UPDATE_PROGRESS_FILE="${UPDATE_PROGRESS_FILE:-/var/lib/asterisk/SLS_Mass_Notifications_Plugin/update-progress.json}"
 LOG_FILE="${LOG_FILE:-/var/log/sls_mass_notify.log}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/sls-mass-notify-update.lock}"
-CURRENT_VERSION="${SLS_MASS_NOTIFY_CURRENT_VERSION:-0.1.9-beta}"
+CURRENT_VERSION="${SLS_MASS_NOTIFY_CURRENT_VERSION:-0.2.0-beta}"
 
 GITHUB_UPDATES_ENABLED="0"
 GITHUB_UPDATES_CHANNEL="beta"
@@ -308,7 +308,7 @@ from datetime import datetime, timezone
 sys.dont_write_bytecode = True
 
 repo = os.environ.get("REPOSITORY", "")
-current = os.environ.get("CURRENT_VERSION", "0.1.9-beta")
+current = os.environ.get("CURRENT_VERSION", "0.2.0-beta")
 now = datetime.now(timezone.utc).astimezone().isoformat()
 if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
     print(json.dumps({"ok": False, "checked_at": now, "update_available": False, "latest_version": current, "message": "Configured GitHub repository is invalid."}, separators=(",", ":")))
@@ -351,7 +351,7 @@ def version_key(value):
 try:
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/releases?per_page=100",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "SouthlandLabs-Mass-Notify-Updater/0.1.9-beta"},
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "SouthlandLabs-Mass-Notify-Updater/0.2.0-beta"},
     )
     with urllib.request.urlopen(request, timeout=20) as response:
         body = response.read(2097153)
@@ -527,7 +527,7 @@ log "Automatic update installing $latest"
 # Install the exact authenticated bytes. Do not fetch the mutable release asset
 # a second time or substitute the GitHub API's unauthenticated digest.
 verified_sha256="$(sha256sum "$release_package" | awk '{print $1}')"
-if SLS_MASS_NOTIFY_TGZ="$release_package" SLS_MASS_NOTIFY_TGZ_URL='' SLS_MASS_NOTIFY_SHA256="$verified_sha256" "$tmp_script" >&"$LOG_FD" 2>&1; then
+if SLS_MASS_NOTIFY_TGZ="$release_package" SLS_MASS_NOTIFY_TGZ_URL='' SLS_MASS_NOTIFY_SHA256="$verified_sha256" /bin/bash "$tmp_script" >&"$LOG_FD" 2>&1; then
   :
 else
   installer_status=$?

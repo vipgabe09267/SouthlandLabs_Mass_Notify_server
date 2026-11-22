@@ -147,7 +147,8 @@ def reconcile_stock_command(*, root=TRUST_ROOT, packages=None, online=False):
     workspace=None
     try:
         workspace=Path(tempfile.mkdtemp(prefix='stock-review-',dir=root))
-        result=upgrade.reconcile_stock(workspace,Path(root),packages=packages,online=online)
+        result=upgrade.reconcile_stock(workspace,Path(root),packages=packages,online=online,
+                                       schedule_signature_check=True)
     except BaseException as error:
         location=' Review evidence retained at '+str(workspace) if workspace is not None else ' The private review workspace could not be created.'
         raise RuntimeError(str(error)+location) from error
@@ -263,7 +264,7 @@ def main():
     protected_file(__file__)
     if args.command=='reconcile-stock':
         result=reconcile_stock_command(packages=args.upstream_packages,online=args.online)
-        print(json.dumps(result,separators=(',',':')) if args.json else 'Signed FreePBX stock approvals reconciled. Changed modules: '+(', '.join(result['changed_modules']) or 'none')+'. No PBX settings or delivery queues were changed.')
+        print(json.dumps(result,separators=(',',':')) if args.json else 'Signed FreePBX stock approvals reconciled. Changed modules: '+(', '.join(result['changed_modules']) or 'none')+'. The next maintenance run will verify module signatures.')
         return 0
     if args.command == 'uninstall':
         path = authenticate_uninstaller(load_uninstall_trust())

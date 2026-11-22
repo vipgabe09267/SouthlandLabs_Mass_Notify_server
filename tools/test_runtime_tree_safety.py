@@ -104,9 +104,13 @@ os.open=swapped_open
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); tree = root / 'runtime'; tree.mkdir()
             executable = tree / 'sls_notify.py'; executable.write_text('print("safe")\n'); executable.chmod(0o600)
+            renderer = tree / 'sls_render_paging_prompt.py'
+            renderer.write_bytes(b'# native paging fixture\n')
+            renderer.chmod(0o755)
             data = tree / 'release-signing.pub'; data.write_text('fixture\n'); data.chmod(0o600)
             self.assertEqual(self.run_executable_helper(tree).returncode, 0)
             self.assertEqual(stat.S_IMODE(executable.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(renderer.stat().st_mode), 0o755)
             self.assertEqual(stat.S_IMODE(data.stat().st_mode), 0o644)
 
             target = tree / 'target'; target.write_text('original'); target.chmod(0o600)

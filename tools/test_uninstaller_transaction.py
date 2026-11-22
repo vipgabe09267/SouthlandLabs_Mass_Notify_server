@@ -92,7 +92,11 @@ record_uninstall_stage prepared
         }
         for name in ('sls_install_guard', 'sls_install_idle', 'sls_audio_state', 'sls_config_crypto', 'sls_legacy_permissions', 'sls_installer_recovery'):
             self.names['bin/sls_mass_notify/' + name + '.py'] = RUNTIME / (name + '.py')
+        for name in ('sls_phone_admission', 'sls_nws_delivery_claims', 'sls_cluster_guard', 'sls_atomic_json'):
+            self.names['bin/sls_mass_notify/' + name + '.py'] = RUNTIME / (name + '.py')
         files = {name: path.read_bytes() for name, path in self.names.items()}
+        admission = 'bin/sls_mass_notify/sls_phone_admission.py'
+        files[admission] = files[admission].replace(b'/var/lib/asterisk/SLS_Mass_Notifications_Plugin', os.fsencode(self.data))
         # Only private channel/spool/module locations are adapted. The actual
         # authenticated idle checker, guard and all safety branches run intact.
         self.channels = self.base / 'channels.txt'; self.channels.write_text(''); self.channels.chmod(0o644)
@@ -302,6 +306,30 @@ bash -n "$RECOVERY_SIGNER"
             self.assertNotIn('sls_config_crypto.php', function)
             self.assertIn('SLS_CONFIGURED_AMI_USERNAME', function)
 
+    def test_uninstall_menu_preserves_customized_or_partial_legacy_code(self):
+        directory = self.base / 'menu-fixture'
+        directory.mkdir(mode=0o750)
+        os.chown(directory, self.account.pw_uid, self.account.pw_gid)
+        target = directory / 'menu_items.php'
+        marker = "\t// SLS Mass Notifications menu placement: keep Mass Notify after UCP/User Panel.\n"
+        anchor = "\telse if ($a == 'other')\n\t\treturn true;\n"
+        partial = "<?php\n" + marker + "\t/* a site-maintained change */\n" + anchor
+        target.write_text(partial)
+        os.chown(target, self.account.pw_uid, self.account.pw_gid)
+        env = {'SLS_TEST_MENU': str(target)}
+        refused = self.shell('rewrite_managed_text_file "$SLS_TEST_MENU" menu\n', env=env)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(target.read_text(), partial)
+
+        # Isolated fragments can be unrelated administrator code.
+        fragment = "<?php\n\telse if ($b == 'mass notify')\n\t\treturn -1;\n"
+        target.write_text(fragment)
+        before = target.stat().st_ino
+        untouched = self.shell('rewrite_managed_text_file "$SLS_TEST_MENU" menu\n', env=env)
+        self.assertEqual(untouched.returncode, 0, untouched.stderr)
+        self.assertEqual(target.read_text(), fragment)
+        self.assertEqual(target.stat().st_ino, before)
+
     def test_managed_text_rewrite_is_atomic_and_rejects_links_and_oversize_input(self):
         directory = self.base / 'asterisk-text'
         directory.mkdir(mode=0o750)
@@ -466,6 +494,7 @@ rm() {
   done
 }
 remove_runtime_files
+purge_uninstall_data
 ''', env={'SLS_TEST_PURGE': purge})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 if purge == '1': self.assertFalse(self.data.exists())
@@ -634,7 +663,7 @@ run_fwconsole() { printf 'UNEXPECTED PBX COMMAND\\n'; return 9; }
 reload_removed_pbx_integration
 ''')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SLL removal was verified', result.stdout)
+        self.assertIn('software removal checks passed', result.stdout)
         self.assertIn('run fwconsole reload', result.stdout)
         self.assertNotIn('UNEXPECTED PBX COMMAND', result.stdout)
 
@@ -647,7 +676,7 @@ run_fwconsole() { test "$1" = reload; printf 'unrelated PBX reload failure\\n'; 
 reload_removed_pbx_integration
 ''', env={'SLS_TEST_LOG': str(log)})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SLL removal was verified', result.stdout)
+        self.assertIn('software removal checks passed', result.stdout)
         self.assertIn('PBX integration reload failed', result.stdout)
         self.assertEqual(log.read_text(), 'unrelated PBX reload failure\n')
 
@@ -746,21 +775,25 @@ release_uninstall_workers
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(lock.stat().st_mode & 0o777, 0o640); self.assertEqual(lock.stat().st_ino, inode)
 
-    def test_prior_signed_idle_helper_without_new_keyword_remains_usable(self):
-        name = 'bin/sls_mass_notify/sls_install_idle.py'
+    def replace_signed_fixture(self, name, source):
         previous = self.generation
         bodies = {key: (previous / 'module' / key).read_bytes() for key in self.names}
-        source = bodies[name].decode().replace(', *, allow_pending_voicemail=False', '')
-        source = source.replace('if not allow_pending_voicemail and self.pending_voicemail(batch):', 'if False and self.pending_voicemail(batch):')
-        self.assertNotIn('allow_pending_voicemail', source)
-        bodies[name] = source.encode()
+        bodies[name] = source
         inventory = json.loads((previous / 'inventory.json').read_bytes())
-        inventory['files'][name]['sha256'] = TRUST.digest(bodies[name])
+        inventory['files'][name]['sha256'] = TRUST.digest(source)
         self.generation = self.store / TRUST.store_manifest(self.store, inventory, json.dumps(inventory).encode())
         for key, body in bodies.items():
-            target = self.generation / 'module' / key; target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target = self.generation / 'module' / key
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             target.write_bytes(body); target.chmod(0o600)
-        (self.installed / 'sls_install_idle.py').write_bytes(bodies[name])
+        (self.installed / Path(name).name).write_bytes(source)
+
+    def test_prior_signed_idle_helper_without_new_keyword_remains_usable(self):
+        name = 'bin/sls_mass_notify/sls_install_idle.py'
+        source = (self.generation / 'module' / name).read_text().replace(', *, allow_pending_voicemail=False', '')
+        source = source.replace('if not allow_pending_voicemail and self.pending_voicemail(batch):', 'if False and self.pending_voicemail(batch):')
+        self.assertNotIn('allow_pending_voicemail', source)
+        self.replace_signed_fixture(name, source.encode())
         result = self.guarded_shell('assert_uninstall_workers\n')
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -826,7 +859,7 @@ wait "$UNINSTALL_WORKER_PID" || true
 assert_uninstall_workers
 printf 'UNSAFE TEARDOWN\\n'
 ''')
-        self.assertNotEqual(result.returncode, 0); self.assertIn('guard exited', result.stdout)
+        self.assertNotEqual(result.returncode, 0); self.assertIn('worker lease could not be confirmed', result.stdout)
         self.assertNotIn('UNSAFE TEARDOWN', result.stdout)
         inode = (self.data / 'announcement-activity.lock').stat().st_ino
         result = self.guarded_shell('assert_uninstall_workers\n')
@@ -867,6 +900,116 @@ printf 'UNSAFE TEARDOWN\\n'
             except ProcessLookupError: pass
             process.wait(timeout=5)
             for pipe in (process.stdin, process.stdout, process.stderr): pipe.close()
+
+    def test_partial_uninstall_retires_only_stopped_collector_through_signed_account_helper(self):
+        self.systemctl.write_text('#!/bin/bash\ncase "$2" in --property=ActiveState) echo inactive;; --property=LoadState) echo not-found;; --property=FragmentPath|--property=DropInPaths) echo;; *) exit 1;; esac\n')
+        self.systemctl.chmod(0o755)
+        anchor = {'generation': 'a' * 32, 'boot_id': 'old-boot', 'heartbeat_tick': 10}
+        history = self.state('phone-admission.json', {'schema': 1, 'collector': anchor, 'batches': {}, 'retained_field': 'keep'})
+        for name in ('phone-events.lock', 'phone-admission.lock'):
+            lock = self.data / name
+            lock.touch(mode=0o640)
+            os.chown(lock, self.account.pw_uid, self.account.pw_gid)
+        body = """admit_root_runtime
+trap cleanup_recovery_signer EXIT
+snapshot_local_signer
+PBX_RUNNING=0
+acquire_uninstall_workers
+remove_phone_collector_service
+"""
+        with (self.data / 'phone-events.lock').open('rb') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            refused = self.shell(body)
+        self.assertNotEqual(refused.returncode, 0, 'A live collector survived a missing unit')
+        self.assertEqual(json.loads(history.read_bytes())['collector'], anchor)
+        result = self.shell(body)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(history.read_bytes()), {'schema': 1, 'collector': None, 'batches': {}, 'retained_field': 'keep'})
+        self.assertFalse((self.data / '.phone-admission-required').exists())
+        self.assertFalse((self.data / 'phone-collector-display.json').exists())
+
+    def test_prior_signed_collector_with_no_retirement_cli_preserves_pre_stop_evidence(self):
+        name = 'bin/sls_mass_notify/sls_phone_admission.py'
+        # Use a publisher-enrolled admission module with the prior CLI contract.
+        self.replace_signed_fixture(name, b"import argparse\nargparse.ArgumentParser().parse_args()\n")
+        self.unit.write_bytes(self.collector_unit_body()); self.unit.chmod(0o644)
+        calls = self.base / 'collector-systemctl-calls'
+        self.systemctl.write_text('#!/bin/bash\necho invoked >> ' + shlex.quote(str(calls)) + '\nexit 1\n')
+        self.systemctl.chmod(0o755)
+        anchor = {'generation': 'b' * 32, 'boot_id': 'previous-boot', 'heartbeat_tick': 11}
+        history = self.state('phone-admission.json', {'schema': 1, 'collector': anchor, 'batches': {}})
+        begin = 'admit_root_runtime\ntrap cleanup_recovery_signer EXIT\nsnapshot_local_signer\ntest -z "$RECOVERY_COLLECTOR_HELPER"\n'
+        refused = self.shell(begin + 'remove_phone_collector_service\n')
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertFalse(calls.exists(), 'Legacy source with stale evidence reached systemd stop')
+        self.assertEqual(json.loads(history.read_bytes())['collector'], anchor)
+        self.state('phone-admission.json', {'schema': 1, 'collector': None, 'batches': {}})
+        result = self.shell(begin + 'verify_legacy_collector_offline stopped\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((self.data / 'phone-events.lock').exists())
+        history.unlink()
+        result = self.shell(begin + 'verify_legacy_collector_offline stopped\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(history.exists())
+
+    def test_post_stop_retirement_failure_restores_active_service_before_disable(self):
+        self.unit.write_bytes(self.collector_unit_body()); self.unit.chmod(0o644)
+        row = self.base / 'collector-state'; row.write_text('active')
+        calls = self.base / 'collector-calls'
+        self.systemctl.write_text("""#!/bin/bash
+printf '%s\\n' "$*" >> "$SLS_TEST_CALLS"
+case "$1:$2" in
+  show:--property=ActiveState) cat "$SLS_TEST_STATE" ;;
+  show:--property=FragmentPath) echo "$SLS_TEST_UNIT" ;;
+  show:--property=DropInPaths) echo ;;
+  show:--property=UnitFileState) echo enabled ;;
+  stop:*) echo inactive > "$SLS_TEST_STATE" ;;
+  start:*) echo active > "$SLS_TEST_STATE" ;;
+  *) exit 1 ;;
+esac
+"""); self.systemctl.chmod(0o755)
+        anchor = {'generation': 'e' * 32, 'boot_id': 'before-stop', 'heartbeat_tick': 12}
+        history = self.state('phone-admission.json', {'schema': 1, 'collector': anchor, 'batches': {}})
+        for name in ('phone-admission.lock', 'phone-events.lock'):
+            path = self.data / name; path.touch(mode=0o640)
+            os.chown(path, self.account.pw_uid, self.account.pw_gid)
+        with (self.data / 'phone-events.lock').open('rb') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.shell("admit_root_runtime\ntrap cleanup_recovery_signer EXIT\nsnapshot_local_signer\nPBX_RUNNING=0\nacquire_uninstall_workers\nremove_phone_collector_service\n",
+                                env={'SLS_TEST_CALLS': str(calls), 'SLS_TEST_STATE': str(row), 'SLS_TEST_UNIT': str(self.unit)})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.unit.is_file())
+        self.assertEqual(row.read_text().strip(), 'active')
+        self.assertIn('stop ', calls.read_text()); self.assertIn('start ', calls.read_text())
+        self.assertNotIn('disable ', calls.read_text())
+        self.assertEqual(json.loads(history.read_bytes())['collector'], anchor)
+
+    def test_missing_unit_after_failed_daemon_reload_retries_only_inactive_canonical_fragment(self):
+        calls = self.base / 'collector-calls'
+        load_state = self.base / 'cached-fragment-state'; load_state.write_text('loaded')
+        self.systemctl.write_text("""#!/bin/bash
+printf '%s\\n' "$*" >> "$SLS_TEST_CALLS"
+case "$1:$2" in
+  show:--property=LoadState) cat "$SLS_TEST_STATE" ;;
+  show:--property=ActiveState) echo inactive ;;
+  show:--property=FragmentPath) echo "$SLS_TEST_UNIT" ;;
+  show:--property=DropInPaths) echo ;;
+  daemon-reload:) echo not-found > "$SLS_TEST_STATE" ;;
+  *) exit 1 ;;
+esac
+"""); self.systemctl.chmod(0o755)
+        result = self.shell("admit_root_runtime\ntrap cleanup_recovery_signer EXIT\nsnapshot_local_signer\nPBX_RUNNING=0\nacquire_uninstall_workers\nremove_phone_collector_service\n",
+                            env={'SLS_TEST_CALLS': str(calls), 'SLS_TEST_STATE': str(load_state), 'SLS_TEST_UNIT': str(self.unit)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls.read_text().splitlines().count('daemon-reload'), 1)
+        self.assertFalse((self.data / 'phone-admission.json').exists())
+
+    def test_missing_unit_with_foreign_loaded_service_is_preserved(self):
+        self.systemctl.write_text('#!/bin/bash\ncase "$1:$2" in show:--property=ActiveState) echo active;; show:--property=LoadState) echo loaded;; show:--property=FragmentPath) echo /etc/systemd/system/foreign.service;; show:--property=DropInPaths) echo;; *) exit 1;; esac\n')
+        self.systemctl.chmod(0o755)
+        result = self.shell("admit_root_runtime\ntrap cleanup_recovery_signer EXIT\nsnapshot_local_signer\nPBX_RUNNING=0\nacquire_uninstall_workers\nremove_phone_collector_service\n")
+        self.assertNotEqual(result.returncode, 0, 'A loaded collector was accepted with its managed unit absent')
+        self.assertFalse((self.data / 'phone-admission.json').exists())
 
     def test_collector_stop_rechecks_final_calls_before_deleting_service(self):
         self.unit.write_bytes(self.collector_unit_body()); self.unit.chmod(0o644)

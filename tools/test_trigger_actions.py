@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 if os.environ.get('SLS_TEST_NAMESPACE') != 'entered' or any(
     os.environ.get('SLS_TEST_PARENT_' + label + '_NS') in (None, '', os.readlink('/proc/self/ns/' + kind))
@@ -52,6 +53,24 @@ class TriggerActions(unittest.TestCase):
         return {'enabled':True,'kind':'script','path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
             'execution_mode':'trusted'}
 
+    def test_restricted_command_passes_the_sealed_script_and_disables_nested_user_namespaces(self):
+        def fixture_path(value):
+            return Path('/usr/bin/false') if value == '/usr/bin/bwrap' else Path(value)
+        with mock.patch.object(actions, 'Path', side_effect=fixture_path):
+            command = actions.restricted_command(9, '/bin/bash')
+            javascript = actions.restricted_command(9, '/usr/bin/node')
+        self.assertNotIn('/usr/share/nodejs', javascript)
+        builtin = '/usr/share/nodejs/cjs-module-lexer/lexer.js'
+        if Path(builtin).is_file():
+            self.assertIn(builtin, javascript)
+            self.assertNotIn(builtin, command)
+        for flag in ('--unshare-all', '--unshare-user', '--disable-userns'):
+            self.assertIn(flag, command)
+        start = command.index('--ro-bind-data')
+        self.assertEqual(command[start:start + 3], ['--ro-bind-data', '9', '/run/action.sh'])
+        if Path('/lib64').is_symlink() and Path('/usr/lib64').is_dir():
+            self.assertIn('/usr/lib64', command)
+
     def test_restricted_mode_requires_isolation_without_fallback(self):
         action=self.script('echo SHOULD_NOT_RUN\n');action['execution_mode']='restricted'
         if not Path('/usr/bin/bwrap').exists():
@@ -88,6 +107,13 @@ class TriggerActions(unittest.TestCase):
             result=self.worker(action,worker_path=worker)
             self.assertEqual(result['state'],'completed',result)
             self.assertFalse(Path('/tmp/in-sandbox-only').exists())
+            javascript = self.script(
+                'const fs = require("fs"); const event = JSON.parse(fs.readFileSync(0, "utf8"));'
+                'if (event.message !== "fixture only" || fs.existsSync("/var/lib/asterisk")) process.exit(9);',
+                'js')
+            javascript['execution_mode'] = 'restricted'
+            js_result = self.worker(javascript, worker_path=worker)
+            self.assertEqual(js_result['state'], 'completed', js_result)
         finally:subprocess.run(['umount','/usr/bin/false'],check=True,timeout=5)
 
     def test_script_requires_unprivileged_account(self):

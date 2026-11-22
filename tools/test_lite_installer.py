@@ -37,7 +37,9 @@ class LiteInstallerTests(unittest.TestCase):
         self.uid, self.gid = account.pw_uid, account.pw_gid
         self.crypto.initialize_keyring(self.keyring, self.gid)
         shutil.copyfile(CRYPTO_SOURCE.parent / 'sls_install_transaction.py', self.bootstrap / 'sls_install_transaction.py')
-        self.config = self.root / 'mass-notifications.config'
+        shutil.copyfile(CRYPTO_SOURCE.parent / 'sls_install_guard.py', self.bootstrap / 'sls_install_guard.py')
+        self.data = self.root / 'data'; self.data.mkdir(mode=0o700)
+        self.config = self.data / 'mass-notifications.config'
 
     def write_config(self, profile='standard', desktops=25, phones=25, queue=8):
         settings = {
@@ -56,13 +58,18 @@ class LiteInstallerTests(unittest.TestCase):
         script = r'''
 source "$1" "$2"
 CONFIG_FILE="$3"
+DATA_DIR="${CONFIG_FILE%/*}"
 INSTALL_TEMP_ROOT="$4"
 INSTALL_BOOTSTRAP_DIR="$5"
+WORKER_GUARD_TOOL="$5/sls_install_guard.py"
 TRANSACTION_TOOL="$5/sls_install_transaction.py"; RECOVERY_DIR="$9"
 LOG_FILE="$4/install.log"
 PENDING_CONFIG_STATE="$6"
-PENDING_CONFIG_PATH="$4/pending.config"
+PENDING_CONFIG_PATH="$DATA_DIR/mass-notifications.pending.config"
 INSTALL_NOTIFICATION_SIDE_EFFECTS=0
+acquire_worker_coordination
+acquire_settings_coordination
+trap release_worker_coordination EXIT
 snapshot_config
 apply_requested_deployment_profile
 if [ "$8" = 1 ]; then apply_factory_branding_defaults; fi
@@ -238,7 +245,7 @@ esac
                 before = self.config.read_bytes()
                 result = self.run_conversion('--lite')
                 self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn('Enterprise', result.stderr)
+                self.assertIn('Enterprise', result.stdout + result.stderr)
                 self.assertEqual(self.config.read_bytes(), before)
 
     def test_return_to_standard_keeps_stored_enterprise_inactive(self):

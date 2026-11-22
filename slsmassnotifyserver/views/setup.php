@@ -235,11 +235,11 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 					</div>
 					<div class="col-md-3">
 						<label><?php echo _('Start'); ?></label>
-						<input class="form-control" name="quiet_hours_start" value="<?php echo htmlspecialchars($settings['quiet_hours_start'] ?? '21:00'); ?>">
+						<input class="form-control" type="time" min="00:00" step="3600" name="quiet_hours_start" value="<?php echo htmlspecialchars($settings['quiet_hours_start'] ?? '21:00'); ?>">
 					</div>
 					<div class="col-md-3">
 						<label><?php echo _('End'); ?></label>
-						<input class="form-control" name="quiet_hours_end" value="<?php echo htmlspecialchars($settings['quiet_hours_end'] ?? '06:00'); ?>">
+						<input class="form-control" type="time" min="00:00" step="3600" name="quiet_hours_end" value="<?php echo htmlspecialchars($settings['quiet_hours_end'] ?? '06:00'); ?>">
 					</div>
 					<div class="col-md-3">
 						<label><?php echo _('Critical Bypass Events'); ?></label>
@@ -276,7 +276,7 @@ $setupAddress = \FreePBX\modules\SlsAdvertisedAddress::fields($settings);
 				<?php } ?>
 				</div>
 				<div class="row"><div class="col-md-4"><div class="form-group"><label><?php echo _('Lightning TTS Volume'); ?></label><div class="input-group"><input class="form-control" name="xweather[tts_volume]" aria-label="<?php echo htmlspecialchars(_('Lightning TTS Volume'), ENT_QUOTES, 'UTF-8'); ?>" type="number" min="1" max="200" value="<?php echo (int)($xweather['tts_volume'] ?? ($settings['nws_tts_volume'] ?? 25)); ?>"><span class="input-group-addon">%</span></div><p class="help-block"><?php echo _('Default 25%. Coordinate locations are spoken as “this area.”'); ?></p></div></div></div>
-				<div class="row"><div class="col-md-4"><div class="form-group"><label style="display:block"><?php echo _('Lightning Quiet Hours'); ?></label><label class="sls-setup-toggle"><input type="checkbox" name="xweather[quiet_hours_enabled]" value="1" <?php echo !empty($xweather['quiet_hours_enabled']) ? 'checked' : ''; ?>><span></span></label><strong><?php echo !empty($xweather['quiet_hours_enabled']) ? _('Enabled') : _('Disabled'); ?></strong></div></div><div class="col-md-4"><div class="form-group"><label><?php echo _('Start'); ?></label><input class="form-control" name="xweather[quiet_hours_start]" aria-label="<?php echo htmlspecialchars(_('Start'), ENT_QUOTES, 'UTF-8'); ?>" value="<?php echo htmlspecialchars($xweather['quiet_hours_start'] ?? '21:00'); ?>"></div></div><div class="col-md-4"><div class="form-group"><label><?php echo _('End'); ?></label><input class="form-control" name="xweather[quiet_hours_end]" aria-label="<?php echo htmlspecialchars(_('End'), ENT_QUOTES, 'UTF-8'); ?>" value="<?php echo htmlspecialchars($xweather['quiet_hours_end'] ?? '06:00'); ?>"></div></div></div>
+				<div class="row"><div class="col-md-4"><div class="form-group"><label style="display:block"><?php echo _('Lightning Quiet Hours'); ?></label><label class="sls-setup-toggle"><input type="checkbox" name="xweather[quiet_hours_enabled]" value="1" <?php echo !empty($xweather['quiet_hours_enabled']) ? 'checked' : ''; ?>><span></span></label><strong><?php echo !empty($xweather['quiet_hours_enabled']) ? _('Enabled') : _('Disabled'); ?></strong></div></div><div class="col-md-4"><div class="form-group"><label><?php echo _('Start'); ?></label><input class="form-control" type="time" min="00:00" step="3600" name="xweather[quiet_hours_start]" aria-label="<?php echo htmlspecialchars(_('Start'), ENT_QUOTES, 'UTF-8'); ?>" value="<?php echo htmlspecialchars($xweather['quiet_hours_start'] ?? '21:00'); ?>"></div></div><div class="col-md-4"><div class="form-group"><label><?php echo _('End'); ?></label><input class="form-control" type="time" min="00:00" step="3600" name="xweather[quiet_hours_end]" aria-label="<?php echo htmlspecialchars(_('End'), ENT_QUOTES, 'UTF-8'); ?>" value="<?php echo htmlspecialchars($xweather['quiet_hours_end'] ?? '06:00'); ?>"></div></div></div>
 				</div>
 				</section>
 

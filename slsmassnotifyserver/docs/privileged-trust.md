@@ -6,7 +6,9 @@ signature. The working web tree and prior local signatures cannot enroll trust.
 
 ## Installer bootstrap for older releases
 
-The installer prepares approvals in a retained root-private workspace before changing runtime, trust pointers or maintenance. Missing stock inventories are derived from exact-version FreePBX packages authenticated by the bundled public key and pinned full fingerprint. Previous SLL files and overlays must match a publisher-verified release. Framework mapping, installer-only omissions, the supported menu insertion and spinner alias are explicit; unknown live differences produce a review report without enrolling trust. Existing independently reviewed inventories preserve local branding and security fixes.
+The installer prepares approvals in a retained root-private workspace before changing runtime, trust pointers or maintenance. Missing stock inventories are derived from exact-version FreePBX packages authenticated by the bundled public key and pinned full fingerprint. Previous SLL files and overlays must match a publisher-verified release. Framework mapping, installer-only omissions, the previous release’s exact menu insertion and the spinner alias have specific verification rules. Unknown live differences produce a review report without enrolling trust. Existing independently reviewed inventories preserve local branding and security fixes.
+
+Qualified Framework 17.0.33, 17.0.33.1 through 17.0.33.5, and 17.0.34 source layouts may retain the single `amp_conf/etc/init.d/freepbx.init` source copy in the module tree. Its exact known 1,619-byte contents must come from the authenticated whole vendor package. Automatic approval covers only an already-present canonical single-link regular file owned by root or the canonical native account, with owner-readable permission bits within `0664` and no extended access ACL. Metadata or ACL inspection failures need independent review. Both current and previous candidate inventories retain the file and its provenance; subsequent comparisons recheck its role. An absent file is not created, no path under `/etc/init.d` is mapped, and no source copy is executed. Earlier independently reviewed inventories retain their exact authority without automatic additions or retagging.
 
 Use `SLS_MASS_NOTIFY_INVENTORY_ONLY=1` for preparation without activation. Offline package paths and previous-release inputs are described in [Installation](../INSTALL.md#authenticated-installation-and-recovery). Reviewed overrides use `SLS_MASS_NOTIFY_DASHBOARD_INVENTORY` / `SLS_MASS_NOTIFY_FRAMEWORK_INVENTORY` plus each matching `_SHA256` variable. Store inventories beneath root-owned, non-writable parents and independently verify their provenance and contents. Never generate an approval merely by hashing the current web tree.
 
@@ -57,15 +59,13 @@ An inventory has this shape (hashes below are placeholders):
       "target": "admin/modules/framework/module.xml"
     },
     "amp_conf/htdocs/admin/views/menu_items.php": {
-      "sha256": "<exact approved menu including SLL insertion>",
+      "sha256": "<digest of the approved Framework menu>",
       "target": "admin/views/menu_items.php"
     }
   },
   "uninstall": {
     "remove": [],
-    "replace": {
-      "amp_conf/htdocs/admin/views/menu_items.php": "<exact reviewed original menu SHA-256>"
-    }
+    "replace": {}
   }
 }
 ```
@@ -80,9 +80,11 @@ files. It does not claim a complete inventory of all other FreePBX modules or
 undocumented extra files throughout the shared web root.
 
 For Dashboard, `uninstall.remove` may name only its two SLL widget files; no other
-file can be removed from signing coverage by uninstall mode. Framework's uninstall
-replacement may name only the exact menu file. This mode consumes previously
-approved expected hashes, not cleaned live bytes.
+file can be removed from signing coverage by uninstall mode. Current installations
+register the menu in SLL module metadata and leave Framework’s menu intact. A legacy
+approval may carry the exact pre-SLL menu digest in `uninstall.replace`. Migration
+requires the approved file to contain the known insertion and its removal to produce
+the independently approved menu.
 
 Store the reviewed inventory under root-protected parents, then import it:
 
@@ -104,8 +106,11 @@ live tree before key/signature changes, signs only expected hashes, and repeats
 parity checks after publication. Unexpected PHP, Python bytecode, unsafe links,
 hardlinks and special files are rejected. Only exact named non-executable
 Dashboard LESS cache formats are excluded. The sole reviewed asset-link exception
-is Framework spinner.gif pointing to the exact Core GIF, with its upstream digest. Publication/rollback pin the module
-directory descriptor; replacing its path cannot redirect a privileged file write.
+is Framework spinner.gif pointing to the exact Core GIF, with its upstream digest.
+Signature publication and rollback pin the module directory, compare the identity
+and bytes of the signature being replaced, and preserve a concurrent FreePBX
+replacement. When a competing write prevents completion, the signer retains its
+root-only transaction evidence and reports the path.
 
 FreePBX metadata and signature verification execute as `asterisk`. Account/home
 metadata is independently checked against passwd before root ownership repair;
@@ -117,6 +122,11 @@ platform profile, not web-supplied account names.
 Uninstall snapshots the inventory-aware signer and its protected helper before
 removing runtime files. Its local-signing fallback uses the preapproved uninstall
 inventory and cannot fall back to a legacy signer that trusts the current tree.
+Interrupted removal may verify a mixture of the exact approved before/after
+states for the two SLL Dashboard widgets and the Framework menu. This explicit
+progress check neither changes approval nor produces signing hashes. Missing or
+changed unrelated native files still refuse; final signing requires the complete
+approved uninstall inventory.
 
 ## Privileged installation phases
 
@@ -161,8 +171,11 @@ and complete uninstall. Every deployment and upstream module update still needs
 an approved baseline; test success does not approve an unknown host's files.
 Interrupted upgrade and full recovery qualification require a separate disposable
 PBX. A publisher check on SLL does not authorize executing mutable FreePBX modules
-as root. The current publisher verifier still has a single pinned key; overlapping
-publisher trust and emergency key rotation remain separate release-security work.
+as root. Fresh publisher trust starts at the pinned key; existing bootstrap,
+candidate staging and installed verification retain the current root-reviewed
+overlap and revocations. Expired retained metadata needs an exact, time-bounded
+root approval, while new candidates and revoked/expired keys remain strict.
+See [publisher rotation and retained-release review](RELEASE_TRUST.md).
 
 ## Delivery coordination and configuration preservation
 
@@ -188,8 +201,4 @@ provide an arbitrary module-local class path. SLL therefore retains its two
 independently approved Dashboard files. Removing them without changing the
 upstream loader would remove the dashboard announcement panel.
 
-The Framework menu insertion also remains an exact reviewed overlay. A move to
-module-local navigation needs full theme and PBX upgrade acceptance before it
-can replace that path. This candidate reduces update failures through verified
-stock reconciliation and a bounded signed-package cache; it does not weaken
-integrity checks or infer approval from current live hashes.
+From v0.2.0-beta, FreePBX builds the Mass Notify menu from SLL’s own module metadata. The Framework menu template follows its approved stock or independently reviewed site version. A legacy SLL menu insertion is removed only when its provenance and expected result can be verified. See [Framework updates](INSTALLER_OPERATIONS.md#freepbx-framework-updates) for the administrator workflow.

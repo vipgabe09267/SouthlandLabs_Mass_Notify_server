@@ -1849,7 +1849,12 @@ def phone_title_and_message_from_alert(alert):
 def build_phone_xml_for_format(config, fmt, payload_type, alert=None, message="", image=False, title="Announcement", background_color="#1f2937", background_image="", timeout_seconds=0):
     fmt = fmt or "yealink"
     if payload_type == "alert":
-        if fmt in {"yealink", "yealink_image"}:
+        if fmt == "yealink_image":
+            # An explicit image selection has the same contract for Weather
+            # and announcements. A failed render must be a payload failure,
+            # rather than a successful text-only image test.
+            return build_image_xml(config, alert, render_alert_image(config, alert))
+        if fmt == "yealink":
             return build_xml(config, alert)
         if fmt == "yealink_text":
             return build_text_xml(alert)
@@ -2708,6 +2713,13 @@ def announcement_api_record(alert_id, message, xml_payload, extensions, desktop_
 
 
 
+def phone_payload_kind(xml_payload):
+    """Identify generated Yealink screens without parsing or logging their content."""
+    prefix = re.sub(r'^\s*<\?xml[^>]{0,256}\?>\s*', '', xml_payload[:512]) if isinstance(xml_payload, str) else ''
+    return ('image' if re.match(r'^<YealinkIPPhoneImageScreen(?:\s|>)', prefix)
+            else 'text' if re.match(r'^<YealinkIPPhoneTextScreen(?:\s|>)', prefix) else 'xml')
+
+
 def send_notify_batch(ami, endpoint_info, payload_builder, alert_id, print_results=False, attempt_label="initial", unavailable_targets=None, defer_unavailable_failure=False, visual_owner='', clear_visual_owner='', strict_contacts=False, continuation_extensions=(), submission_guard=None, operation_deadline=None):
     # Keep the historical integer return (contact coverage of accepted actions)
     # for callers. It is not a count of handset deliveries. The structured result
@@ -2746,6 +2758,7 @@ def send_notify_batch(ami, endpoint_info, payload_builder, alert_id, print_resul
             "resolved_contact_uris": resolved_contacts,
             "fallback_reason": fallback_reason,
             "handset_delivery_confirmed": False,
+            "payload_kind": "unbuilt",
         }
         if unavailable:
             details = {"status": "failed", "event_attempts": [], "event_fallback_outcome": "not_used"}
@@ -2759,6 +2772,17 @@ def send_notify_batch(ami, endpoint_info, payload_builder, alert_id, print_resul
                 record["actual_route"] = "none"
                 record["target_field"] = None
             else:
+                record['payload_kind'] = phone_payload_kind(xml_payload)
+                if record['payload_kind'] == 'image':
+                    # Preserve useful origin geometry without logging a media
+                    # URL, private hostname, message or bearer-capability query.
+                    try:
+                        media = urlsplit(image_url_from_xml(xml_payload))
+                        if media.scheme in {'http', 'https'}:
+                            record['media_scheme'] = media.scheme
+                            record['media_port'] = media.port or (443 if media.scheme == 'https' else 80)
+                    except ValueError:
+                        pass
                 try:
                     result = send_notify(ami, target, xml_payload, phone_format, target_field,
                         **({'coordination_deadline':operation_deadline or time.monotonic()+8} if strict_contacts else {}))
@@ -3005,7 +3029,15 @@ def push_alert(
         if require_all_targets and missing_extensions:
             requested = ", ".join(missing_extensions)
             raise RuntimeError(f"Requested phone endpoints are not registered/reachable for SIP NOTIFY: {requested}")
-        payload_builder = lambda fmt: primary_xml_payload if fmt == "yealink" else build_phone_xml_for_format(config, fmt, "alert", alert=alert)
+        def payload_builder(fmt):
+            if fmt in {'yealink', 'yealink_image'}:
+                if fmt == 'yealink_image' and phone_payload_kind(primary_xml_payload) != 'image':
+                    raise RuntimeError('The selected Weather image format could not be rendered; inspect the visual worker log')
+                # One alert has one shared image, including explicit image
+                # targets. Per-endpoint re-renders waste bounded media capacity
+                # and can fail after the first valid image already exists.
+                return primary_xml_payload
+            return build_phone_xml_for_format(config, fmt, "alert", alert=alert)
         send_notify_batch(
             ami, endpoint_info, payload_builder, alert_id, print_results, "initial",
             unavailable_targets=missing_extensions, defer_unavailable_failure=True,

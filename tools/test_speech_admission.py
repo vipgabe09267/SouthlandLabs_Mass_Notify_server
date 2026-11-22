@@ -110,6 +110,199 @@ class SpeechTests(unittest.TestCase):
         third = self.admission().acquire()
         self.assertIsNotNone(third.active)
 
+    def test_completed_paging_prompts_on_separate_data_and_scratch_mounts(self):
+        if os.geteuid() != 0 or os.environ.get('SLS_TEST_NAMESPACE') != 'entered':
+            self.skipTest('The isolated mount fixture is required')
+        stage = """
+            mount -t tmpfs -o size=376m,mode=1777 tmpfs /tmp
+            mkdir -m 0700 /run/sls-prompt-data
+            mount -t tmpfs -o size=1100m,mode=0700 tmpfs /run/sls-prompt-data
+            mkdir -p /tmp/output-low /tmp/output-full /tmp/output-ready /tmp/output-ro /tmp/output-single
+            mount -t tmpfs -o size=128m tmpfs /tmp/output-low
+            mount -t tmpfs -o size=376m,nr_inodes=2 tmpfs /tmp/output-full
+            touch /tmp/output-full/last-inode
+            mount -t tmpfs -o size=376m,nr_inodes=2 tmpfs /tmp/output-single
+            mount --bind /tmp/output-ready /tmp/output-ro
+            mount -o remount,bind,ro /tmp/output-ro
+            exec "$@"
+        """
+        result = subprocess.run(['/usr/bin/unshare', '--mount', '--propagation', 'private',
+            '/bin/sh', '-ec', stage, 'prompt-fixture', sys.executable, '-B', __file__,
+            'SpeechTests.split_prompt_sequence', 'SpeechTests.split_destination_admission'], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def split_prompt_sequence(self):
+        data = Path('/run/sls-prompt-data')
+        self.assertNotEqual(data.stat().st_dev, Path('/tmp').stat().st_dev)
+        raw = self.root / 'render.wav'
+        available = os.statvfs('/tmp')
+        free = available.f_bavail * available.f_frsize
+        amount = 600 * 160000 + speech.MIB
+        self.assertLess(128 * speech.MIB + 2 * amount, free)
+        self.assertGreater(128 * speech.MIB + 3 * amount, free)
+        for completed in (False, True):
+            directory = data / ('completed' if completed else 'grace')
+            audio = directory / 'sounds/tts'
+            audio.mkdir(parents=True)
+            for index in range(14):
+                job = speech.Admission(self.config, 600, directory, self.web)
+                try:
+                    if not completed and index == 2:
+                        with self.assertRaisesRegex(speech.SpeechAdmissionError, 'protected free-space reserve') as error:
+                            job.acquire()
+                        self.assertIsInstance(error.exception, speech.SpeechCapacityError)
+                        self.assertEqual(error.exception.code, 73)
+                        actual = os.statvfs('/tmp')
+                        for detail in ('role=temporary', 'available_bytes=' + str(actual.f_bavail * actual.f_frsize),
+                                       'required_bytes=' + str(128 * speech.MIB + 3 * amount),
+                                       'reserved_bytes=' + str(2 * amount), 'requested_bytes=' + str(amount)):
+                            self.assertIn(detail, str(error.exception))
+                        break
+                    job.acquire()
+                    raw.write_bytes(bytes(4096))
+                    final = audio / ('announcement_tts_20260101010101_%032x.wav' % index)
+                    final.write_bytes(raw.read_bytes())
+                    raw.unlink()
+                    if completed:
+                        job.complete()
+                finally:
+                    job.close()
+            self.assertEqual(len(list(audio.glob('*.wav'))), 14 if completed else 2)
+
+    def split_destination_admission(self):
+        data = Path('/run/sls-prompt-data') / 'destination-ledger'
+        (data / 'sounds/tts').mkdir(parents=True)
+        for name, reason in [('output-low', 'protected free-space reserve'), ('output-full', 'available_inodes=0'),
+                             ('output-ro', 'read_only=1'), ('output-ready', None)]:
+            with self.subTest(mount=name):
+                target = Path('/tmp') / name
+                source = os.open(target, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    job = speech.Admission(self.config, 600, data, self.web, additional_media_directory_fd=source)
+                finally:
+                    os.close(source)
+                try:
+                    if reason is None:
+                        # Destination shares the same 376 MiB mount as /tmp. A double byte charge would refuse.
+                        job.acquire()
+                        job.complete()
+                    else:
+                        with self.assertRaisesRegex(speech.SpeechCapacityError, reason) as error:
+                            job.acquire()
+                        self.assertIn('role=destination', str(error.exception))
+                finally:
+                    job.close()
+        # Two admitted workers must not claim the same last output inode while
+        # the first is still processing its input on another filesystem.
+        source = os.open('/tmp/output-single', os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            config = {**self.config, 'speech_synthesis_limit': 2}
+            first = speech.Admission(config, 600, data, self.web, additional_media_directory_fd=source)
+            second = speech.Admission(config, 600, data, self.web, additional_media_directory_fd=source)
+            try:
+                first.acquire()
+                with self.assertRaisesRegex(speech.SpeechCapacityError, 'available_inodes=1 required_inodes=2') as error:
+                    second.acquire()
+                self.assertIn('role=destination', str(error.exception))
+                self.assertIn('outstanding_reservations=1', str(error.exception))
+                first.complete()
+            finally:
+                first.close()
+                second.close()
+            retry = speech.Admission(config, 600, data, self.web, additional_media_directory_fd=source)
+            try:
+                retry.acquire()
+                retry.complete()
+            finally:
+                retry.close()
+        finally:
+            os.close(source)
+        # Scratch needs three nodes. On a shared mount the output stage needs a fourth.
+        for inode_limit, shared, available, required in [(3, False, 2, 3), (5, True, 3, 4)]:
+            subprocess.run(['mount', '-t', 'tmpfs', '-o', f'size=376m,nr_inodes={inode_limit}', 'tmpfs', '/tmp'], check=True)
+            try:
+                destination = data
+                if shared:
+                    destination = Path('/tmp/paging')
+                    destination.mkdir()
+                source = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    job = speech.Admission(self.config, 600, data, self.web, additional_media_directory_fd=source)
+                finally:
+                    os.close(source)
+                try:
+                    with self.assertRaises(speech.SpeechCapacityError) as error:
+                        job.acquire()
+                    self.assertIn('role=temporary', str(error.exception))
+                    self.assertIn(f'available_inodes={available} required_inodes={required}', str(error.exception))
+                finally:
+                    job.close()
+            finally:
+                subprocess.run(['umount', '/tmp'], check=True)
+
+    def test_capacity_diagnostics_identify_numbers_without_private_names(self):
+        private_name = 'announcement_tts_private_fixture.wav'
+        (self.root / 'sounds/tts' / private_name).write_bytes(bytes(4096))
+        holder = self.admission()
+        holder.reserve_media(1024)
+        holder.close()
+        job = speech.Admission({**self.config, 'generated_media_cache_mib': 64}, 600, self.root, self.web)
+        self.addCleanup(job.close)
+        with self.assertRaises(speech.SpeechCapacityError) as refusal:
+            job.acquire()
+        for detail in ('limit_bytes=67108864', 'used_bytes=4096', 'reserved_bytes=1024',
+                       'requested_bytes=97048576', 'required_bytes=97053696'):
+            self.assertIn(detail, str(refusal.exception))
+        self.assertNotIn(private_name, str(refusal.exception))
+        media = self.admission()
+        with mock.patch.object(speech, 'MAX_GENERATED_FILES', 1), self.assertRaises(speech.SpeechCapacityError) as refusal:
+            media.reserve_media(10)
+        self.assertIn('file_count=1 limit_files=1', str(refusal.exception))
+        for role, target in (('data', self.root), ('web', self.web), ('temporary', Path('/tmp'))):
+            def capacity(path):
+                low = path == target or (role == 'data' and path == media.fd)
+                return SimpleNamespace(f_bavail=1 if low else 10**9, f_frsize=4, f_flag=0, f_files=1000, f_favail=999)
+            with self.subTest(role=role), mock.patch.object(os, 'statvfs', side_effect=capacity), self.assertRaises(speech.SpeechCapacityError) as refusal:
+                media.reserve_media(10)
+            for detail in ('role=' + role, 'available_bytes=4', 'required_bytes=134218762',
+                           'reserve_bytes=134217728', 'reserved_bytes=1024', 'requested_bytes=10'):
+                self.assertIn(detail, str(refusal.exception))
+            self.assertNotIn(str(self.root), str(refusal.exception))
+
+    def test_completion_preserves_other_reservations_and_crash_fallback(self):
+        crashed = os.fork()
+        if crashed == 0:
+            try:
+                self.admission().acquire()
+                os._exit(0)
+            except BaseException:
+                os._exit(1)
+        self.assertEqual(os.waitpid(crashed, 0)[1], 0)
+        state = self.root / 'speech-slot-00.json'
+        initial = json.loads(state.read_text())
+        self.assertEqual(len(initial), 1)
+        self.assertGreater(initial[0]['expires'], time.time() + 60)
+        media = self.admission()
+        media.reserve_media(speech.MIB)
+        media.close()
+        before = json.loads(state.read_text())
+        completed = self.admission().acquire()
+        self.assertEqual(len(json.loads(state.read_text())), len(before) + 1)
+        completed.complete()
+        completed.close()
+        self.assertEqual(json.loads(state.read_text()), before)
+
+    def test_completion_write_failure_keeps_record_and_releases_slot(self):
+        completed = self.admission().acquire()
+        state = self.root / 'speech-slot-00.json'
+        before = state.read_bytes()
+        with mock.patch.object(completed, 'write', side_effect=OSError('persistence failed')):
+            with self.assertRaisesRegex(OSError, 'persistence failed'):
+                completed.complete()
+        self.assertEqual(state.read_bytes(), before)
+        self.assertIsNone(completed.fd)
+        self.assertIsNotNone(self.admission().acquire().active)
+
     def test_regular_control_contention_waits_for_the_current_writer(self):
         holder=self.admission()
         descriptor=holder.file('speech-admission.lock')

@@ -4,7 +4,9 @@ declare(strict_types=1);
 namespace FreePBX\modules {
     function gethostname() { return 'system-host.example.test'; }
     function exec($command, &$output, &$status) {
-        $output = ['*:8443 pbx.example.test (/fixture.conf:1)', '*:9443 other.example.test (/fixture.conf:2)'];
+        $output = str_contains($command, 'DUMP_CONFIG')
+            ? explode("\n", "Listen 8443\nListen 9443\n<VirtualHost *:8443>\nServerName pbx.example.test\nDocumentRoot /var/www/html\nSSLEngine on\n</VirtualHost>\n<VirtualHost *:9443>\nServerName other.example.test\nDocumentRoot /srv/other\nSSLEngine on\n</VirtualHost>\n")
+            : ['*:8443 pbx.example.test (/fixture.conf:1)', '*:9443 other.example.test (/fixture.conf:2)'];
         $status = 0;
     }
     function curl_init($url) { if (!empty($GLOBALS['address_init_failure'])) { return false; } $GLOBALS['address_requests'][] = ['url' => $url]; return count($GLOBALS['address_requests']) - 1; }

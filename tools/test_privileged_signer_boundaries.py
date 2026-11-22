@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise root file safety and actual PHP privilege dropping in private fixtures."""
 import os
+import hashlib
 from pathlib import Path
 import pwd
 import re
@@ -29,6 +30,75 @@ class SignerBoundary(unittest.TestCase):
 
     def run_code(self, marker, args):
         return subprocess.run(['/usr/bin/python3', '-I', '-', *map(str, args)], input=program(marker), text=True, capture_output=True, timeout=3)
+
+    def test_verified_framework_refreshes_cached_notification_without_rechecking_unrelated_modules(self):
+        body = SOURCE.split('verify_published_signature() {',1)[1].split(" -r '\n",1)[1].split("\n'\n}",1)[0]
+        body = body.replace('require "/etc/freepbx.conf";', r'''
+class FreePBX {
+    public static function GPG() { return new class {
+        public $timeout;
+        public function verifyModule($module) {
+            if (getenv("RACE") === "native") { file_put_contents(getenv("SIGN_PATH"),"native replacement"); }
+            return ["status"=>129,"details"=>[]];
+        }
+    }; }
+    public static function Database() {
+        static $db;
+        if (!$db) {
+            $db = new PDO("sqlite::memory:");
+            $db->exec("CREATE TABLE modules (modulename TEXT, signature TEXT)");
+            $add = $db->prepare("INSERT INTO modules VALUES(?,?)");
+            foreach (["framework","another"] as $mod) { $add->execute([$mod,json_encode(["status"=>130,"details"=>["altered"]])]); }
+            if (getenv("UNCACHED")) { $add->execute(["incomplete",null]); }
+            if (getenv("RACE") === "cache") {
+                $db->sqliteCreateFunction("replace_sig",function() { file_put_contents(getenv("SIGN_PATH"),"replacement during cache write"); return 0; });
+                $db->exec("CREATE TRIGGER displaced AFTER UPDATE ON modules BEGIN SELECT replace_sig(); END");
+            }
+            register_shutdown_function(function() use($db) {
+                $s = json_decode($db->query("SELECT signature FROM modules WHERE modulename = \"framework\"")->fetchColumn(),true);
+                echo "CACHED=",$s["status"],"\n";
+            });
+        }
+        return $db;
+    }
+}
+class module_functions {
+    public static function create() { return new self(); }
+    public function getAllSignatures($cached,$online) {
+        if (!$cached || $online) { throw new Exception("unbounded refresh"); }
+        foreach(FreePBX::Database()->query("SELECT * FROM modules") as $module) {
+            $result=json_decode($module["signature"],true);
+            if ($result["status"] !== 129) { echo "TAMPERED=",$module["modulename"],"\n"; }
+        }
+    }
+}''')
+        path = self.base/'module.sig'
+        for missing,race,expected in (('','', ['TAMPERED=another']),('1','', []),('','native', []),('','cache', [])):
+            path.write_bytes(b'verified candidate')
+            result = subprocess.run(['/usr/bin/php','-r',body],env={**os.environ,'SIGN_MODULE':'framework','UNCACHED':missing,
+                                    'SIGN_DIGEST':hashlib.sha256(path.read_bytes()).hexdigest(),'SIGN_PATH':str(path),'RACE':race},
+                                    capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,1 if race else 0,result.stderr)
+            if not race: self.assertIn('CACHED=129',result.stdout)
+            if race == 'cache': self.assertIn('CACHED=130',result.stdout)
+            self.assertEqual([row for row in result.stdout.splitlines() if row.startswith('TAMPERED=')],expected)
+
+    def test_stock_vendor_rejection_never_reaches_local_key_creation(self):
+        source = SOURCE[SOURCE.index('SIGNER_HASH_BYTES="$(approved_module_hashes'):SOURCE.index('WORKDIR="$(mktemp')]
+        script = '''set -eu
+MODULE=framework
+approved_module_hashes() { echo approved; }
+bounded_signer_stream() { wc -c; }
+authenticated_framework_signature() { printf '%064d\\n' 0; }
+verify_published_signature() { echo checked-native-signature >&2; return 1; }
+signer_storage() { echo reached-local-key-path >&2; echo "100 100"; }
+log() { echo "$*"; }
+run() {
+''' + source + '\n}\nrun'
+        result = subprocess.run(['bash','-c',script],capture_output=True,text=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('checked-native-signature',result.stderr)
+        self.assertNotIn('reached-local-key-path',result.stderr)
 
     def test_private_signing_home_preserves_keys_and_known_agent_socket(self):
         keyring=self.base/'private-signing';keyring.mkdir(mode=0o755)
@@ -163,6 +233,7 @@ class SignerBoundary(unittest.TestCase):
         probe='file_put_contents("php://stderr", "FIXTURE_UID=" . posix_geteuid() . "\\n"); exit(37);'
         # Stop each actual PHP body before any PBX bootstrap or other operation.
         source=source.replace('require "/etc/freepbx.conf";',probe).replace("require '/etc/freepbx.conf';",probe)
+        source=source.replace('<?php\n// Native recording IDs', '<?php\n'+probe+'\n// Native recording IDs')
         source=source.replace('/usr/sbin/fwconsole "$@"', "-r '"+probe+"'")
         candidate=self.base/'uninstall.sh';candidate.write_text(source)
         for method in ('module_registry_exists','remove_freepbx_manager_users','remove_bundled_system_recordings','verify_stock_module','refresh_dashboard_hook_index','run_fwconsole'):
@@ -171,6 +242,14 @@ class SignerBoundary(unittest.TestCase):
                 self.assertEqual(result.returncode,37,result.stderr)
                 self.assertIn('FIXTURE_UID='+str(self.account.pw_uid),result.stderr)
                 self.assertNotIn('FIXTURE_UID=0\n',result.stderr)
+
+    def test_uninstaller_preserves_native_recordings_without_running_a_database_delete(self):
+        # The compatibility entrypoint's actual PHP body exits without a PBX
+        # bootstrap or database operation. Separate PDO suites check real rows.
+        script='source "$1"; remove_bundled_system_recordings'
+        result=subprocess.run(['/bin/bash','-c',script,'fixture',
+            str(ROOT/'tools/uninstall_release.sh')],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
 
 
 if __name__ == '__main__':

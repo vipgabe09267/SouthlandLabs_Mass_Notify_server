@@ -25,7 +25,9 @@ if (($_GET['sls_installer_runtime'] ?? '') === '1'
     }
     $runtimeAccount = function_exists('posix_getpwnam') ? posix_getpwnam('asterisk') : false;
     $runtimeAccountOk = is_array($runtimeAccount) && is_int($runtimeAccount['uid'] ?? null) && $runtimeAccount['uid'] > 0
-        && function_exists('posix_geteuid') && posix_geteuid() === $runtimeAccount['uid'];
+        && is_int($runtimeAccount['gid'] ?? null) && $runtimeAccount['gid'] > 0
+        && function_exists('posix_geteuid') && posix_geteuid() === $runtimeAccount['uid']
+        && function_exists('posix_getegid') && posix_getegid() === $runtimeAccount['gid'];
     if (!$runtimeAccountOk) {
         $missing[] = 'web_runtime_must_run_as_asterisk';
     }
@@ -34,7 +36,7 @@ if (($_GET['sls_installer_runtime'] ?? '') === '1'
     header('Cache-Control: no-store');
     header('X-Content-Type-Options: nosniff');
     echo json_encode(['probe' => 'sls_served_php_v1', 'ok' => !$missing, 'missing' => $missing,
-        'module_version'=>'0.1.9-beta',
+        'module_version'=>'0.2.0-beta',
         'php_version'=>PHP_VERSION, 'php_sapi'=>PHP_SAPI, 'runtime_account_ok'=>$runtimeAccountOk,
         'extensions'=>$extensions, 'functions'=>$functions]);
     exit;

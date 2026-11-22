@@ -83,14 +83,16 @@ trait SlsAutomations
     private function validatePanicExtensions(array $settings): void
     {
         $rules=AutomationConfig::normalize($settings['automations'] ?? [])['rules'];
-        $phones=array_map('strval',array_column($this->getAllPjsipExtensions(),'extension'));
+        $phones=array_map('strval',$this->getConfiguredPjsipExtensionNumbers());
+        $deleted = false;
         foreach ($rules as $rule) {
             if ($rule['kind']!=='panic' || !$rule['enabled'] || $rule['dial_extension']==='') { continue; }
-            if (array_diff($rule['callers'],$phones)) { throw new \DomainException('Panic shortcut callers must be existing PJSIP extensions.'); }
+            if (array_diff($rule['callers'],$phones)) { $deleted = true; }
             if (($settings['live_paging']['enabled'] ?? '0')==='1' && ($settings['live_paging']['extension'] ?? '')===$rule['dial_extension']) { throw new \DomainException('The panic shortcut conflicts with the dial-in paging extension. Choose another unused number.'); }
             $usage=$this->FreePBX->Extensions->checkUsage([$rule['dial_extension']],false); unset($usage['slsmassnotifyserver']);
             if ($usage || self::livePagingDialplanHasConflict($this->queryLivePagingDialplan($rule['dial_extension']),'sls-trigger-panic')) { throw new \DomainException('The panic shortcut conflicts with an existing PBX number or dial pattern. Choose an unused internal number.'); }
         }
+        if ($deleted) { throw new SlsDeletedPbxObjectException('Panic shortcut callers must be existing PJSIP extensions.'); }
     }
     public function getPanicExtensionUsage($extensions,array $settings): array
     {
@@ -102,11 +104,45 @@ trait SlsAutomations
         }
         return $out;
     }
-    private function addPanicDialplan(&$ext,array $settings): void
+    private function addPanicDialplan(&$ext, array $settings, bool $cachedOnly): void
     {
-        $usage=$this->getPanicExtensionUsage(true,$settings); if (!$usage) { return; }
-        $this->validatePanicExtensions($settings); $this->ensureLivePagingPrompts($settings);
-        foreach ($usage as $number=>$row) {
+        $valid = [];
+        foreach (AutomationConfig::normalize($settings['automations'] ?? [])['rules'] as $rule) {
+            if ($rule['kind'] !== 'panic' || !$rule['enabled'] || $rule['dial_extension'] === '') { continue; }
+            $one = $settings; $one['automations']['rules'] = [$rule];
+            try { $this->validatePanicExtensions($one); }
+            catch (SlsDeletedPbxObjectException $error) {
+                $this->warnDeletedPbxObjectDuringReload('panic');
+                continue;
+            }
+            $valid[] = $rule;
+        }
+        if (!$valid) { return; }
+        // Prompt identities depend on each saved panic text. Prepare all valid
+        // rules in one pass, independently of an unavailable paging audience.
+        $prompts = $settings; $prompts['automations']['rules'] = $valid;
+        $prompts['live_paging'] = \SLS\MassNotify\LivePagingConfig::defaults();
+        try { $this->ensureLivePagingPrompts($prompts, $cachedOnly); }
+        catch (SlsPagingPromptUnavailableException $error) {
+            // Only cached, playable active shortcuts can survive a failed batch.
+            // Each keeps its original caller permissions and confirmation text.
+            if (count($valid) === 1) {
+                $this->warnPagingPromptsDuringReload(false, $error);
+                return;
+            }
+            $playable = [];
+            foreach ($valid as $rule) {
+                $prompts['automations']['rules'] = [$rule];
+                try { $this->ensureLivePagingPrompts($prompts, true); }
+                catch (SlsPagingPromptUnavailableException $missing) { continue; }
+                $playable[] = $rule;
+            }
+            if (count($playable) !== count($valid)) { $this->warnPagingPromptsDuringReload(false, $error); }
+            $valid = $playable;
+            if (!$valid) { return; }
+        }
+        foreach ($valid as $rule) {
+            $number = $rule['dial_extension'];
             $ext->add('sls-trigger-panic',(string)$number,'',new \ext_setvar('AGISIGHUP','no'));
             $ext->add('sls-trigger-panic',(string)$number,'',new \extension('AGI('.self::RUNTIME_DIR.'/sls_mass_notify_panic.php)'));
             $ext->add('sls-trigger-panic',(string)$number,'',new \ext_hangup());

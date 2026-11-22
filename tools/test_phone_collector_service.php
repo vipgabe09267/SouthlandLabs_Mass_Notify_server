@@ -8,6 +8,7 @@ class PhoneServiceFixture {
 	use \FreePBX\modules\SlsPhoneEventService { getPhoneEventCollectorHealth as private runtimeCollectorHealth; }
 	const PHONE_EVENT_SERVICE_FILE = SLS_PHONE_SERVICE_FIXTURE . '/sls-mass-notify-phone-events.service';
 	const RUNTIME_DIR = SLS_PHONE_SERVICE_FIXTURE;
+	const PLUGIN_DATA_DIR = SLS_PHONE_SERVICE_FIXTURE;
 	public $active = false;
 	public $enabled = false;
 	public $fail = '';
@@ -60,6 +61,29 @@ try {
 	$oldErrorLog = ini_get('error_log');
 	ini_set('error_log', $directory . '/reload-warnings.log');
 	$fixture = new PhoneServiceFixture();
+	$displayPath = $directory . '/phone-collector-display.json';
+	$display = ['schema' => 1, 'boot_id' => trim(file_get_contents('/proc/sys/kernel/random/boot_id')),
+		'connected' => true, 'heartbeat_tick' => hrtime(true) / 1e9, 'updated_at' => time(),
+		'active_batches' => 0, 'reserved_contacts' => 0];
+	file_put_contents($displayPath, json_encode($display));
+	chgrp($displayPath, posix_getpwnam('asterisk')['gid']);
+	chmod($displayPath, 0640);
+	serviceAssert($fixture->getPhoneEventCollectorDisplayHealth()['ok'], 'Fresh connected display cache was rejected.');
+	foreach ([
+		[['connected' => false], 'phone_event_collector_disconnected'],
+		[['connected' => false, 'heartbeat_tick' => 0], 'phone_event_collector_disconnected'],
+		[['connected' => 'false'], 'phone_collector_health_invalid'],
+		[['connected' => 0], 'phone_collector_health_invalid'],
+		[['connected' => false, 'updated_at' => -1], 'phone_collector_health_invalid'],
+		[['connected' => false, 'active_batches' => -1], 'phone_collector_health_invalid'],
+		[['connected' => false, 'boot_id' => 'another-boot'], 'phone_collector_health_invalid'],
+		[['heartbeat_tick' => 0], 'phone_event_collector_stale'],
+	] as [$change, $expectedCode]) {
+		file_put_contents($displayPath, json_encode(array_replace($display, $change)));
+		$health = $fixture->getPhoneEventCollectorDisplayHealth();
+		serviceAssert(!$health['ok'] && $health['failure_code'] === $expectedCode,
+			'Collector display evidence returned ' . $health['failure_code'] . ' instead of ' . $expectedCode);
+	}
 	// Model FreePBX's actual ordering: Manager::add_manager updates its DB,
 	// install() runs before genConfig/writeConfig and the Asterisk reload.
 	$fixture->ami = false;

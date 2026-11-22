@@ -3,6 +3,8 @@
 
 import json
 import os
+import pwd
+import stat
 from pathlib import Path
 import re
 import subprocess
@@ -50,6 +52,10 @@ class InstallerProbeStorage(unittest.TestCase):
         environment.update(overrides)
         prefix = r'''
 source "$1"
+# Native Apache authority is a separate, real-parser fixture. This suite
+# exercises response allocation/status/redaction using inert transports.
+capture_local_web_probe_authority() { :; }
+authenticated_local_web_probe_program() { printf "%s" "namespace FreePBX\\modules;"; }
 /usr/bin/env() {
   [[ "${1:-}" = -i ]] || return 96
   shift
@@ -110,8 +116,31 @@ runuser() {
   local fixture_runtime_account_entered=1
   if [[ "${1:-}" = /usr/bin/env ]]; then "$@"; else fixture_runtime_command "$@"; fi
 }
+# These tests exercise temporary output, protocol validation and redaction.
+# Substitute the native account boundary before its external Python supervisor;
+# process/lease/deadline and real account transitions have separate fixtures.
+sls_runtime_account() {
+  [[ "${1:-}" = bounded || "${1:-}" = supervised ]] || return 96
+  shift
+  runuser -u asterisk -- "$@"
+}
 fixture_runtime_command() {
-  if [[ "$*" == '/usr/bin/timeout 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --ami-health-json' ]]; then
+  [[ "${fixture_runtime_account_entered:-0}" = 1 ]] || return 96
+  if [[ "$#" -eq 9 && "$1 $2 $3 $4 $5 $6" == '/usr/bin/timeout --signal=TERM --kill-after=2 30 /usr/bin/php -r' ]]; then
+    printf 'http:%s\n' "$8" >>"$FIXTURE_ROOT/trace"
+    if [[ "${FAKE_FRAME:-}" == oversized ]]; then
+      /usr/bin/python3 -I -c 'import sys;sys.stdout.buffer.write(b"200\n"+b"x"*262145)'
+    else
+      printf '%s\nprivate response body\n' "$FAKE_HTTP"
+    fi
+    return
+  fi
+  if [[ "$#" -eq 7 && "$1 $2 $3 $4 $5 $6" == '/usr/bin/timeout --signal=TERM --kill-after=2 60 /usr/bin/php -r' ]]; then
+    # This storage/status fixture substitutes only the bounded PHP execution
+    # boundary. The independent deadline fixture executes real GNU timeout.
+    shift 4
+  fi
+  if [[ "$*" == '/usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/python3 /usr/local/bin/sls_mass_notify/sls_notify.py --ami-health-json' ]]; then
     # The real account wrapper now puts timeout behind absolute runuser.
     # Dispatch only this exact read-only AMI probe to the inert timeout double.
     "$@"
@@ -122,22 +151,7 @@ fixture_runtime_command() {
     return 95
   fi
 }
-curl() {
-  local output=""
-  while [ "$#" -gt 0 ]; do
-    if [ "$1" = "-o" ]; then
-      output="$2"
-      shift 2
-    else
-      shift
-    fi
-  done
-  [[ "$output" == "$FIXTURE_ROOT"/probe.*/response.out ]] || return 93
-  [ "$(stat -c '%a' "$(dirname "$output")")" = "700" ] || return 94
-  printf 'private response body\n' >"$output"
-  printf 'http:%s\n' "$output" >>"$FIXTURE_ROOT/trace"
-  printf '%s' "$FAKE_HTTP"
-}
+
 '''
         result = subprocess.run(
             ["/bin/bash", "--noprofile", "--norc", "-c", prefix + body,
@@ -183,6 +197,8 @@ final class SlsLocalWebProbe {
         program = program.replace('/usr/local/bin/sls_mass_notify/sls_config_crypto.php',
                                   str(ROOT / 'slsmassnotifyserver/bin/sls_mass_notify/sls_config_crypto.php'))
         program = program.replace('/var/www/html/admin/modules/slsmassnotifyserver/LocalWebProbe.php', str(probe))
+        program = program.replace('/var/www/html/admin/modules/slsmassnotifyserver/api/sls-mass-notify/security.php',
+                                  str(ROOT / 'slsmassnotifyserver/api/sls-mass-notify/security.php'))
         setup = r'''
         $key = str_repeat("K", 32); $iv = str_repeat("I", 12); $tag = "";
         $cipher = openssl_encrypt("fixture-password", "aes-256-gcm", $key, OPENSSL_RAW_DATA, $iv, $tag);
@@ -291,7 +307,12 @@ final class SlsLocalWebProbe {
             self.assertEqual((status, calls), (expected, []))
 
     def test_desktop_polling_success_is_reported_without_false_sse_claim(self):
-        result = self.run_helper('php() { return 4; }\nverify_desktop_transport\n')
+        result = self.run_helper('''fixture_runtime_command() {
+  [[ "$#" -eq 7 && "$1 $2 $3 $4 $5 $6" == '/usr/bin/timeout --signal=TERM --kill-after=2 60 /usr/bin/php -r' ]] || return 95
+  return 4
+}
+verify_desktop_transport
+''')
         self.assertEqual(result.returncode, 0)
         self.assertIn('JSON polling authentication and live cursor baseline verified', result.stdout)
         self.assertNotIn('live SSE authentication handshake verified', result.stdout)
@@ -350,6 +371,15 @@ verify_ami_with_repair
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("/api/sipnotify/desktop, got 500", result.stdout)
         self.assertNotIn("private response body", result.stdout + result.stderr + self.log.read_text())
+
+    def test_overflow_and_malformed_response_frame_cannot_certify_an_api_route(self):
+        for mode, code in (('oversized', '200'), ('ordinary', '200x')):
+            with self.subTest(mode=mode):
+                result = self.run_helper("verify_local_api_route /api/sls-mass-notify/ '^200$' '200' 'Status API'",
+                                         FAKE_FRAME=mode, FAKE_HTTP=code)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('got 000', result.stdout)
+                self.assertNotIn('private response body', result.stdout + result.stderr + self.log.read_text())
 
     def test_all_helpers_stop_without_probes_if_temp_allocation_fails(self):
         for command in (
@@ -416,6 +446,96 @@ identify() { printf '480 272 8 sRGB None'; }
         media = SOURCE.split('  media_probe="', 1)[1].split(render_call, 1)[0]
         self.assertIn('media_fetch="$(mktemp "$INSTALL_TEMP_ROOT/sls-mass-notify-render-fetch.XXXXXX")"', media)
         self.assertNotRegex(media, r'rm[^\n]*\$media_fetch')
+
+
+class NativeWeatherProbeStorage(unittest.TestCase):
+    def setUp(self):
+        if os.environ.get('SLS_TEST_NAMESPACE') != 'entered' or any(
+            os.environ.get('SLS_TEST_PARENT_' + label + '_NS') in
+            (None, '', os.readlink('/proc/self/ns/' + kind))
+            for label, kind in [('MOUNT', 'mnt'), ('NET', 'net'), ('PID', 'pid')]
+        ):
+            self.fail('Real native-user fixtures require the private isolation wrapper')
+        self.account = pwd.getpwnam('asterisk')
+        self.temporary = tempfile.TemporaryDirectory(prefix='sls-native-weather-probe-', dir='/tmp')
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+        self.base.chmod(0o755)
+        self.spool = self.base/'private-installer-spool'
+        self.spool.mkdir(mode=0o710)
+        os.chown(self.spool, 0, self.account.pw_gid)
+        self.spool.chmod(0o710)
+        self.log = self.base/'installer.log'
+        self.log.touch(mode=0o600)
+
+    def native_shell(self, body):
+        harness = r'''
+source "$1"
+INSTALL_TEMP_ROOT="$2"; export TMPDIR="$INSTALL_TEMP_ROOT"
+LOG_FILE="$3"; INSTALL_LOG_OUTPUT="$LOG_FILE"
+'''
+        return subprocess.run(['/bin/bash', '-c', harness + body, 'fixture', str(INSTALLER),
+                               str(self.spool), str(self.log)], cwd='/',
+                              capture_output=True, text=True, timeout=25)
+
+    def test_execute_only_spool_allows_kernel_read_but_protected_reader_refuses(self):
+        config = self.spool/'disabled.config'
+        config.write_text('{"enabled":"0","xweather":{"enabled":"0"}}\n')
+        os.chown(config, self.account.pw_uid, self.account.pw_gid)
+        config.chmod(0o640)
+        kernel = self.native_shell(r'''
+sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 5 /usr/bin/test -r "$INSTALL_TEMP_ROOT/disabled.config"
+''')
+        self.assertEqual(kernel.returncode, 0, kernel.stdout + kernel.stderr)
+        actual = self.native_shell(r'''
+sls_supervised_as_asterisk /usr/bin/timeout --signal=TERM --kill-after=2 15 /usr/bin/env \
+ CONFIG_FILE="$INSTALL_TEMP_ROOT/disabled.config" DATA_DIR="$INSTALL_TEMP_ROOT" \
+ LOG="$INSTALL_TEMP_ROOT/weather.log" RUNTIME_DIR=/usr/local/bin/sls_mass_notify \
+ /usr/local/bin/sls_mass_notify/sls_mass_notify_weather_poll.sh
+''')
+        self.assertNotEqual(actual.returncode, 0)
+        self.assertIn('Weather queue failed: ConfigCryptoError', actual.stdout + actual.stderr)
+        self.assertEqual(sorted(p.name for p in self.spool.iterdir()), ['disabled.config'])
+        self.assertEqual(stat.S_IMODE(self.spool.stat().st_mode), 0o710)
+
+    def test_weather_probe_refuses_unsafe_temporary_parent_without_changing_it(self):
+        self.assertTrue("<<'PYSLSWEATHERPROBE'" in SOURCE,
+                      'The runtime-readable weather probe needs its own guarded scratch creator')
+        code = SOURCE.split("<<'PYSLSWEATHERPROBE'\n", 1)[1].split('\nPYSLSWEATHERPROBE', 1)[0]
+        target = self.base/'temporary-parent'
+        target.mkdir(mode=0o1777); target.chmod(0o1777)
+        sentinel = target/'preserved'; sentinel.write_text('preserve')
+        aliases = self.base/'temporary-alias'; aliases.symlink_to(target, target_is_directory=True)
+        for label, path, mode, owner in (
+            ('not-sticky', target, 0o777, (0, 0)),
+            ('native-owned', target, 0o1777, (self.account.pw_uid, self.account.pw_gid)),
+            ('symlink', aliases, 0o1777, (0, 0)),
+        ):
+            with self.subTest(label=label):
+                os.chown(target, *owner); target.chmod(mode)
+                before = target.lstat()
+                fixture = code.replace("'/tmp'", repr(str(path)))
+                actual = subprocess.run(['/usr/bin/python3', '-I', '-c', fixture],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(actual.returncode, 0)
+                after = target.lstat()
+                self.assertEqual((after.st_ino, after.st_uid, after.st_gid, after.st_mode),
+                                 (before.st_ino, before.st_uid, before.st_gid, before.st_mode))
+                self.assertEqual(sentinel.read_text(), 'preserve')
+                self.assertEqual(sorted(x.name for x in target.iterdir()), ['preserved'])
+        os.chown(target, 0, 0)
+
+    def test_disabled_weather_probe_succeeds_with_private_installer_spool(self):
+        block = SOURCE.split('  scheduler_probe="', 1)[1].split('  if [ ! -x /usr/sbin/sendmail ]; then', 1)[0]
+        block = '  scheduler_probe="' + block
+        before = self.spool.stat()
+        actual = self.native_shell(block)
+        self.assertEqual(actual.returncode, 0, actual.stdout + actual.stderr)
+        self.assertNotIn('ConfigCryptoError', actual.stdout + actual.stderr)
+        after = self.spool.stat()
+        self.assertEqual((after.st_uid, after.st_gid, stat.S_IMODE(after.st_mode)),
+                         (before.st_uid, before.st_gid, 0o710))
+        self.assertEqual(list(self.spool.iterdir()), [])
 
 
 if __name__ == "__main__":

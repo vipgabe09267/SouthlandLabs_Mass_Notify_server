@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.2.0-beta — unpublished development
+
+This candidate includes installer, delivery-health and Weather fixes. It is undergoing private qualification. The published prerelease remains 0.1.9-beta.
+
+- Stopping the phone collector records the disconnect immediately and preserves closed phone history. The dashboard shows when the collector has disconnected.
+- Framework updates selected in Module Admin show the minimum and tested Framework versions before confirmation. Mass Notify uses FreePBX’s native menu registration.
+- Uninstall supports PBXs that store their managed AMI account in a file and omit the optional FreePBX Manager database table.
+- Restricted shell and JavaScript actions run with Debian 12’s packaged bubblewrap and retain network, filesystem and privilege isolation.
+- An upgrade preserves the numeric FreePBX Manager ID of an existing SLL AMI account. The installer verifies the account and its loopback access rules before making a change.
+- Saving Weather settings with zero NOAA zones retains the saved quiet-hours schedule and critical-event bypasses. This also applies when removing the last zone.
+- FreePBX Apply Config prepares paging and panic audio under the Asterisk account, including when an administrator runs `fwconsole reload` as root. A busy renderer or exhausted media volume keeps affected settings staged and allows unrelated extensions to reload. Panic-only configurations prepare only the prompts those shortcuts use.
+- Run the disabled Weather scheduler check in a guarded native-readable runtime scratch directory, preserving private installer scratch permissions and protected configuration checks.
+- Reserve complete installation scratch before preparing files and support a fixed protected spool workspace on partitioned hosts. Keep runtime audio, persistent-target, inode and signature checks intact; preserve unknown temporary contents.
+- Distinguish previous-release source authority from retained settings, keys, history and inactive generations after rollback. At the prepared transaction, exclude only proven absent previous-release copies and exact current archive/bootstrap/approval-source roles already durably resident; unknown or incomplete evidence keeps conservative reservations. Operational data, recovery snapshots, voice replacement space and inode allowances stay reserved.
+- Account for complete authenticated upgrade sources and signed stock packages already resident at the prepared checkpoint. Recheck native versions and hash-bound cache roles before publication; preserve new trust-generation, prior-static recovery, operational and inode reserves.
+- Validate an unchanged pinned Piper environment through one protected, clean native-user check before excluding rebuild space. Re-admit full replacement before stage writes, count directory/alias inodes, and account for recovery-destination fragments and missing-plus-repair voice peaks.
+- Use persistent installer scratch when both standard temporary directories are volatile, while keeping runtime audio workspace requirements separate.
+- Check the actual corrected recovery carrier's byte and inode requirements before creating it in an existing transaction. Match its private installer snapshot and bootstrap to the authenticated release and preserve original evidence on refusal.
+- Check operating capacity in Doctor so an installed PBX can remain healthy when another installation's workspace cannot fit. Preserve full installer admission and genuine runtime storage, permission, CPU, RAM and timeout failures.
+- Distinguish Asterisk servers from remote consoles across runtime and provider checks; qualify the effective PBX PHP route and its service user/group.
+- Preserve monotonic MFA counters through recovery and run configuration restoration/profile transforms inside the process holding the real settings lease.
+- Reclaim unused PHP allocator caches before decoding large retained journals. Preserve full history and strict JSON validation; the 17,000-record reader remains within its 64 MiB test limit.
+- Preserve unrelated shared PBX edits, native recording IDs/audio and independent backup selections during rollback or removal.
+- Handle supported native fresh Framework layouts and signed inventory comments while preserving exact source checks and unknown-change refusals.
+- Recognize the unchanged Framework init source file left by the vendor source installer. Keep strict byte and permission checks and preserve earlier reviewed inventories.
+- Make authenticated intermediate publication retryable, retain failed signature beforeimages, and support authenticated scripts on noexec scratch/state.
+- Repair stale Piper console entry points and retained private build-evidence accounting; reserve archive/bootstrap entry headroom before extraction.
+- Enforce publisher rejection in conditional shell paths and preserve retained publisher policy during reinstall.
+- Keep native helpers fenced after coordinator death, including interrupted root waiters; native PHP receives no worker-lease descriptors.
+- Check each served FPM binary's stable patch-level security floor before mutation, and discover mixed handlers without unrelated virtual-host or directory false rejections.
+- Fix API and generated-media verification on stock Debian Apache configurations while retaining source-view and remote-handler checks.
+- Recognize a proven sole unnamed Apache virtual host when its inferred name differs from the saved PBX hostname. Preserve named-host checks, reject ambiguous bindings, and point failed media checks to the protected installer log.
+- Check selected optional offline voice pairs and require authenticated Framework/Dashboard packages; expose exact target-version requirements separately from supplied-package verification.
+- Retry delivery-inventory snapshots interrupted by normal writers, separate external, Weather and audit inspection diagnostics, and require a fresh sustained observation before emailing about transient contention. Corrupt, unsafe and persistently unreadable state remains a fault.
+- Extend retained worker-lock ownership to standalone Piper preparation and maintenance; supervise native child work without giving it the lock descriptors.
+- Carry root-approved publisher overlap/revocation through bootstrap and candidate staging. Add explicit, time-bounded review for exact expired retained releases while keeping candidate expiration and key revocation checks.
+- Resume exact partial Dashboard/Framework removal from protected before/after inventories without approving changed native files or requiring the already-removed SLL tree.
+- Bound local HTTP probes across the entire response, including slow headers and body bytes, while preserving loopback routing and credential authority.
+- Give root CLI diagnostics bounded time for signed inventories, collector readiness and the full storage scan. Retain short web deadlines, count probe transit against heartbeat freshness, and preserve genuine timeout failures.
+- Bound uninstall Asterisk commands, including the initial uptime check, so a stalled control socket cannot indefinitely block removal.
+- Bound complete native PBX operations and account transitions, retain independent root supervision and completion evidence across interrupted waiters, and retire failed hook trees before releasing worker locks. Cap manual Weather pickup probes to the remaining timeout.
+- Record owned AMI names before removal and distinguish verified absence, a stopped daemon and unverified runtime cleanup. Retained read-only checks remain available after purge or interrupted removal.
+- Match the announcement widget to native Dashboard card sizing and styling; adapt its controls to the card width on desktop and mobile.
+- Keep FreePBX Apply Config running when a selected PJSIP extension or IVR has been removed. Withhold the affected SLL paging menu or panic shortcut, defer stale staged SLL changes, preserve active/staged settings, and log an actionable warning. Explicit Paging/Trigger saves and direct SLL apply remain strict.
+- Preserve an unchanged selected legacy paging audience and its saved extension IDs through unrelated Weather, General, and other settings saves after a phone is deleted. Require a matching protected source; never recreate absent groups or accept changed stale references.
+- Fix Weather form saves from 0.1.9 by decoding checkbox sentinels and critical-event text before strict validation. Unchecked destinations stay empty, removed groups stay removed, and malformed or duplicate destination IDs still refuse.
+- Keep explicit image-format failures visible for Weather phone delivery and record the actual payload type and media transport without exposing URLs or credentials.
+
+Qualification applies to the tested platform profiles. Physical handset delivery requires a device test.
+
 ## 0.1.9-beta — published reserved-tag correction, 2026-11-04
 
 The software remains `0.1.9-beta`, now published at immutable reserved tag `release-0.1.9-beta`. The uppercase `V0.1.9-beta` and v0.1.10-beta releases remain withdrawn. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. The immutable tag and signed package retain their prepublication documentation snapshot. This published-status update belongs to a separate main documentation commit; it changes no runtime or release bytes and does not move the tag.

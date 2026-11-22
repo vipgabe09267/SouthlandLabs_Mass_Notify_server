@@ -34,6 +34,18 @@ VM=load('vm_fixture',ROOT/'tools/qualify_installer_vm.py')
 
 
 class Doctor(unittest.TestCase):
+    def assert_process_retired(self, pid):
+        state = Path('/proc') / str(pid) / 'stat'
+        for _ in range(30):
+            try:
+                process_state = state.read_text().rsplit(')', 1)[1].split()[0]
+            except (FileNotFoundError, ProcessLookupError):
+                return
+            if process_state == 'Z':
+                return
+            time.sleep(.01)
+        self.fail(f'Diagnostic child {pid} survived its deadline')
+
     def test_service_writable_diagnostic_dependency_is_refused_before_parsing(self):
         with tempfile.TemporaryDirectory(prefix='sls-doctor-source-',dir='/run') as temporary:
             folder=Path(temporary)
@@ -111,6 +123,14 @@ class Doctor(unittest.TestCase):
             self.assertTrue(value['available']);self.assertTrue(value['access_limited']);self.assertFalse(value['authenticated'])
         with patch.object(DOCTOR.http.client,'HTTPConnection',side_effect=AssertionError('External connection attempted')):
             self.assertFalse(DOCTOR.freepbx_gui_probe([('http','192.0.2.1',80,'pbx.example.test')])['available'])
+    def test_unrelated_html_never_masks_a_later_native_loader_failure(self):
+        unrelated=self.php_server(b'<!doctype html><html><body>unrelated hosted site</body></html>')
+        loader=self.php_server(b'<html>Script error: the ionCube Loader for PHP needs to be installed.</html>')
+        value=DOCTOR.freepbx_gui_probe(unrelated+loader)
+        self.assertFalse(value['ok'])
+        self.assertEqual(value['failure_code'],'freepbx_vendor_loader_unavailable')
+        valid=self.php_server(b'<!doctype html><html><form id="loginform"></form></html>')
+        self.assertTrue(DOCTOR.freepbx_gui_probe(unrelated+valid)['ok'])
     def test_freepbx_gui_probe_has_an_absolute_slow_header_deadline(self):
         started=time.monotonic();value=DOCTOR.freepbx_gui_probe(self.php_server({},slow=True),.15)
         self.assertFalse(value['ok']);self.assertLess(time.monotonic()-started,.6)
@@ -153,6 +173,145 @@ class Doctor(unittest.TestCase):
             self.assertTrue(DOCTOR.resource_probe(25,25,'lite')['ok'])
         self.assertEqual(command.call_args.args[0][:6],
                          ['/usr/sbin/runuser','-u','asterisk','--','/usr/bin/python3','-I'])
+
+    def test_operational_resource_health_does_not_require_another_installation_workspace(self):
+        # Actual committed ISO17 observation: native CPU/RAM passed; routine
+        # runtime headroom fits, while the hypothetical install forecast does
+        # not fit /var, /usr/local or /tmp. No volume or reserve is changed.
+        def probe(arguments, timeout):
+            mode = arguments[arguments.index('--mode') + 1]
+            if mode == 'runtime':
+                rows = [('/var', 1237188608, 162529280),
+                        ('/tmp', 394905600, 231266304)]
+            else:
+                rows = [('/var', 1237204992, 2129610752),
+                        ('/usr/local', 181364736, 291119104),
+                        ('/tmp', 394336256, 1135976448)]
+            fits = all(actual >= required for unused, actual, required in rows)
+            value = {'schema': 1, 'deployment_profile': 'standard',
+                     'requirements': {'storage': {'mode': mode}},
+                     'resource_checks': {'cpu': {'ok': True}, 'memory': {'ok': True},
+                         'storage': {'ok': fits, 'filesystems': [
+                             {'paths': [path], 'actual': actual, 'required': required}
+                             for path, actual, required in rows]}}}
+            return (0 if fits else 2), json.dumps(value)
+        for budget in ('quick', 'deep'):
+            with self.subTest(budget=budget), \
+                 patch.object(DOCTOR, 'protected', return_value=True), \
+                 patch.object(DOCTOR.os, 'geteuid', return_value=0), \
+                 patch.object(DOCTOR, 'command', side_effect=probe):
+                value = DOCTOR.resource_probe(25, 25, 'standard', budget=budget)
+            self.assertTrue(value['ok'], 'Installed health incorrectly requires future installation workspace')
+            self.assertEqual(value['allocation']['requirements']['storage']['mode'], 'runtime')
+
+    def test_operational_capacity_still_fails_real_limits_unreadable_probes_and_timeouts(self):
+        for failed in ('cpu', 'memory', 'storage', 'temporary'):
+            payload = {'schema': 1, 'deployment_profile': 'standard',
+                       'requirements': {'storage': {'mode': 'runtime'}},
+                       'resource_checks': {name: {'ok': name != failed}
+                           for name in ('cpu', 'memory', 'storage', 'temporary')}}
+            with self.subTest(failed=failed), \
+                 patch.object(DOCTOR, 'protected', return_value=True), \
+                 patch.object(DOCTOR, 'command', return_value=(2, json.dumps(payload))):
+                self.assertFalse(DOCTOR.resource_probe(25, 25)['ok'])
+        for status, body, expected in ((124, '', 'resource_probe_timeout'),
+                                       (2, 'not JSON', 'resource_probe_invalid')):
+            with self.subTest(status=status), \
+                 patch.object(DOCTOR, 'protected', return_value=True), \
+                 patch.object(DOCTOR, 'command', return_value=(status, body)):
+                self.assertEqual(DOCTOR.resource_probe(25, 25)['failure_code'], expected)
+        with patch.object(DOCTOR, 'protected', return_value=False), \
+             patch.object(DOCTOR, 'command', side_effect=AssertionError('Unsafe helper executed')):
+            self.assertEqual(DOCTOR.resource_probe(25, 25)['failure_code'], 'resource_helper_unsafe_or_missing')
+
+    def test_root_cli_deep_budget_is_fixed_and_quick_report_budget_stays_five_seconds(self):
+        self.assertTrue(callable(getattr(DOCTOR,'probe_timeouts',None)),
+                        'Root CLI diagnostics need a separate fixed budget from the web report')
+        with patch.object(DOCTOR.os,'geteuid',return_value=0), \
+             patch.dict(os.environ,{'SLS_DOCTOR_TIMEOUT':'999999','SLS_DIAGNOSTIC_BUDGET':'deep'}):
+            self.assertEqual(DOCTOR.probe_timeouts('quick'),(5,5))
+            self.assertEqual(DOCTOR.probe_timeouts('deep'),(15,18))
+            for invalid in ('other','DEEP','deep\n',None,True,99):
+                with self.subTest(invalid=invalid),self.assertRaises(ValueError):DOCTOR.probe_timeouts(invalid)
+        with patch.object(DOCTOR.os,'geteuid',return_value=1000):
+            self.assertEqual(DOCTOR.probe_timeouts('quick'),(5,5))
+            with self.assertRaises(ValueError):DOCTOR.probe_timeouts('deep')
+
+    def test_cli_main_selects_deep_only_as_root_without_turning_failure_into_success(self):
+        for uid,budget in ((0,'deep'),(1000,'quick')):
+            with self.subTest(uid=uid),patch.object(DOCTOR.os,'geteuid',return_value=uid), \
+                 patch.object(DOCTOR.sys,'argv',['sls_install_doctor.py','--json']), \
+                 patch.object(DOCTOR,'report',return_value={'ok':False}) as report, \
+                 patch('builtins.print'):
+                self.assertEqual(DOCTOR.main(),1)
+                report.assert_called_once_with(25,25,None,budget=budget)
+
+    def test_report_api_defaults_to_quick_and_nonroot_cannot_start_deep_probes(self):
+        for arguments,budget in (({},'quick'),({'budget':'deep'},'deep')):
+            with self.subTest(budget=budget),patch.object(DOCTOR.os,'geteuid',return_value=0), \
+                 patch.object(DOCTOR,'command',return_value=(0,'active')), \
+                 patch.object(DOCTOR,'served_php_local',return_value={'ok':False}), \
+                 patch.object(DOCTOR,'freepbx_gui_local',return_value={'ok':False}), \
+                 patch.object(DOCTOR,'collector_probe',return_value={'ok':False}) as collector, \
+                 patch.object(DOCTOR,'release_probe',return_value={'ok':False}) as release, \
+                 patch.object(DOCTOR,'resource_probe',return_value={'ok':False}) as resource:
+                self.assertFalse(DOCTOR.report(**arguments)['ok'])
+                release.assert_called_once_with(budget=budget)
+                resource.assert_called_once_with(25,25,None,budget=budget)
+                collector.assert_called_once_with(budget=budget)
+        with patch.object(DOCTOR.os,'geteuid',return_value=1000), \
+             patch.object(DOCTOR,'command',side_effect=AssertionError('No unauthorized deep query')):
+            with self.assertRaises(ValueError):DOCTOR.report(budget='deep')
+
+    def test_deep_probes_keep_native_identity_schemas_and_failures_with_larger_fixed_bounds(self):
+        resource={'schema':1,'deployment_profile':'lite','resource_checks':{}}
+        trust={'ok':True,'publisher_authenticated':True,'installed_inventory_matches':True,
+               'stock_inventories':{'framework':True,'dashboard':True},'version':'0.2.0-beta',
+               'package':'slsmassnotifyserver-0.2.0-beta.tgz','package_sha256':'a'*64,
+               'installer_sha256':'b'*64,'inventory_sha256':'c'*64}
+        with patch.object(DOCTOR.os,'geteuid',return_value=0),patch.object(DOCTOR,'protected',return_value=True):
+            for budget,trust_timeout,resource_timeout in [('quick',5,5),('deep',15,18)]:
+                with self.subTest(budget=budget),patch.object(DOCTOR,'command',return_value=(0,json.dumps(resource))) as command:
+                    self.assertTrue(DOCTOR.resource_probe(25,25,'lite',budget=budget)['ok'])
+                    self.assertEqual(command.call_args.args[1],resource_timeout)
+                    self.assertEqual(command.call_args.args[0][:4],['/usr/sbin/runuser','-u','asterisk','--'])
+                with patch.object(DOCTOR,'command',return_value=(0,json.dumps(trust))) as command:
+                    self.assertTrue(DOCTOR.release_probe(budget=budget)['ok'])
+                    self.assertEqual(command.call_args.args[1],trust_timeout)
+                with patch.object(DOCTOR,'command',return_value=(124,'')):
+                    self.assertEqual(DOCTOR.resource_probe(25,25,budget=budget)['failure_code'],'resource_probe_timeout')
+                    self.assertEqual(DOCTOR.release_probe(budget=budget)['failure_code'],'release_trust_probe_timeout')
+                with patch.object(DOCTOR,'command',return_value=(2,json.dumps(resource))):
+                    self.assertFalse(DOCTOR.resource_probe(25,25,budget=budget)['ok'])
+                with patch.object(DOCTOR,'command',return_value=(0,'{"schema":1}')):
+                    self.assertEqual(DOCTOR.resource_probe(25,25,budget=budget)['failure_code'],'resource_probe_invalid')
+
+    def test_timed_out_resource_helper_is_retired_and_never_reported_healthy_in_deep_mode(self):
+        account=pwd.getpwnam('asterisk')
+        with tempfile.TemporaryDirectory(dir='/run') as temporary:
+            root=Path(temporary);root.chmod(0o755);pidfile=root/'pid'
+            pidfile.touch();pidfile.chmod(0o600);os.chown(pidfile,account.pw_uid,account.pw_gid)
+            helper=root/'sls_resource_capacity.py'
+            helper.write_text('import os,time\nopen('+repr(str(pidfile))+',"w").write(str(os.getpid()))\ntime.sleep(20)\n')
+            helper.chmod(0o755)
+            with patch.object(DOCTOR,'RUNTIME',root),patch.object(DOCTOR,'probe_timeouts',return_value=(.2,.2)):
+                value=DOCTOR.resource_probe(25,25,budget='deep')
+            self.assertFalse(value['ok']);self.assertEqual(value['failure_code'],'resource_probe_timeout')
+            self.assert_process_retired(int(pidfile.read_text()))
+
+    def test_finite_resource_work_beyond_quick_deadline_can_complete_with_root_cli_budget(self):
+        payload={'schema':1,'deployment_profile':'lite','resource_checks':{},'requested_limit':25}
+        with tempfile.TemporaryDirectory(dir='/run') as temporary:
+            root=Path(temporary);root.chmod(0o755);helper=root/'sls_resource_capacity.py'
+            helper.write_text('import json,time\ntime.sleep(5.15)\nprint('+repr(json.dumps(payload))+')\n')
+            helper.chmod(0o755)
+            with patch.object(DOCTOR,'RUNTIME',root):
+                # The same finite child exceeds the original shared five-second
+                # ceiling. Its timeout is still a failure and must stop the child.
+                quick=DOCTOR.resource_probe(25,25,'lite')
+                self.assertFalse(quick['ok']);self.assertEqual(quick['failure_code'],'resource_probe_timeout')
+                deep=DOCTOR.resource_probe(25,25,'lite',budget='deep')
+                self.assertTrue(deep['ok']);self.assertEqual(deep['allocation']['deployment_profile'],'lite')
     def test_unprivileged_resource_probe_keeps_its_existing_account(self):
         payload={'schema':1,'deployment_profile':'lite','resource_checks':{}}
         with patch.object(DOCTOR,'protected',return_value=True), \
@@ -184,11 +343,15 @@ class Doctor(unittest.TestCase):
             def __init__(self):self.shutdowns=0;self.closes=0
             def shutdown(self,unused):self.shutdowns+=1
             def close(self):self.closes+=1
+            def settimeout(self,unused):pass
         class Response:
             def __init__(self,status,body=b''):self.status=status;self.body=body
             def read(self,unused):return self.body
-        class Connection:
-            def __init__(self,response):self.sock=Socket();self.response=response
+            def close(self):pass
+        class Connection(DOCTOR.web_readiness.LoopbackHTTP):
+            def __init__(self,response):
+                super().__init__('127.0.0.1',8001,.8,time.monotonic()+4)
+                self.sock=Socket();self._owned_sockets=[self.sock];self.response=response
             def connect(self):pass
             def request(self,*unused,**ignored):pass
             def getresponse(self):return self.response
@@ -199,15 +362,16 @@ class Doctor(unittest.TestCase):
             def start(self):pass
             def cancel(self):self.cancelled=True
         connections=[Connection(Response(404)),Connection(Response(200,payload))]
-        with patch.object(DOCTOR.http.client,'HTTPConnection',side_effect=connections),patch.object(DOCTOR.threading,'Timer',Timer):
+        with patch.object(DOCTOR.web_readiness,'LoopbackHTTP',side_effect=connections),patch.object(DOCTOR.threading,'Timer',Timer):
             value=DOCTOR.served_php_probe([
                 ('http','127.0.0.1',8001,'first.example.test'),
                 ('http','127.0.0.1',8002,'second.example.test'),
             ])
         self.assertTrue(value['ok'])
+        before=[(connection.sock.shutdowns,connection.sock.closes) for connection in connections]
         Timer.instances[0].callback()
-        self.assertEqual((connections[0].sock.shutdowns,connections[0].sock.closes),(1,1))
-        self.assertEqual((connections[1].sock.shutdowns,connections[1].sock.closes),(0,0))
+        self.assertEqual((connections[0].sock.shutdowns,connections[0].sock.closes),(before[0][0]+1,before[0][1]+1))
+        self.assertEqual((connections[1].sock.shutdowns,connections[1].sock.closes),before[1])
     def test_parsed_vhosts_change_headers_and_ports_without_public_resolution(self):
         targets=DOCTOR.served_php_targets('*:8443 pbx.example.test (/etc/apache2/pbx.conf:1)\n port 9443 namevhost secondary.example.test (/etc/apache2/secondary:1)\n[::]:8080 ipv6.example.test (/etc/apache2/ipv6:1)')
         self.assertEqual(targets[0],('https','127.0.0.1',8443,'pbx.example.test'))
@@ -223,11 +387,7 @@ class Doctor(unittest.TestCase):
             path=Path(name)/'child-pid'
             code='import os,time\nif os.fork():os._exit(0)\nopen('+repr(str(path))+',"w").write(str(os.getpid()))\ntime.sleep(20)'
             self.assertEqual(DOCTOR.command(['/usr/bin/python3','-I','-c',code],.2),(124,''))
-            child=int(path.read_text());state=Path('/proc')/str(child)/'stat'
-            for unused in range(30):
-                if not state.exists() or state.read_text().split()[2]=='Z':break
-                time.sleep(.01)
-            else:self.fail('Diagnostic descendant survived its deadline')
+            self.assert_process_retired(int(path.read_text()))
     def test_collector_probe_preserves_freshness_failures_and_excludes_arbitrary_detail(self):
         with patch.object(DOCTOR,'protected',return_value=True),patch.object(DOCTOR,'command',return_value=(0,json.dumps({'ok':True,'connected':True,'heartbeat_age_seconds':1.5,'active_batches':2,'reserved_contacts':3,'detail':'must-not-appear'}))):
             value=DOCTOR.collector_probe();self.assertTrue(value['ok']);self.assertNotIn('must-not-appear',json.dumps(value))
@@ -236,6 +396,144 @@ class Doctor(unittest.TestCase):
                 self.assertFalse(DOCTOR.collector_probe()['ok'])
         with patch.object(DOCTOR,'protected',return_value=True),patch.object(DOCTOR,'command',return_value=(1,json.dumps({'ok':False,'failure_code':'phone_event_collector_stale','detail':'must-not-appear'}))):
             value=DOCTOR.collector_probe();self.assertEqual(value['failure_code'],'phone_event_collector_stale');self.assertNotIn('detail',value)
+    def test_root_collector_probe_uses_deep_budget_without_extending_web_or_freshness(self):
+        health={'ok':True,'connected':True,'heartbeat_age_seconds':1.5,'active_batches':0,'reserved_contacts':0}
+        with patch.object(DOCTOR.os,'geteuid',return_value=0),patch.object(DOCTOR,'protected',return_value=True):
+            for budget,seconds in [('quick',2),('deep',15)]:
+                with self.subTest(budget=budget),patch.object(DOCTOR,'command',return_value=(0,json.dumps(health))) as command, \
+                     patch.object(DOCTOR.time,'monotonic',side_effect=[10,11]):
+                    value=DOCTOR.collector_probe(budget=budget)
+                    self.assertTrue(value['ok']);self.assertEqual(value['heartbeat_age_seconds'],2.5)
+                    self.assertEqual(command.call_args.args[1],seconds)
+                with patch.object(DOCTOR,'command',return_value=(124,'')):
+                    self.assertEqual(DOCTOR.collector_probe(budget=budget)['failure_code'],'phone_collector_probe_timeout')
+            with patch.object(DOCTOR,'command',return_value=(0,json.dumps(dict(health,heartbeat_age_seconds=14)))), \
+                 patch.object(DOCTOR.time,'monotonic',side_effect=[10,12]):
+                self.assertEqual(DOCTOR.collector_probe(budget='deep')['failure_code'],'phone_event_collector_stale')
+        with patch.object(DOCTOR.os,'geteuid',return_value=pwd.getpwnam('asterisk').pw_uid), \
+             patch.object(DOCTOR,'command',side_effect=AssertionError('No unauthorized deep probe')):
+            with self.assertRaises(ValueError):DOCTOR.collector_probe(budget='deep')
+    def test_finite_collector_work_beyond_quick_limit_completes_for_root_and_reaps_quick_child(self):
+        original=DOCTOR.command
+        prefix=['/usr/bin/env','-u','GITHUB_TOKEN','-u','GH_TOKEN','-u','SLS_MASS_NOTIFY_GITHUB_TOKEN','/usr/sbin/runuser','-u','asterisk','--']
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);pid=root/'pid';helper=root/'sls_phone_events.py'
+            health={'ok':True,'connected':True,'heartbeat_age_seconds':0.1,'active_batches':0,'reserved_contacts':0}
+            helper.write_text('import os,time\nfrom pathlib import Path\nPath('+repr(str(pid))+').write_text(str(os.getpid()))\ntime.sleep(2.15)\nprint('+repr(json.dumps(health))+')\n')
+            def dispatch(argv,seconds):
+                self.assertEqual(argv[:-4],prefix)
+                # Privilege-transition argv has a separate contract; this
+                # finite process tests the actual command deadline/retirement.
+                return original(argv[-4:],seconds)
+            with patch.object(DOCTOR.os,'geteuid',return_value=0),patch.object(DOCTOR,'RUNTIME',root), \
+                 patch.object(DOCTOR,'protected',return_value=True),patch.object(DOCTOR,'command',side_effect=dispatch):
+                self.assertEqual(DOCTOR.collector_probe()['failure_code'],'phone_collector_probe_timeout')
+                child=int(pid.read_text())
+                with self.assertRaises(ProcessLookupError):os.kill(child,0)
+                self.assertTrue(DOCTOR.collector_probe(budget='deep')['ok'])
+    def collector_report_with_finite_wait(self, age, *, resource_wait=0, state_wait=0, initial=None, refresh=None, native_probe=None, resource_effect=None, budget="deep"):
+        ready=threading.Event();calls=[];original_command=DOCTOR.command
+        health={'ok':True,'connected':True,'heartbeat_age_seconds':age,'active_batches':0,'reserved_contacts':0}
+        samples=[dict(health) if initial is None else initial,
+                 {'ok':False,'connected':False,'failure_code':'phone_event_collector_stale'} if refresh is None else refresh]
+        def collector(*,budget):
+            self.assertLess(len(calls),2,'A diagnostic must never loop over collector refreshes')
+            calls.append(budget)
+            value=native_probe(budget=budget) if native_probe else dict(samples[len(calls)-1])
+            ready.set()
+            return value
+        def resources(*args,**kwargs):
+            self.assertTrue(ready.wait(1),'Concurrent collector did not finish before the finite resource observation')
+            time.sleep(resource_wait)
+            if resource_effect:resource_effect()
+            return {'ok':True}
+        def state():
+            time.sleep(state_wait)
+            return {'ok':True,'unfinished':[],'unsafe_evidence':False,'latest_transaction':None,'last_failure':None,'root_required':False}
+        def command(args,*limits):
+            if native_probe and args[-1]=='--health':return original_command(args,*limits)
+            return (0,'Asterisk 20.18.2') if args[0]=='/usr/sbin/asterisk' else (0,'active')
+        versions={'framework':'17.0.33.2','dashboard':'17.0.5','slsmassnotifyserver':'0.2.0-beta'}
+        with patch.object(DOCTOR.os,'geteuid',return_value=0), \
+             patch.object(DOCTOR,'bounded',return_value=b'ID=debian\nVERSION_ID=12\n'), \
+             patch.object(DOCTOR,'module_version',side_effect=lambda path,name:versions[name]), \
+             patch.object(DOCTOR,'REQUIRED_PATHS',()),patch.object(DOCTOR,'command',side_effect=command), \
+             patch.object(DOCTOR,'served_php_local',return_value={'ok':True}), \
+             patch.object(DOCTOR,'freepbx_gui_local',return_value={'ok':True}), \
+             patch.object(DOCTOR,'collector_probe',side_effect=collector), \
+             patch.object(DOCTOR,'release_probe',return_value={'ok':True}), \
+             patch.object(DOCTOR,'resource_probe',side_effect=resources), \
+             patch.object(DOCTOR,'installation_state',side_effect=state):
+            value=DOCTOR.report(budget=budget)
+        row=next(item for item in value['checks'] if item['code']=='authenticated_collector')
+        self.assertTrue(all(item['ok'] for item in value['checks'] if item is not row))
+        self.assertEqual(len(value['checks']),16)
+        self.assertEqual([item['code'] for item in value['checks']].index('authenticated_collector'),12)
+        return value,row,calls
+
+    def test_report_cannot_publish_a_collector_sample_that_expired_while_other_probes_ran(self):
+        value,row,calls=self.collector_report_with_finite_wait(14.9,resource_wait=.25)
+        self.assertFalse(row['ok'],'A fast collector observation expired during the real concurrent wait but still passed')
+        self.assertEqual(row['observed']['failure_code'],'phone_event_collector_stale')
+        self.assertFalse(value['ok']);self.assertEqual(calls,['deep','deep'])
+
+    def test_report_rechecks_collector_freshness_after_late_recovery_evidence_inspection(self):
+        value,row,calls=self.collector_report_with_finite_wait(14.9,state_wait=.25)
+        self.assertFalse(row['ok'],'Late report composition emitted a stale authenticated collector PASS')
+        self.assertEqual(row['observed']['failure_code'],'phone_event_collector_stale')
+        self.assertFalse(value['ok']);self.assertEqual(calls,['deep','deep'])
+
+    def test_report_keeps_a_genuinely_fresh_collector_healthy_and_hides_private_timing(self):
+        value,row,calls=self.collector_report_with_finite_wait(.25,resource_wait=.25)
+        self.assertTrue(row['ok']);self.assertTrue(value['ok'])
+        self.assertGreaterEqual(row['observed']['heartbeat_age_seconds'],.4)
+        self.assertLessEqual(row['observed']['heartbeat_age_seconds'],15)
+        self.assertEqual(set(row['observed']),{'ok','connected','heartbeat_age_seconds','active_batches','reserved_contacts'})
+
+    def test_report_refreshes_only_an_initially_healthy_expired_observation(self):
+        fresh={'ok':True,'connected':True,'heartbeat_age_seconds':.1,'active_batches':0,'reserved_contacts':0}
+        for budget in ('quick','deep'):
+            with self.subTest(budget=budget):
+                value,row,calls=self.collector_report_with_finite_wait(14.9,resource_wait=.25,refresh=fresh,budget=budget)
+                self.assertTrue(value['ok']);self.assertTrue(row['ok'])
+                self.assertEqual(calls,[budget,budget])
+                self.assertEqual(set(row['observed']),set(fresh))
+
+    def test_report_failed_or_expired_refresh_never_reuses_the_old_pass(self):
+        for code in ('phone_event_collector_stale','phone_collector_health_invalid','phone_collector_probe_timeout'):
+            with self.subTest(code=code):
+                value,row,calls=self.collector_report_with_finite_wait(14.9,resource_wait=.25,
+                    refresh={'ok':False,'connected':False,'failure_code':code})
+                self.assertFalse(value['ok']);self.assertFalse(row['ok'])
+                self.assertEqual(row['observed']['failure_code'],code)
+                self.assertEqual(calls,['deep','deep'])
+        value,row,calls=self.collector_report_with_finite_wait(14.9,resource_wait=.25,
+            refresh={'ok':True,'connected':True,'heartbeat_age_seconds':15.0,'active_batches':0,'reserved_contacts':0})
+        self.assertFalse(row['ok']);self.assertEqual(calls,['deep','deep'])
+
+    def test_report_does_not_retry_or_promote_an_initial_collector_failure(self):
+        fresh={'ok':True,'connected':True,'heartbeat_age_seconds':.1,'active_batches':0,'reserved_contacts':0}
+        for code in ('phone_event_collector_stale','phone_collector_health_invalid','phone_collector_probe_timeout'):
+            with self.subTest(code=code):
+                value,row,calls=self.collector_report_with_finite_wait(0,resource_wait=.05,
+                    initial={'ok':False,'failure_code':code},refresh=fresh)
+                self.assertFalse(value['ok']);self.assertFalse(row['ok'])
+                self.assertEqual(row['observed']['failure_code'],code);self.assertEqual(calls,['deep'])
+
+    def test_report_observes_a_real_advancing_private_heartbeat_after_slow_resource_work(self):
+        actual_probe=DOCTOR.collector_probe
+        with tempfile.TemporaryDirectory(prefix='sls-report-heartbeat-',dir='/run') as name:
+            runtime=Path(name);runtime.chmod(0o755);heartbeat=runtime/'heartbeat'
+            heartbeat.write_text(str(time.time()-12));heartbeat.chmod(0o644)
+            helper=runtime/'sls_phone_events.py'
+            helper.write_text('import json,time,sys\nfrom pathlib import Path\nage=time.time()-float(Path(__file__).with_name("heartbeat").read_text())\nvalue={"ok":True,"connected":True,"heartbeat_age_seconds":age,"active_batches":0,"reserved_contacts":0} if age<=15 else {"ok":False,"failure_code":"phone_event_collector_stale"}\nprint(json.dumps(value));sys.exit(0 if value["ok"] else 1)\n');helper.chmod(0o644)
+            with patch.object(DOCTOR,'RUNTIME',runtime):
+                value,row,calls=self.collector_report_with_finite_wait(0,resource_wait=3.3,
+                    native_probe=actual_probe,resource_effect=lambda:heartbeat.write_text(str(time.time())))
+            self.assertTrue(value['ok']);self.assertTrue(row['ok']);self.assertEqual(calls,['deep','deep'])
+            self.assertLess(row['observed']['heartbeat_age_seconds'],15)
+            self.assertNotIn('_observed_at',json.dumps(value))
+
     def test_nonroot_trust_check_cannot_execute_protected_privileged_verification(self):
         with patch.object(DOCTOR.os,'geteuid',return_value=pwd.getpwnam('asterisk').pw_uid),patch.object(DOCTOR,'command',side_effect=AssertionError('Unexpected trust command')):
             self.assertEqual(DOCTOR.release_probe()['failure_code'],'release_trust_root_inspection_required')

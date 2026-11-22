@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import pwd
 import re
 import stat
 import shutil
@@ -389,7 +390,7 @@ def prepare_configuration_recovery(recovery, original_hash, active_snapshot, act
     recovery admission. No observed hash becomes blanket recovery authority.
     """
     try:
-        return _prepare_configuration_recovery(Path(recovery), original_hash, active_snapshot, active_path,
+        return _prepare_configuration_recovery(Path(recovery) if recovery else None, original_hash, active_snapshot, active_path,
                                                pending_state, pending_hash, pending_snapshot, pending_path)
     except TransactionError:
         raise
@@ -413,11 +414,38 @@ def _prepare_configuration_recovery(recovery, original_hash, active_snapshot, ac
     def live(path):
         if not path.exists() and not path.is_symlink(): return None
         return decoder()._read_protected(path, 16 * 1024 * 1024)
+    def established_active():
+        body = live(active_path)
+        if original_hash and body is None:
+            # Atomic settings publication never intentionally removes an
+            # established active file. Its loss may conceal newer consumed
+            # MFA counters, so an old snapshot cannot recreate that floor.
+            raise TransactionError('Established active settings disappeared; preserve snapshots and obtain independently verified current authentication state')
+        return body
     def digest(body): return hashlib.sha256(body).hexdigest() if body is not None else 'absent'
+    if recovery is None:
+        # A prepared journal can precede the operational snapshot directory.
+        # It grants only exact original-byte authority, never relative-path
+        # intentions or semantic MFA recovery from the caller's working tree.
+        if pending_state not in ('', 'present', 'absent'):
+            raise TransactionError('Invalid pending configuration state before operational recovery preparation')
+        active = established_active()
+        if digest(active) != (original_hash or 'absent'):
+            raise TransactionError('Central settings changed before operational recovery preparation; preserve the live settings')
+        if original_hash and digest(read(Path(active_snapshot), 16 * 1024 * 1024)) != original_hash:
+            raise TransactionError('Original active configuration snapshot changed')
+        if pending_state == 'present':
+            if (not SHA256.fullmatch(pending_hash) or digest(read(Path(pending_snapshot), 16 * 1024 * 1024)) != pending_hash
+                    or digest(live(Path(pending_path))) != pending_hash):
+                raise TransactionError('Pending settings changed before operational recovery preparation')
+        elif pending_state == 'absent' and live(Path(pending_path)) is not None:
+            raise TransactionError('New pending settings appeared before operational recovery preparation')
+        return {'active_snapshot': str(active_snapshot), 'active_sha256': original_hash or 'absent',
+                'pending_snapshot': str(pending_snapshot), 'pending_sha256': pending_hash if pending_state == 'present' else 'absent'}
     if pending_state == '':
         # Preparation can stop before a pending snapshot exists. It grants no
         # semantic merge authority and must retain the original strict check.
-        active = live(active_path)
+        active = established_active()
         assert_configuration_recoverable(recovery, original_hash, digest(active), '', '', 'absent')
         if original_hash and digest(read(Path(active_snapshot), 16 * 1024 * 1024)) != original_hash:
             raise TransactionError('Original active configuration snapshot changed')
@@ -426,7 +454,7 @@ def _prepare_configuration_recovery(recovery, original_hash, active_snapshot, ac
     pending_path = Path(pending_path)
     if active_path.parent != pending_path.parent:
         raise TransactionError('Pending configuration does not share the protected settings directory')
-    active, pending = live(active_path), live(pending_path)
+    active, pending = established_active(), live(pending_path)
     if pending_state not in ('present', 'absent') or pending_state == 'absent' and pending is not None:
         raise TransactionError('Pending configuration appeared or disappeared after the failed installation')
     fallback = {'active_snapshot': str(active_snapshot), 'active_sha256': original_hash or 'absent',
@@ -530,24 +558,116 @@ def _prepare_configuration_recovery(recovery, original_hash, active_snapshot, ac
     return result
 
 
-def state(path):
-    if not NAME.fullmatch(path.name): raise TransactionError('Invalid installer transaction identity')
-    try:
-        value = decode_json(read(path / 'transaction.json'))
-    except FileNotFoundError:
-        handle = directory(path)
-        try:
-            info = os.fstat(handle)
-            if stat.S_IMODE(info.st_mode) != 0o700 or os.listdir(handle):
-                raise TransactionError('Missing transaction metadata has nonempty or unsafe evidence; preserve it for review')
-            created = max(0, int(info.st_mtime))
-        finally:
-            os.close(handle)
-        # begin() cannot return to its caller before publishing the first
-        # record. An empty private directory grants no recovery authority.
-        return {'schema': 1, 'directory': str(path), 'phase': 'abandoned',
-                'created_at': created, 'updated_at': created, 'settings': {},
-                'empty_preparation': True}
+def restore_configuration_recovery(arguments, lease_check):
+    """Derive and publish both targets in the process owning their live leases.
+
+    A separate child must never perform these writes: if that lease owner dies,
+    no stale configuration writer may survive after another MFA login proceeds.
+    """
+    if (type(arguments) is not list or len(arguments) != 8 or any(type(value) is not str
+            or len(value) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            for value in arguments)):
+        raise TransactionError('Invalid bounded configuration recovery request')
+    lease_check()
+    targets = prepare_configuration_recovery(*arguments)
+    crypto_path = Path(__file__).with_name('sls_config_crypto.py')
+    crypto = types.ModuleType('keeper_configuration_crypto'); crypto.__file__ = str(crypto_path)
+    exec(compile(crypto_path.read_bytes(), str(crypto_path), 'exec'), crypto.__dict__)
+    account = pwd.getpwnam('asterisk')
+    for label, destination in (('active', arguments[3]), ('pending', arguments[7])):
+        snapshot, expected = targets[label + '_snapshot'], targets[label + '_sha256']
+        if not snapshot or expected == 'absent':
+            continue  # Original absence never authorizes deletion of live state.
+        body = read(Path(snapshot), 16 * 1024 * 1024)
+        if hashlib.sha256(body).hexdigest() != expected:
+            raise TransactionError('Configuration recovery target changed before publication')
+        path = Path(destination)
+        lease_check()
+        live = crypto._read_protected(path, 16 * 1024 * 1024) if path.exists() or path.is_symlink() else None
+        if live != body:
+            crypto._atomic_write(path, body, account.pw_uid, account.pw_gid)
+        lease_check()
+        if hashlib.sha256(crypto._read_protected(path, 16 * 1024 * 1024)).hexdigest() != expected:
+            raise TransactionError('Published configuration recovery target could not be verified')
+    return targets
+
+
+def transform_installer_configuration(arguments, lease_check):
+    """Apply only the fixed profile/branding changes while owning live leases."""
+    if (type(arguments) is not list or len(arguments) != 6 or any(type(value) is not str
+            or len(value) > 4096 or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            for value in arguments)):
+        raise TransactionError('Invalid bounded installer settings transformation')
+    action, filename, requested, pending, recovery, original_hash = arguments
+    if action not in ('profile', 'branding') or pending not in ('present', 'absent'):
+        raise TransactionError('Unknown installer settings transformation')
+    path = Path(filename)
+    lease_check()
+    immediate = path.parent / '.sls-immediate-settings-transaction.json'
+    if immediate.exists() or immediate.is_symlink():
+        raise TransactionError('An unresolved immediate-settings transaction prevents installer transformation')
+    pending_path = path.with_name('mass-notifications.pending.config')
+    if pending == 'absent' and (pending_path.exists() or pending_path.is_symlink()):
+        raise TransactionError('New pending settings appeared before installer transformation')
+    crypto_path = Path(__file__).with_name('sls_config_crypto.py')
+    crypto = types.ModuleType('keeper_transform_crypto'); crypto.__file__ = str(crypto_path)
+    exec(compile(crypto_path.read_bytes(), str(crypto_path), 'exec'), crypto.__dict__)
+    original = crypto._read_protected(path, 16 * 1024 * 1024)
+    settings = crypto.decode_config(original)
+    if type(settings) is not dict:
+        raise TransactionError('Installer transformation requires a settings object')
+    before = configuration_canonical(settings)
+    if action == 'profile':
+        current = settings.get('deployment_profile', 'standard')
+        if current not in ('standard', 'lite') or requested not in ('standard', 'lite'):
+            raise TransactionError('Invalid deployment profile')
+        if current != requested:
+            if pending == 'present':
+                raise TransactionError('Pending settings prevent deployment profile conversion')
+            if requested == 'lite':
+                if any(type(settings.get(key)) is dict and settings[key].get('enabled') in (True, '1', 1)
+                       for key in ('enterprise_labs', 'enterprise_identity')):
+                    raise TransactionError('Disable Enterprise Labs and enterprise SSO before converting to Lite')
+                desktops, phones = settings.get('desktop_client_limit', 25), settings.get('phone_device_limit', 25)
+                queue = settings.get('speech_queue_limit', 8)
+                if type(desktops) is not int or type(phones) is not int or desktops > 25 or phones > 25 or type(queue) is not int:
+                    raise TransactionError('Saved capacities do not permit Lite conversion')
+                settings['speech_synthesis_limit'] = 1
+                settings['speech_queue_limit'] = min(queue, 2)
+            if current == 'lite' and requested == 'standard':
+                for key in ('enterprise_labs', 'enterprise_identity'):
+                    if key in settings: settings[key]['enabled'] = False
+            settings['deployment_profile'] = requested
+    elif pending != 'present':
+        replacements = {
+            'mail_from_name': {'SLS Mass Notification System': 'SLL Mass Notify Server',
+                               'SLS Mass Notify System': 'SLL Mass Notify Server'},
+            'alert_email_subject': {'Southland Servers Group PBX: EAS alert triggered - {{event}}':
+                                   'Southland Labs PBX: EAS alert triggered - {{event}}'},
+            'test_email_subject': {'Southland Servers Mass Notifications Server: NWS test triggered':
+                                  'SLL Mass Notify Server: NWS test triggered',
+                                  'Southland Servers Group PBX: NWS test triggered':
+                                  'Southland Labs PBX: NWS test triggered'},
+        }
+        for field, mapping in replacements.items():
+            value = settings.get(field)
+            if type(value) is str and value in mapping: settings[field] = mapping[value]
+    changed = configuration_canonical(settings) != before
+    encoded = original
+    if changed:
+        encoded = crypto.encode_config(settings)
+        record_configuration_intent(recovery, original_hash, original, encoded)
+        account = pwd.getpwnam('asterisk')
+        lease_check()
+        crypto._atomic_write(path, encoded, account.pw_uid, account.pw_gid)
+        lease_check()
+        if configuration_canonical(crypto.read_config(path)) != configuration_canonical(settings):
+            raise TransactionError('Installer settings transformation could not be verified')
+    return {'changed': changed, 'profile': settings.get('deployment_profile', 'standard'),
+            'sha256': hashlib.sha256(encoded).hexdigest()}
+
+
+def validate_state(value, path):
     if (not isinstance(value, dict) or type(value.get('schema')) is not int or value.get('schema') != 1
             or value.get('phase') not in PHASES
             or value.get('directory') != str(path) or not isinstance(value.get('settings'), dict)
@@ -562,6 +682,119 @@ def state(path):
             or type(value.get('stage_at')) is not int or not value['created_at'] <= value['stage_at'] <= value['updated_at']):
         raise TransactionError('Invalid installer stage metadata')
     return value
+
+
+def empty_journal_temporary(path, names, marker=None):
+    """Bind only an unwritten first journal, never an executable afterimage."""
+    marker_keys = {'schema', 'directory', 'phase', 'created_at', 'updated_at',
+                   'settings', 'empty_preparation', 'empty_preparation_temporary'}
+    if marker is None:
+        if len(names) != 1 or not re.fullmatch(r'\.new-[a-f0-9]{24}', names[0]): return None
+        name = names[0]
+    else:
+        binding = marker.get('empty_preparation_temporary')
+        if (set(marker) != marker_keys or marker['phase'] != 'abandoned' or marker['settings'] != {}
+                or marker['empty_preparation'] is not True or not isinstance(binding, dict)
+                or not isinstance(binding.get('name'), str)
+                or not re.fullmatch(r'\.new-[a-f0-9]{24}', binding['name'])):
+            raise TransactionError('Invalid unwritten preparation marker; preserve it for review')
+        name = binding['name']
+        if set(names) not in ({name}, {name, 'transaction.json'}):
+            raise TransactionError('Unwritten preparation layout changed; preserve it for review')
+        if 'transaction.json' in names and validate_state(decode_json(read(path / 'transaction.json')), path) != marker:
+            raise TransactionError('Unwritten preparation marker changed; preserve it for review')
+    handle = directory(path)
+    fd = -1
+    try:
+        if stat.S_IMODE(os.fstat(handle).st_mode) != 0o700:
+            raise TransactionError('Unwritten preparation directory must be root-only')
+        named_before = os.stat(name, dir_fd=handle, follow_symlinks=False)
+        if (not stat.S_ISREG(named_before.st_mode) or named_before.st_uid != 0 or named_before.st_nlink != 1
+                or stat.S_IMODE(named_before.st_mode) != 0o600):
+            raise TransactionError('Unsafe unwritten journal evidence; preserve it for review')
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=handle)
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600):
+            raise TransactionError('Unsafe unwritten journal evidence; preserve it for review')
+        if before.st_size != 0:
+            if marker is None: return None
+            raise TransactionError('Unwritten journal evidence now has data; preserve it for review')
+        raw = os.read(fd, 1)
+        after = os.fstat(fd); named = os.stat(name, dir_fd=handle, follow_symlinks=False)
+        def identity(info):
+            return {'name': name, 'device': info.st_dev, 'inode': info.st_ino, 'uid': info.st_uid,
+                    'gid': info.st_gid, 'mode': stat.S_IMODE(info.st_mode), 'nlink': info.st_nlink,
+                    'size': info.st_size, 'mtime_ns': info.st_mtime_ns, 'ctime_ns': info.st_ctime_ns}
+        result = identity(before)
+        if (raw or result != identity(named_before) or result != identity(after) or result != identity(named)
+                or set(os.listdir(handle)) != set(names)):
+            raise TransactionError('Unwritten journal evidence changed; preserve it for review')
+        if marker is not None and (set(binding) != set(result)
+                or any(type(binding[key]) is not type(value) or binding[key] != value for key, value in result.items())):
+            raise TransactionError('Original unwritten journal identity changed; preserve it for review')
+        return result
+    finally:
+        if fd >= 0: os.close(fd)
+        os.close(handle)
+
+
+def journal_temporaries(path, *, empty_preparation=None):
+    """Recognize bounded private journal afterimages without promoting them."""
+    handle = directory(path)
+    try:
+        names = os.listdir(handle)
+        if len(names) > 256: raise TransactionError('Installer journal temporary evidence exceeds its bound')
+        empty = empty_journal_temporary(path, names, empty_preparation) if empty_preparation is not None else None
+        result = {}
+        for name in names:
+            if not re.fullmatch(r'\.new-[a-f0-9]{24}', name): continue
+            if empty is not None and name == empty['name']:
+                result[name] = None
+                continue
+            info = os.stat(name, dir_fd=handle, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise TransactionError('Unsafe interrupted journal evidence; preserve it for review')
+            value = validate_state(decode_json(read(path / name)), path)
+            allowed = {'schema', 'directory', 'phase', 'created_at', 'updated_at', 'settings',
+                       'stage', 'stage_at', 'empty_preparation', 'recovery_evidence', 'mfa_recovery'}
+            if set(value) - allowed:
+                raise TransactionError('Unknown interrupted journal evidence; preserve it for review')
+            result[name] = value
+        return result
+    finally: os.close(handle)
+
+
+def state(path):
+    if not NAME.fullmatch(path.name): raise TransactionError('Invalid installer transaction identity')
+    try:
+        value = validate_state(decode_json(read(path / 'transaction.json')), path)
+        if 'empty_preparation_temporary' in value:
+            handle = directory(path)
+            try: empty_journal_temporary(path, os.listdir(handle), value)
+            finally: os.close(handle)
+        return value
+    except FileNotFoundError:
+        handle = directory(path)
+        try:
+            info = os.fstat(handle); names = os.listdir(handle)
+            empty = empty_journal_temporary(path, names)
+            temporaries = {empty['name']: None} if empty is not None else journal_temporaries(path)
+            first = next(iter(temporaries.values())) if len(temporaries) == 1 else None
+            first_keys = {'schema', 'directory', 'phase', 'created_at', 'updated_at', 'settings'}
+            own_first = empty is not None or (set(names) == set(temporaries) and first is not None
+                         and set(first) == first_keys and first['phase'] == 'preparing' and first['settings'] == {})
+            if stat.S_IMODE(info.st_mode) != 0o700 or names and not own_first:
+                raise TransactionError('Missing transaction metadata has nonempty or unsafe evidence; preserve it for review')
+            created = first['created_at'] if first is not None and own_first else max(0, int(info.st_mtime))
+        finally: os.close(handle)
+        # A first uncommitted preparing afterimage has no executable artifact
+        # authority. Retain it as evidence; publish only an abandoned marker.
+        value = {'schema': 1, 'directory': str(path), 'phase': 'abandoned',
+                 'created_at': created, 'updated_at': created, 'settings': {},
+                 'empty_preparation': True}
+        if empty is not None: value['empty_preparation_temporary'] = empty
+        return value
 
 
 def legacy_sequence(root):
@@ -618,18 +851,19 @@ def clean_completed_evidence(value):
     handle = directory(path)
     try:
         names = os.listdir(handle)
+        temporaries = journal_temporaries(path, empty_preparation=value if 'empty_preparation_temporary' in value else None)
         if value.get('empty_preparation') and not (path / 'transaction.json').exists():
-            if names:
+            if set(names) != set(temporaries):
                 raise TransactionError('Empty preparation evidence changed before archival; preserve it for review')
             atomic(path / 'transaction.json', value)
-            names = ['transaction.json']
+            names = ['transaction.json', *temporaries]
         fixed = {'transaction.json', 'installer.sh', 'package.tgz', 'release-manifest.json',
                  'release-manifest.sig', 'bootstrap', 'approval', 'config.snapshot', 'pending.snapshot',
                  'history-evidence.json', HISTORY_REVIEW}
-        if any(name not in fixed and not re.fullmatch(r'(?:sls-mass-notify-recovery|recovery-carrier)\.[A-Za-z0-9]{6,12}', name) for name in names):
+        if any(name not in fixed and name not in temporaries and not re.fullmatch(r'(?:sls-mass-notify-recovery|recovery-carrier)\.[A-Za-z0-9]{6,12}', name) for name in names):
             raise TransactionError('A completed installer generation has unknown evidence; preserve it for administrator review: ' + str(path))
         for name in names:
-            if name == 'transaction.json': continue
+            if name == 'transaction.json' or name in temporaries: continue
             info = os.stat(name, dir_fd=handle, follow_symlinks=False)
             if stat.S_ISDIR(info.st_mode):
                 shutil.rmtree(name, dir_fd=handle)

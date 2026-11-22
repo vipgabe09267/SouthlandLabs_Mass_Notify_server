@@ -111,71 +111,14 @@ bounded_voice_stream() {
 }
 
 voice_file_is_current() {
-  local target="$1" expected_sha="$2" expected_bytes="$3"
-  SLS_PIPER_VOICE_TARGET="$target" SLS_PIPER_VOICE_SHA256="$expected_sha" \
-    SLS_PIPER_VOICE_BYTES="$expected_bytes" /usr/bin/python3 -I - 2>/dev/null <<'PYVOICEEXISTS'
-import hashlib
-import os
-import pwd
-import re
-import stat
+  /usr/bin/python3 -I -B /usr/local/bin/sls_mass_notify/sls_resource_capacity.py --voice-current "$1" "$2" "$3"
+}
 
-target = os.environ['SLS_PIPER_VOICE_TARGET']
-expected_sha = os.environ['SLS_PIPER_VOICE_SHA256']
-expected_bytes = int(os.environ['SLS_PIPER_VOICE_BYTES'])
-name = os.path.basename(target)
-expected_prefix = '/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices/'
-if (target != expected_prefix + name
-        or not re.fullmatch(r'[a-z]{2}_[A-Z]{2}-[A-Za-z0-9_-]+\.onnx(?:\.json)?', name)
-        or not re.fullmatch(r'[a-f0-9]{64}', expected_sha)
-        or not 1 <= expected_bytes <= 128 * 1024 * 1024):
-    raise SystemExit(2)
-account = pwd.getpwnam('asterisk')
-directory_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW
-parent = os.open('/', directory_flags)
-descriptor = -1
-try:
-    for component in ('var', 'lib', 'asterisk', 'SLS_Mass_Notifications_Plugin', 'piper', 'voices'):
-        child = os.open(component, directory_flags, dir_fd=parent)
-        os.close(parent)
-        parent = child
-        info = os.fstat(parent)
-        if (info.st_uid not in (0, account.pw_uid) or info.st_mode & 0o002
-                or info.st_mode & 0o020 and info.st_gid not in (0, account.pw_gid)):
-            raise RuntimeError('unsafe Piper voice directory')
-    try:
-        before = os.stat(name, dir_fd=parent, follow_symlinks=False)
-    except FileNotFoundError:
-        raise SystemExit(1)
-    descriptor = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
-                         dir_fd=parent)
-    opened = os.fstat(descriptor)
-    if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            or not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
-            or opened.st_uid not in (0, account.pw_uid) or opened.st_mode & 0o022
-            or opened.st_size != expected_bytes):
-        raise RuntimeError('unsafe or stale Piper voice file')
-    digest = hashlib.sha256()
-    remaining = expected_bytes
-    while remaining:
-        block = os.read(descriptor, min(1024 * 1024, remaining))
-        if not block:
-            raise RuntimeError('Piper voice file was truncated')
-        digest.update(block)
-        remaining -= len(block)
-    after = os.fstat(descriptor)
-    current = os.stat(name, dir_fd=parent, follow_symlinks=False)
-    if (os.read(descriptor, 1)
-            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-               != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-            or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
-            or digest.hexdigest() != expected_sha):
-        raise RuntimeError('Piper voice file changed or failed checksum validation')
-finally:
-    if descriptor >= 0:
-        os.close(descriptor)
-    os.close(parent)
-PYVOICEEXISTS
+admit_voice_write() {
+  local -a selection=()
+  [ -z "${PIPER_RESOURCE_PROFILE:-}" ] || selection+=(--profile "$PIPER_RESOURCE_PROFILE")
+  /usr/bin/python3 -I -B /usr/local/bin/sls_mass_notify/sls_resource_capacity.py \
+    --admit-voice-write "$1" "$2" --temporary-directory "${TMPDIR:-/tmp}" "${selection[@]}"
 }
 
 download_file() {
@@ -185,6 +128,7 @@ download_file() {
   local expected_bytes="${voice_bytes[$(basename "$target")]:-0}"
   [ "$expected_bytes" -gt 0 ] || return 1
   local tmp downloaded=0 attempt
+  admit_voice_write "${target##*/}" download || return 1
 
   tmp="$(mktemp "${TMPDIR:-/tmp}/sls-piper-voice.XXXXXXXX")" || return 1
   SLS_VOICE_DOWNLOAD_TMP="$tmp"
@@ -219,7 +163,7 @@ PYVOICECACHE
     for ((attempt = 0; attempt < 2; attempt++)); do
       if /usr/bin/timeout --signal=TERM --kill-after=5 95 /usr/bin/curl -fL --proto '=https' --proto-redir '=https' \
         --max-filesize "$expected_bytes" --connect-timeout 20 --max-time 90 \
-        -A "SouthlandLabs-Mass-Notify-Server/0.1.9-beta" \
+        -A "SouthlandLabs-Mass-Notify-Server/0.2.0-beta" \
         -o - "$url" | bounded_voice_stream "$tmp" "$expected_bytes"; then
         downloaded=1
         break
@@ -258,6 +202,9 @@ PYVOICECACHE
     }
   fi
 
+  # The download can take several minutes. Its scratch blocks are occupied
+  # now, and free capacity on the destination may have changed in the meantime.
+  admit_voice_write "${target##*/}" promote || { rm -f -- "$tmp"; return 1; }
   SLS_PIPER_VOICE_SOURCE="$tmp" SLS_PIPER_VOICE_TARGET="$target" SLS_PIPER_VOICE_SHA256="$expected_sha" SLS_PIPER_VOICE_BYTES="$expected_bytes" /usr/bin/python3 -I - <<'PY' || {
 import os
 import pwd
@@ -363,49 +310,37 @@ PY
   return 0
 }
 
-piper_venv_usable() {
-  [ -x "$PIPER_PY" ] \
-    && /usr/bin/timeout 20 "$PIPER_PY" -I -c \
-      'import os, sys; sys.exit(0 if sys.prefix != sys.base_prefix and os.path.realpath(sys.prefix) == os.path.realpath(sys.argv[1]) else 1)' \
-      "$PIPER_DIR/venv" >/dev/null 2>&1 \
-    && /usr/bin/timeout 20 "$PIPER_PY" -I -m pip --version >/dev/null 2>&1
-}
-
 ensure_piper_runtime() {
   export ORT_DISABLE_TELEMETRY=1
-  validate_piper_runtime_tree || { log "Piper executable tree failed ownership/link validation; no existing interpreter was executed"; return 1; }
-  if ! /usr/bin/python3 --version >/dev/null 2>&1; then
-    log "Piper install failed: python3 is installed but not executable or broken"
-    return 1
+  local environment_helper="/usr/local/bin/sls_mass_notify/sls_piper_environment.py"
+  [ -r "$environment_helper" ] || { log "The signed Piper validation/replacement helper is missing; active packages were preserved."; return 1; }
+  local retained_directory retained_stages=0
+  for retained_directory in "$PIPER_DIR"/.replacement-*; do
+    if [ -d "$retained_directory" ] && [ ! -L "$retained_directory" ]; then retained_stages=1; break; fi
+  done
+  if [ "$retained_stages" -eq 1 ]; then
+    /usr/bin/timeout --signal=TERM --kill-after=2 190 /usr/bin/python3 -I -B "$environment_helper" --mark-retained >&"$LOG_FD" 2>&1 || {
+      log "Retained Piper evidence could not be qualified safely. Preserve it and review its ownership, shape, lock and mount state."; return 1;
+    }
   fi
-  if piper_venv_usable && [ -x "$PIPER_BIN" ] && /usr/bin/timeout 20 "$PIPER_PY" -I -m piper -h >/dev/null 2>&1 \
-    && /usr/bin/timeout 20 "$PIPER_PY" -I "$PIPER_DEPENDENCY_CHECK" --requirements "$PIPER_REQUIREMENTS" --quiet \
-    && /usr/bin/timeout 20 "$PIPER_PY" -I -m pip check >/dev/null 2>&1; then
+  # The candidate-owned predicate verifies root-protected structure before
+  # running bounded, quiet native-user health checks. No existing Piper code
+  # is ever executed as root by this fastpath or its diagnostics.
+  if /usr/bin/python3 -I -B "$environment_helper" --probe-reuse >&"$LOG_FD" 2>&1; then
     return 0
   fi
-  if [ -x "$PIPER_PY" ]; then
-    # Only package names and version mismatches are emitted by this checker.
-    /usr/bin/timeout 20 "$PIPER_PY" -I "$PIPER_DEPENDENCY_CHECK" --requirements "$PIPER_REQUIREMENTS" >&"$LOG_FD" 2>&1 || true
-  fi
-  if [ ! -x /usr/bin/python3 ]; then
-    log "Piper install failed: python3 missing"
-    return 1
-  fi
-  local environment_helper
   local -a replacement_args=()
-  environment_helper="/usr/local/bin/sls_mass_notify/sls_piper_environment.py"
-  [ -r "$environment_helper" ] || { log "The signed Piper replacement helper is missing; no active packages were changed."; return 1; }
   [ "${PIPER_WORKERS_PAUSED:-0}" != 1 ] || replacement_args+=(--workers-paused)
   [ -z "$PIPER_WHEELHOUSE" ] || replacement_args+=(--wheelhouse "$PIPER_WHEELHOUSE")
-  /usr/bin/python3 -I "$environment_helper" "${replacement_args[@]}" >&"$LOG_FD" 2>&1 || {
-    log "Piper replacement did not complete. Review the specific namespace, dependency, activation or recovery error above. No in-place package upgrade was attempted."
+  [ -z "${PIPER_RESOURCE_PROFILE:-}" ] || replacement_args+=(--resource-profile "$PIPER_RESOURCE_PROFILE")
+  # Replacement always repeats full actual resource admission before its
+  # first target/stage/build write; earlier reuse credit cannot waive it.
+  /usr/bin/python3 -I -B "$environment_helper" "${replacement_args[@]}" >&"$LOG_FD" 2>&1 || {
+    log "Piper replacement did not complete. Review the specific resource, namespace, dependency, activation or recovery error above. No in-place package upgrade was attempted."
     return 1
   }
   PIPER_ARTIFACTS_CHANGED=1
-  piper_venv_usable && /usr/bin/timeout 20 "$PIPER_PY" -I -m piper -h >/dev/null 2>&1 \
-    && /usr/bin/timeout 20 "$PIPER_PY" -I "$PIPER_DEPENDENCY_CHECK" --requirements "$PIPER_REQUIREMENTS" >&"$LOG_FD" 2>&1 \
-    && /usr/bin/timeout 20 "$PIPER_PY" -I -m pip check >/dev/null 2>&1
-
+  return 0
 }
 
 install_piper_wrapper() {
@@ -555,6 +490,7 @@ install_piper_compatibility_path() {
   result="$(
   /usr/bin/python3 -I - <<'PY'
 import os
+import re
 import secrets
 import stat
 
@@ -614,8 +550,23 @@ try:
             if mount_id(bin_fd) != managed_mount:
                 raise RuntimeError("Piper compatibility path crosses a mount boundary")
             entries = bounded_entries(bin_fd, 4)
-            if entries - {"piper"}:
-                raise RuntimeError("Piper compatibility path contains an unexpected entry")
+            for name in sorted(entries - {"piper"}):
+                metadata = os.stat(name, dir_fd=bin_fd, follow_symlinks=False)
+                parent_metadata = os.fstat(bin_fd)
+                if (not re.fullmatch(r"\.piper\.[a-f0-9]{16}", name)
+                        or parent_metadata.st_uid != 0 or parent_metadata.st_mode & 0o022
+                        or not stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1
+                        or metadata.st_uid != 0 or metadata.st_gid != 0
+                        or os.readlink(name, dir_fd=bin_fd) != "/usr/local/bin/piper"):
+                    raise RuntimeError("Piper compatibility path contains an unexpected entry")
+                current = os.stat(name, dir_fd=bin_fd, follow_symlinks=False)
+                if ((current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_gid, current.st_nlink)
+                        != (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid, metadata.st_nlink)):
+                    raise RuntimeError("Piper compatibility temporary changed during retry")
+                os.unlink(name, dir_fd=bin_fd)
+                os.fsync(bin_fd)
+                changed = True
+            entries = bounded_entries(bin_fd, 4)
             if "piper" in entries:
                 metadata = os.stat("piper", dir_fd=bin_fd, follow_symlinks=False)
                 if (not stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1
@@ -893,6 +844,7 @@ repair_piper_permissions_only() {
 
 PIPER_ACTION="all"
 PIPER_WORKERS_PAUSED=0
+PIPER_RESOURCE_PROFILE=""
 [ "${EUID:-$(id -u)}" -eq 0 ] || {
   printf '%s\n' 'Piper installation must run as root.' >&2
   exit 1
@@ -908,6 +860,9 @@ while [ "$#" -gt 0 ]; do
       [ "$PIPER_ACTION" = all ] || exit 2
       PIPER_ACTION="${option#--}" ;;
     --workers-paused) PIPER_WORKERS_PAUSED=1 ;;
+    --resource-profile)
+      [ -z "$PIPER_RESOURCE_PROFILE" ] || exit 2
+      case "${1:-}" in standard|lite) PIPER_RESOURCE_PROFILE="$1"; shift ;; *) exit 2 ;; esac ;;
     --wheelhouse|--voice-cache)
       [ "$#" -gt 0 ] && [[ "$1" = /* ]] || exit 2
       if [ "$option" = --wheelhouse ]; then PIPER_WHEELHOUSE="$1"; else PIPER_VOICE_CACHE="$1"; fi

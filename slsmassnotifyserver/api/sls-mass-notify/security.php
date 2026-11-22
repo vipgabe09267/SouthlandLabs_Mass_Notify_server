@@ -16,6 +16,11 @@ final class ApiSecurity
     {
         if ($maximumDepth < 2 || $maximumDepth > 64) { throw new \InvalidArgumentException('JSON nesting limit is invalid.'); }
         self::assertUniqueJsonMembers($raw, $maximumDepth);
+        // Reclaim unused allocator caches before allocating a large decoded
+        // tree. Parsing and validation still use the unchanged native decoder.
+        if (strlen($raw) >= 1048576 && \function_exists('gc_mem_caches')) {
+            \gc_mem_caches();
+        }
         $decoded = json_decode($raw, true, $maximumDepth, JSON_THROW_ON_ERROR);
         self::assertFiniteJsonNumbers($decoded);
         $trimmed = ltrim($raw);

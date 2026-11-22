@@ -51,7 +51,8 @@ def diagnostic_source(name):
 
 
 php_security = diagnostic_source('sls_php_security').evaluate
-freepbx_gui_probe = diagnostic_source('sls_web_readiness').probe
+web_readiness = diagnostic_source('sls_web_readiness')
+freepbx_gui_probe = web_readiness.probe
 
 PROFILE = {'id': 'freepbx17-debian12-amd64', 'freepbx_major': 17,
            'os_id': 'debian', 'os_version': '12', 'python': 'CPython 3.11',
@@ -144,18 +145,6 @@ def served_php_targets(dump):
     return targets+[target for target in [('http','127.0.0.1',80,'127.0.0.1'),('https','127.0.0.1',443,'127.0.0.1')] if target not in targets]
 
 
-class LoopbackTLS(http.client.HTTPSConnection):
-    def __init__(self,address,port,server_name,timeout):
-        super().__init__(address,port,timeout=timeout,context=ssl._create_unverified_context())
-        self.server_name=server_name
-    def connect(self):
-        # Certificate validation is outside this local runtime probe. No public
-        # DNS, proxy, redirects or caller-supplied destination is involved.
-        sock=socket.create_connection((self.host,self.port),self.timeout)
-        try:self.sock=self._context.wrap_socket(sock,server_hostname=self.server_name)
-        except BaseException:sock.close();raise
-
-
 def served_php_probe(targets,timeout=4):
     deadline=time.monotonic()+timeout
     for scheme,address,port,host in targets:
@@ -163,20 +152,10 @@ def served_php_probe(targets,timeout=4):
         if not isinstance(host,str) or not re.fullmatch(r'(?=.{1,253}$)[a-z0-9.-]+',host):continue
         remaining=deadline-time.monotonic()
         if remaining<=0:break
-        connection=None;timer=None
         try:
-            connection=LoopbackTLS(address,port,host,min(.8,remaining)) if scheme=='https' else http.client.HTTPConnection(address,port,timeout=min(.8,remaining))
-            connection.connect()
-            def expire(expired_socket=connection.sock):
-                try:expired_socket.shutdown(socket.SHUT_RDWR)
-                except OSError:pass
-                try:expired_socket.close()
-                except OSError:pass
-            timer=threading.Timer(remaining,expire);timer.daemon=True;timer.start()
-            connection.request('GET','/api/sls-mass-notify/?sls_installer_runtime=1',headers={'Host':host+':'+str(port),'Accept':'application/json','Connection':'close'})
-            response=connection.getresponse()
-            if response.status not in (200,503):continue
-            raw=response.read(16385)
+            status,raw=web_readiness.read_response(scheme,address,port,host,
+                '/api/sls-mass-notify/?sls_installer_runtime=1','application/json',deadline,16384,(200,503))
+            if status not in (200,503):continue
             if len(raw)>16384:continue
             value=json.loads(raw)
             if not isinstance(value,dict) or value.get('probe')!='sls_served_php_v1' or type(value.get('ok')) is not bool:continue
@@ -186,17 +165,23 @@ def served_php_probe(targets,timeout=4):
             maps={name:value.get(name) for name in ('extensions','functions')}
             if any(not isinstance(maps[name],dict) or set(maps[name])!=set(keys) or any(type(v) is not bool for v in maps[name].values()) for name,keys in [('extensions',PHP_EXTENSIONS),('functions',PHP_FUNCTIONS)]):continue
             expected=not all(maps['extensions'].values()) or not all(maps['functions'].values()) or not value['runtime_account_ok'] or not php_security(value['php_version'])['ok']
-            if value['ok'] is expected or (response.status==200)!=value['ok']:continue
+            if value['ok'] is expected or (status==200)!=value['ok']:continue
+            if time.monotonic()>=deadline:break
             return {'available':True,'ok':value['ok'],'php_version':value['php_version'],'php_sapi':value['php_sapi'],
                     'runtime_account_ok':value['runtime_account_ok'],'extensions':maps['extensions'],'functions':maps['functions']}
         except (OSError,ValueError,http.client.HTTPException):pass
-        finally:
-            if timer is not None:timer.cancel()
-            if connection is not None:connection.close()
     return {'available':False,'ok':False,'failure_code':'served_php_probe_unavailable'}
 
 
-def collector_probe():
+class _CollectorObservation(dict):
+    """Keep the age reference private; only ordinary health fields serialize."""
+    def __init__(self, value, observed_at):
+        super().__init__(value)
+        self._observed_at = observed_at
+
+
+def collector_probe(*, budget='quick'):
+    probe_timeouts(budget)
     helper=RUNTIME/'sls_phone_events.py'
     if not protected(helper):return {'ok':False,'failure_code':'phone_collector_helper_unsafe_or_missing'}
     try:account=pwd.getpwnam('asterisk')
@@ -204,16 +189,26 @@ def collector_probe():
     if account.pw_uid<=0 or os.geteuid() not in (0,account.pw_uid):return {'ok':False,'failure_code':'phone_collector_web_uid_mismatch'}
     args=['/usr/bin/python3','-I',str(helper),'--health']
     if os.geteuid()==0:args=['/usr/bin/env','-u','GITHUB_TOKEN','-u','GH_TOKEN','-u','SLS_MASS_NOTIFY_GITHUB_TOKEN','/usr/sbin/runuser','-u','asterisk','--']+args
-    status,raw=command(args,2)
+    # The root CLI already permits bounded deeper prerequisites. Allow native
+    # startup/PAM contention here as well; the web report remains a short probe.
+    started=time.monotonic()
+    status,raw=command(args,15 if budget=='deep' else 2)
+    observed_at=time.monotonic()
+    elapsed=observed_at-started
     try:
         value=json.loads(raw)
         if not isinstance(value,dict):raise ValueError()
         if value.get('ok') is True and value.get('connected') is True and status==0:
             age=value.get('heartbeat_age_seconds')
             if type(age) not in (int,float) or not math.isfinite(age) or not 0<=age<=15:raise ValueError()
+            # Charge the complete probe transit conservatively. A larger CLI
+            # deadline must never make an old heartbeat appear current.
+            if not math.isfinite(elapsed) or elapsed<0:raise ValueError()
+            age+=elapsed
+            if age>15:return {'ok':False,'connected':False,'failure_code':'phone_event_collector_stale'}
             counts={key:value.get(key) for key in ('active_batches','reserved_contacts')}
             if any(type(count) is not int or not 0<=count<=100000 for count in counts.values()):raise ValueError()
-            return {'ok':True,'connected':True,'heartbeat_age_seconds':age,**counts}
+            return _CollectorObservation({'ok':True,'connected':True,'heartbeat_age_seconds':age,**counts},observed_at)
         code=value.get('failure_code')
         if status==1 and value.get('ok') is False and isinstance(code,str) and re.fullmatch(r'phone_[a-z_]{1,64}',code):return {'ok':False,'connected':False,'failure_code':code}
     except (ValueError,TypeError):pass
@@ -245,10 +240,22 @@ except Exception:
 '''
 
 
-def release_probe():
+def probe_timeouts(budget):
+    """Keep the web report short; root CLI allows the full storage deadline."""
+    if budget == 'quick':
+        return 5, 5
+    if budget == 'deep' and os.geteuid() == 0:
+        # Keep a fixed allowance for storage traversal, interpreter startup and
+        # configuration checks without enlarging the web report's budget.
+        return 15, 18
+    raise ValueError('Unknown or unauthorized diagnostic budget')
+
+
+def release_probe(*, budget='quick'):
+    trust_timeout, _ = probe_timeouts(budget)
     if os.geteuid()!=0:return {'ok':False,'root_required':True,'failure_code':'release_trust_root_inspection_required'}
     if not all(protected(RUNTIME/name) for name in ('sls_module_trust.py','sls_release_trust.py')):return {'ok':False,'failure_code':'release_trust_helper_unsafe_or_missing'}
-    status,raw=command(['/usr/bin/python3','-I','-c',TRUST_DIAGNOSTIC,str(RUNTIME),str(TRUST_ROOT),str(WEB_ROOT)],5)
+    status,raw=command(['/usr/bin/python3','-I','-c',TRUST_DIAGNOSTIC,str(RUNTIME),str(TRUST_ROOT),str(WEB_ROOT)],trust_timeout)
     try:
         value=json.loads(raw)
         if not isinstance(value,dict) or type(value.get('ok')) is not bool:raise ValueError()
@@ -273,10 +280,13 @@ def freepbx_gui_local():
     return freepbx_gui_probe(served_php_targets(dump if status==0 else ''))
 
 
-def resource_probe(desktops,phones,profile=None):
+def resource_probe(desktops,phones,profile=None,*,budget='quick'):
+    # Installed health measures ongoing operation. The authenticated installer
+    # separately admits its download, replacement and recovery workspaces.
+    _, resource_timeout = probe_timeouts(budget)
     helper=RUNTIME/'sls_resource_capacity.py'
     if not protected(helper):return {'ok':False,'failure_code':'resource_helper_unsafe_or_missing'}
-    arguments=['/usr/bin/python3','-I',str(helper),'--check','--mode','install',
+    arguments=['/usr/bin/python3','-I',str(helper),'--check','--mode','runtime',
                '--desktop-limit',str(desktops),'--phone-limit',str(phones)]
     config=DATA/'mass-notifications.config'
     if config.exists() or config.is_symlink():arguments.extend(('--config',str(config)))
@@ -284,7 +294,7 @@ def resource_probe(desktops,phones,profile=None):
     # A root walk can hide traversal failures in the actual PBX/web account.
     # The helper is already protected; measure it with the runtime identity.
     if os.geteuid()==0:arguments=['/usr/sbin/runuser','-u','asterisk','--',*arguments]
-    status,output=command(arguments,5)
+    status,output=command(arguments,resource_timeout)
     try:
         value=json.loads(output)
         if not isinstance(value,dict) or value.get('schema')!=1 or not isinstance(value.get('resource_checks'),dict):raise ValueError()
@@ -360,7 +370,8 @@ def protected(path):
     except OSError: return False
 
 
-def report(desktops=25, phones=25, profile=None):
+def report(desktops=25, phones=25, profile=None, *, budget='quick'):
+    probe_timeouts(budget)
     checks=[]
     def add(code,ok,observed,fix,severity='error'):
         checks.append({'code':code,'ok':bool(ok),'observed':observed,'remedy':None if ok else fix,'severity':severity})
@@ -383,14 +394,31 @@ def report(desktops=25, phones=25, profile=None):
     dashboard=module_version(Path('/var/www/html/admin/modules/dashboard/module.xml'),'dashboard')
     add('dashboard_prerequisite',dashboard is not None,dashboard,
         'The installer can bootstrap an absent Dashboard from its independently signed upstream package. Existing unknown differences require review.')
+    def collect_observation():
+        value=collector_probe(budget=budget)
+        observed_at=getattr(value,'_observed_at',None)
+        if observed_at is None:observed_at=time.monotonic()
+        return value,observed_at
+    def collector_at_publication(value,observed_at):
+        value=dict(value)
+        if value.get('ok') is not True:return value,False
+        age=value.get('heartbeat_age_seconds')
+        elapsed=time.monotonic()-observed_at
+        if (type(age) not in (int,float) or not math.isfinite(age) or not 0<=age<=15
+                or not math.isfinite(elapsed) or elapsed<0):
+            return {'ok':False,'connected':False,'failure_code':'phone_collector_health_invalid'},False
+        if age+elapsed>15:
+            return {'ok':False,'connected':False,'failure_code':'phone_event_collector_stale'},True
+        value['heartbeat_age_seconds']=round(age+elapsed,3)
+        return value,False
     # Independent probes run concurrently so the admin report remains inside
     # the web caller's deadline. Every child has its own byte/time limit.
     with ThreadPoolExecutor(max_workers=8) as workers:
         tasks={unit:workers.submit(command,['/usr/bin/systemctl','is-active',unit],1) for unit in ('apache2','cron','sls-mass-notify-phone-events')}
         tasks.update(apache=workers.submit(command,['/usr/sbin/apache2ctl','configtest'],2),
                      asterisk=workers.submit(command,['/usr/sbin/asterisk','-rx','core show version'],2),
-                     served_php=workers.submit(served_php_local),freepbx_gui=workers.submit(freepbx_gui_local),collector=workers.submit(collector_probe),
-                     release=workers.submit(release_probe),resource=workers.submit(resource_probe,desktops,phones,profile))
+                     served_php=workers.submit(served_php_local),freepbx_gui=workers.submit(freepbx_gui_local),collector=workers.submit(collect_observation),
+                     release=workers.submit(release_probe,budget=budget),resource=workers.submit(resource_probe,desktops,phones,profile,budget=budget))
         observations={name:task.result() for name,task in tasks.items()}
     for unit in ('apache2','cron','sls-mass-notify-phone-events'):
         status,output=observations[unit]
@@ -409,9 +437,11 @@ def report(desktops=25, phones=25, profile=None):
     status,output=observations['asterisk'];match=re.match(r'^Asterisk ([0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._~-]{1,48})?)\b',output.strip())
     asterisk=match[1] if status==0 and match else None
     add('asterisk_version',asterisk is not None,asterisk,'Run asterisk -rx "core show version" and inspect the local control socket; this doctor does not restart Asterisk.')
-    collector=observations['collector']
-    add('authenticated_collector',collector.get('ok') is True,collector,
-        'Review the collector service journal, loopback AMI connection and protected admission ledger. An active service without a current authenticated heartbeat cannot authorize phone audio.')
+    collector,collector_observed_at=observations['collector']
+    collector=dict(collector)
+    collector_remedy='Review the collector service journal, loopback AMI connection and protected admission ledger. An active service without a current authenticated heartbeat cannot authorize phone audio.'
+    add('authenticated_collector',collector.get('ok') is True,collector,collector_remedy)
+    collector_check=checks[-1]
     release_identity=observations['release']
     add('release_trust',release_identity.get('ok') is True,release_identity,
         'Use sudo slsconsole doctor --json for root-only publisher/stock inventory verification. Preserve rejected evidence and restore matching signed module/runtime files; never approve arbitrary installed hashes.',
@@ -426,8 +456,22 @@ def report(desktops=25, phones=25, profile=None):
     add('resource_capacity',resource.get('ok') is True,resource,
         'Reduce the requested workload or provide the reported CPU/RAM/filesystem headroom. Restore a missing/unsafe protected helper through the authenticated installer; no web-owned helper is executed.',
         'warning' if resource.get('failure_code')=='resource_helper_unsafe_or_missing' else 'error')
+    installed_version=module_version(Path('/var/www/html/admin/modules/slsmassnotifyserver/module.xml'),'slsmassnotifyserver')
+    # A successful probe can expire while other futures or local evidence/XML
+    # inspection finishes. Charge only time after its original age reference,
+    # retain full precision until this final decision, and preserve row order.
+    if collector.get('ok') is True:
+        collector,expired=collector_at_publication(collector,collector_observed_at)
+        if expired:
+            # Only a previously successful observation that aged during this
+            # report gets one bounded fresh read. Initial failures stay failed;
+            # a failed/stale refresh never falls back to the old PASS.
+            refreshed,refreshed_at=collect_observation()
+            collector,_=collector_at_publication(refreshed,refreshed_at)
+        collector_check.update(ok=collector.get('ok') is True,observed=collector,
+            remedy=None if collector.get('ok') is True else collector_remedy)
     return {'schema':1,'generated_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            'read_only':True,'profile':PROFILE,'installed_sls_version':module_version(Path('/var/www/html/admin/modules/slsmassnotifyserver/module.xml'),'slsmassnotifyserver'),
+            'read_only':True,'profile':PROFILE,'installed_sls_version':installed_version,
             'detected_runtime':{'asterisk_version':asterisk,'served_php':php},'release_identity':release_identity,'installation_state':state,
             'ok':not any(not row['ok'] and row['severity']=='error' for row in checks),'checks':checks,
             'not_exercised':['database writes','module hooks','new AMI connections','network/provider delivery','physical endpoints','load certification','full-PBX VM qualification']}
@@ -441,7 +485,8 @@ def main():
     parser.add_argument('--profile',choices=('standard','lite'),help='Inspect a profile explicitly; otherwise use the protected active profile.')
     args=parser.parse_args()
     if not 1<=args.desktop_limit<=1000 or not 1<=args.phone_limit<=1000: parser.error('Capacities must be between 1 and 1000.')
-    value=report(args.desktop_limit,args.phone_limit,args.profile)
+    value=report(args.desktop_limit,args.phone_limit,args.profile,
+                 budget='deep' if os.geteuid()==0 else 'quick')
     if args.json: print(json.dumps(value,indent=2,sort_keys=True))
     else:
         print('SLL installation doctor · read-only · '+value['profile']['id'])

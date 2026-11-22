@@ -20,7 +20,7 @@ SPEC.loader.exec_module(DEPENDENCIES)
 PINS = DEPENDENCIES.load_pins(REQUIREMENTS)
 VOICE_INSTALLER = (ROOT / 'slsmassnotifyserver/bin/sls_mass_notify_install_piper_voices.sh').read_text()
 MODULE_SOURCE = (ROOT / 'slsmassnotifyserver/Slsmassnotifyserver.class.php').read_text()
-ENSURE_RUNTIME = 'piper_venv_usable() {' + VOICE_INSTALLER.split('piper_venv_usable() {', 1)[1].split('\ninstall_piper_wrapper() {', 1)[0]
+ENSURE_RUNTIME = 'ensure_piper_runtime() {' + VOICE_INSTALLER.split('ensure_piper_runtime() {', 1)[1].split('\ninstall_piper_wrapper() {', 1)[0]
 VALIDATE_RUNTIME = 'validate_piper_runtime_tree() {' + VOICE_INSTALLER.split('validate_piper_runtime_tree() {', 1)[1].split('\nsecure_piper_runtime_tree() {', 1)[0]
 ENSURE_RUNTIME = VALIDATE_RUNTIME + '\n' + ENSURE_RUNTIME
 SECURE_RUNTIME = 'secure_piper_runtime_tree() {' + VOICE_INSTALLER.split('secure_piper_runtime_tree() {', 1)[1].split('\nsecure_piper_voice_tree() {', 1)[0]
@@ -68,19 +68,31 @@ class PiperDependencyTests(unittest.TestCase):
             self.assertNotEqual(result.returncode,0)
             self.assertEqual(target.read_text(),unknown)
 
-    def test_existing_runtime_import_smoke_gets_opt_out_before_python_execution(self):
+    def test_shared_runtime_helper_receives_opt_out_without_root_package_execution(self):
         function='ensure_piper_runtime() {'+VOICE_INSTALLER.split('ensure_piper_runtime() {',1)[1].split('\ninstall_piper_wrapper() {',1)[0]
         with tempfile.TemporaryDirectory(prefix='sls-runtime-smoke-privacy-') as directory:
-            root=Path(directory);python=root/'python';marker=root/'environment'
-            python.write_text('#!/bin/sh\nprintf "%s\\n" "$ORT_DISABLE_TELEMETRY" >>"$SLS_PRIVATE_ENV_MARKER"\n');python.chmod(0o755)
-            script=function+'''\nvalidate_piper_runtime_tree() { :; }
-piper_venv_usable() { :; }
-PIPER_PY="$1"; PIPER_BIN="$1"; PIPER_DEPENDENCY_CHECK=private-checker; PIPER_REQUIREMENTS=private-lock
-ensure_piper_runtime
-'''
-            result=subprocess.run(['/bin/bash','-c',script,'fixture',str(python)],env={**os.environ,'ORT_DISABLE_TELEMETRY':'0','SLS_PRIVATE_ENV_MARKER':str(marker)},capture_output=True,text=True,timeout=5)
-            self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(marker.read_text().splitlines(),['1','1','1'])
+            root=Path(directory);helper=root/'helper.py';marker=root/'environment';piper=root/'piper';piper.mkdir()
+            helper.write_text('import os\nfrom pathlib import Path\nPath('+repr(str(marker))+').write_text(os.environ.get("ORT_DISABLE_TELEMETRY","missing"))\n')
+            script=function.replace('/usr/local/bin/sls_mass_notify/sls_piper_environment.py',str(helper))+'\nPIPER_DIR='+repr(str(piper))+'\nLOG_FD=2\nlog(){ :; }\nensure_piper_runtime\n'
+            result=subprocess.run(['/bin/bash','-c',script],env={**os.environ,'ORT_DISABLE_TELEMETRY':'0'},capture_output=True,text=True,timeout=5)
+            self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(marker.read_text(),'1')
+
+    def test_voice_cli_forwards_lite_to_replacement_after_reuse_declines(self):
+        parser = 'PIPER_ACTION="all"' + VOICE_INSTALLER.split('PIPER_ACTION="all"', 1)[1].split(
+            'if [ "$PIPER_ACTION" = repair-permissions-only ]', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / 'helper.py'
+            helper.write_text('import sys\nprint(" ".join(sys.argv[1:]), flush=True)\n'
+                              'sys.exit(int("--probe-reuse" in sys.argv))\n')
+            function = ENSURE_RUNTIME.replace('/usr/local/bin/sls_mass_notify/sls_piper_environment.py', str(helper))
+            harness = (function + '\nlog() { :; }\nopen_append_log() { LOG_FD=2; }\n'
+                       f'PIPER_DIR="{root}"; PIPER_WHEELHOUSE=""; LOG_FILE=/dev/null\n' + parser +
+                       '\nensure_piper_runtime\n')
+            result = subprocess.run(['/bin/bash', '-c', harness, '_', '--workers-paused', '--resource-profile', 'lite'],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr.splitlines(), ['--probe-reuse', '--workers-paused --resource-profile lite'])
 
     def test_optional_voice_selection_does_not_create_root_only_runtime_bytecode(self):
         block = VOICE_INSTALLER.split("<<'SLS_OPTIONAL_VOICES'\n", 1)[1].split('\nSLS_OPTIONAL_VOICES', 1)[0]
@@ -232,6 +244,21 @@ sys.dont_write_bytecode = True
 spec = importlib.util.spec_from_file_location('replacement', %r)
 helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
 root = Path(os.environ['FIXTURE'])
+# Only this inert package builder consumes these fixture-only controls. Keep
+# actual product child environments restricted to the production allowlist.
+fixture_environment = helper.runtime_environment
+helper.runtime_environment = lambda: {**fixture_environment(), **{name:os.environ[name] for name in ('FIXTURE','MODE','CHECKER')}}
+helper.admit_replacement_capacity=lambda *a,**kw:{'schema':1,'replacement_capacity_admitted':True}
+if '--probe-reuse' in sys.argv:
+    descriptor=helper.protected_directory(root);os.close(descriptor);helper.validate_tree(root/'venv')
+    mode=os.environ['MODE']
+    if mode!='exact' and (not (root/'venv/reconciled').exists() or mode=='postcheck-failure'):
+        raise SystemExit(1)
+    # Production validates the actual console in addition to Python modules.
+    # Keep that independent check for this inert executable's shebang.
+    try: console=subprocess.run([str(root/'venv/bin/piper'),'-h'],check=False,timeout=3)
+    except OSError: raise SystemExit(1)
+    raise SystemExit(console.returncode)
 def builder(stage, lock):
     binary = stage / 'venv/bin'; binary.mkdir()
     shutil.copyfile(root / 'interpreter-template', binary / 'python')
@@ -288,7 +315,9 @@ ensure_piper_runtime
                 elif kind=='hardlink': entry.unlink(); os.link(victim,entry)
                 elif kind=='fifo': entry.unlink(); os.mkfifo(entry)
                 else: interpreter.unlink(); interpreter.symlink_to(victim)
-                script=ENSURE_RUNTIME+'\nPIPER_DIR="$1"; PIPER_PY="$1/venv/bin/python"; PIPER_BIN="$1/venv/bin/piper"; log() { :; }; ensure_piper_runtime'
+                validation=base/'candidate-validator.py'
+                validation.write_text('import importlib.util,os,sys\nfrom pathlib import Path\ns=importlib.util.spec_from_file_location("candidate",'+repr(str(RUNTIME/'sls_piper_environment.py'))+'); m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\nroot=Path('+repr(str(base))+'); fd=m.protected_directory(root);os.close(fd);m.validate_tree(root/"venv")\nraise SystemExit(1)\n')
+                script=ENSURE_RUNTIME.replace('/usr/local/bin/sls_mass_notify/sls_piper_environment.py',str(validation))+'\nPIPER_DIR="$1"; PIPER_PY="$1/venv/bin/python"; PIPER_BIN="$1/venv/bin/piper"; LOG_FD=2; log() { :; }; ensure_piper_runtime'
                 result=subprocess.run(['/bin/bash','-c',script,'_',str(base)],capture_output=True,text=True,timeout=5)
                 self.assertNotEqual(result.returncode,0,result.stderr)
                 self.assertFalse((base/'EXECUTED').exists())

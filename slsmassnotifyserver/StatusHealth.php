@@ -16,8 +16,24 @@ final class SlsStatusHealth
         };
         return [
             'external' => !empty($storage['queue_errors']) || !empty($storage['queue_scan_incomplete']) || $recent('expired_external'),
-            'weather' => $recent('failed_weather') || $recent('uncertain_weather') || $recent('expired_weather') || $recent('weather_deadline_misses'),
+            'weather' => !empty($storage['weather_scan_incomplete']) || $recent('failed_weather') || $recent('uncertain_weather') || $recent('expired_weather') || $recent('weather_deadline_misses'),
         ];
+    }
+
+    public static function inspectionIssues(array $storage): array
+    {
+        $rows = $storage['inspection_issues'] ?? [];
+        if (!is_array($rows) || !array_is_list($rows)) { return []; }
+        $components = ['external', 'weather', 'control_audit', 'security_audit'];
+        $codes = ['snapshot_busy', 'snapshot_changed', 'unreadable', 'invalid', 'unsafe', 'scan_limit'];
+        $result = [];
+        foreach (array_slice($rows, 0, 32) as $row) {
+            if (!is_array($row) || count($row) !== 2
+                || !in_array($row['component'] ?? null, $components, true)
+                || !in_array($row['code'] ?? null, $codes, true)) { continue; }
+            $result[] = ['component' => $row['component'], 'code' => $row['code']];
+        }
+        return $result;
     }
 
     public static function timestamp($value): int

@@ -16,13 +16,10 @@ if SLS_MASS_NOTIFY_MODULE='othermodule' \
 fi
 source "${ROOT_DIR}/tools/uninstall_release.sh"
 
-run_fwconsole_body="$(declare -f run_fwconsole)"
-close_line="$(grep -nFm1 'close_inherited_maintenance_lock_fds' <<<"$run_fwconsole_body" | cut -d: -f1)"
-php_line="$(grep -nFm1 'php -d pcre.jit=0' <<<"$run_fwconsole_body" | cut -d: -f1)"
-[ -n "$close_line" ] && [ -n "$php_line" ] && [ "$close_line" -lt "$php_line" ] || {
-  printf 'Uninstaller fwconsole children can inherit the maintenance lock descriptor.\n' >&2
-  exit 1
-}
+# Actual run_fwconsole root-stage lease retention and mutable-child descriptor
+# exclusion are exercised by test_installer_asterisk_cli_deadline.py, including
+# outer-caller process-group death. An early-close ordering check would require
+# stripping the immutable root stages' maintenance fence before they exist.
 
 cmp -s \
   "${ROOT_DIR}/tools/uninstall_release.sh" \

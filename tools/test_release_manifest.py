@@ -60,6 +60,14 @@ class ReleaseDocumentationTests(unittest.TestCase):
     def test_current_repository_documentation(self):
         with contextlib.redirect_stdout(io.StringIO()):
             release_docs.check()
+    def test_unpublished_branch_can_retain_immutable_published_install_commands(self):
+        self.record.update(candidate_status='unpublished',published_version='0.1.7-beta')
+        self.write_state()
+        (self.root/'tools/install_bootstrap.sh').write_bytes(b'new unpublished candidate bootstrap')
+        (self.root/'README.md').write_text('Candidate '+self.version+' is unpublished.\n'
+            'Published immutable slsmassnotifyserver-0.1.7-beta\n'+'a'*64+
+            '  sls-bootstrap.sh\nbash sls-bootstrap.sh 0.1.7-beta\n')
+        self.check()
 
     def test_rejects_mismatched_or_ambiguous_release_states(self):
         invalid = [dict(self.record, schema=True), dict(self.record, extra=True),

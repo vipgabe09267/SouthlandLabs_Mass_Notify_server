@@ -723,19 +723,26 @@ wait_for_test_call_pickup() {
   local queue_file
   local recipient
   local channel_inventory
+  local remaining cli_timeout
   local pending
   local failed=0
 
   [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || timeout_seconds=10
   [ "$timeout_seconds" -ge 1 ] 2>/dev/null || timeout_seconds=10
   [ "$timeout_seconds" -le 30 ] 2>/dev/null || timeout_seconds=30
+  timeout_seconds=$((10#$timeout_seconds))
   deadline=$((SECONDS + timeout_seconds))
   [ "${#TEST_CALL_QUEUE_PATHS[@]}" -gt 0 ] || return 1
   while [ "$SECONDS" -lt "$deadline" ]; do
     pending=0
     channel_inventory=""
     if [ -x "$ASTERISK_CLI_BIN" ]; then
-      channel_inventory="$("$ASTERISK_CLI_BIN" -rx 'core show channels concise' 2>/dev/null || true)"
+      remaining=$((deadline - SECONDS))
+      [ "$remaining" -gt 0 ] || break
+      cli_timeout="$remaining"
+      [ "$cli_timeout" -le 20 ] || cli_timeout=20
+      channel_inventory="$(/usr/bin/timeout --signal=TERM --kill-after=2 "$cli_timeout" \
+        "$ASTERISK_CLI_BIN" -rx 'core show channels concise' 2>/dev/null || true)"
     fi
     for queue_file in "${TEST_CALL_QUEUE_PATHS[@]}"; do
       [ "${TEST_CALL_ACCEPTED[$queue_file]:-0}" = "1" ] && continue
@@ -753,6 +760,7 @@ wait_for_test_call_pickup() {
       fi
     done
     [ "$pending" -eq 0 ] && break
+    [ "$SECONDS" -lt "$deadline" ] || break
     sleep 1
   done
 

@@ -23,15 +23,18 @@ source "$1"
 fixture="$2"
 scenario="$3"
 LOG_FILE="$fixture/commands.log"
-CONFIG_FILE="$fixture/config"
+DATA_DIR="$fixture/data"; CONFIG_FILE="$DATA_DIR/mass-notifications.config"
 CONFIG_SNAPSHOT="$fixture/config.snapshot"
 CONFIG_HASH_BEFORE="$(sha256sum "$CONFIG_SNAPSHOT" | cut -d ' ' -f1)"
+PENDING_CONFIG_STATE=absent; PENDING_CONFIG_PATH="$DATA_DIR/mass-notifications.pending.config"
 MODULE_BACKUP_DIR="$fixture/backup"
 STAGING_DIR="$fixture/stage"
 DOWNLOAD_DIR="$fixture/download"
 RECOVERY_DIR="$fixture/recovery"
 RECOVERY_TOOL="$fixture/recover.py"
 INSTALL_BOOTSTRAP_DIR="$fixture/bootstrap"
+TRANSACTION_TOOL="$fixture/bootstrap/sls_install_transaction.py"
+WORKER_GUARD_TOOL="$fixture/bootstrap/sls_install_guard.py"
 UPGRADE_TRUST_DIR="$fixture/approval"
 MODULE_ACTIVATED=1
 STATIC_MUTATION_STARTED=1
@@ -43,14 +46,16 @@ INSTALL_NOTIFICATION_SIDE_EFFECTS=0
 [[ "$scenario" != fresh-unrecorded-swap ]] || MODULE_ACTIVATED=0
 log() { printf '%s\n' "$*" >>"$fixture/messages.log"; }
 ensure_data_directory() { return 0; }
-safe_config_restore() {
-  [[ "$scenario" != config-failure ]] || return 9
-  cp -- "$1" "$2"
-}
 record_install_failure() {
   printf '%s %s\n' "$INSTALL_EXIT_CODE" "$INSTALL_ERROR_CATEGORY" >"$fixture/failure-marker"
 }
-sls_as_asterisk() { printf "restored-asterisk-config\n" >>"$LOG_FILE"; }
+asterisk() {
+  case "$*" in
+    '-rx manager reload'|'-rx dialplan reload')
+      printf 'restored-asterisk-config:%s\n' "$*" >>"$LOG_FILE" ;;
+    *) return 99 ;;
+  esac
+}
 verify_install_idle_history() { printf "retained-phone-history\n" >>"$LOG_FILE"; }
 verify_local_api_route() { printf "read-only-api-health\n" >>"$LOG_FILE"; }
 refresh_served_php_workers() { printf "refresh-served-php\n" >>"$LOG_FILE"; }
@@ -65,6 +70,8 @@ restore_module_registration() {
 if [[ "$scenario" == move-failure ]]; then
   restore_previous_module_tree() { return 19; }
 fi
+acquire_worker_coordination
+acquire_settings_coordination
 if [[ "$scenario" == repeated-recovery ]]; then
   rollback_module_install || :
   ROLLBACK_FAILED=0
@@ -88,8 +95,8 @@ class RollbackTests(unittest.TestCase):
                 previous = backup / MODULE
                 previous.mkdir()
                 (previous / 'payload').write_text('original release')
-            for directory in ('stage', 'download', 'recovery', 'bootstrap'):
-                (fixture / directory).mkdir()
+            for directory in ('stage', 'download', 'recovery', 'bootstrap', 'data'):
+                (fixture / directory).mkdir(mode=0o700)
             if scenario == 'fresh-unrecorded-swap':
                 # Activation copies the staged source, so the source remains
                 # present after rename and before publishing the swap marker.
@@ -104,7 +111,8 @@ class RollbackTests(unittest.TestCase):
             (approval / 'previous-web-approval.json').write_text(json.dumps({MODULE: prior}))
             (approval / 'previous-web-approval.json').chmod(0o600)
             helpers = ROOT / 'slsmassnotifyserver/bin/sls_mass_notify'
-            for name in ('sls_upgrade_trust.py', 'sls_module_trust.py', 'sls_release_trust.py', 'sls_installer_recovery.py'):
+            for name in ('sls_upgrade_trust.py', 'sls_module_trust.py', 'sls_release_trust.py', 'sls_installer_recovery.py',
+                         'sls_install_transaction.py', 'sls_install_guard.py', 'sls_config_crypto.py'):
                 body = (helpers / name).read_text()
                 if name == 'sls_upgrade_trust.py':
                     body = body.replace("WEB = Path('/var/www/html')", "WEB = Path(" + repr(str(fixture)) + ")")
@@ -118,27 +126,44 @@ class RollbackTests(unittest.TestCase):
             installed = fixture / 'admin/modules' / MODULE
             (fixture/'recovery/module-registration.json').write_text('{"schema":1,"row":null}')
             (fixture/'recover.py').write_text('import pathlib,sys\np=pathlib.Path(sys.argv[2]).parent.parent\nwith (p/"commands.log").open("a") as f: f.write("static-"+sys.argv[3]+"\\n")\nif sys.argv[3]=="restore-maintenance":sys.exit(1)\n')
-            (fixture/'config').write_text('changed by failed install')
+            config = fixture/'data/mass-notifications.config'
+            config.write_text('changed by failed install'); config.chmod(0o640)
             snapshot = fixture/'config.snapshot'
-            snapshot.write_text('original protected config')
+            snapshot.write_text('original protected config'); snapshot.chmod(0o600)
+            spec = importlib.util.spec_from_file_location('rollback_intent_fixture', helpers/'sls_install_transaction.py')
+            transaction = importlib.util.module_from_spec(spec); spec.loader.exec_module(transaction)
+            transaction.record_configuration_intent(fixture/'recovery', hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                                                   snapshot.read_bytes(), config.read_bytes())
+            if scenario == 'config-failure':
+                with (fixture/'bootstrap/sls_install_transaction.py').open('a') as target:
+                    target.write('\ndef restore_configuration_recovery(arguments, lease_check):\n    raise TransactionError("Injected configuration restoration failure")\n')
             (fixture/'delivery-ledger').write_text('new receipt committed during install')
             installer = fixture/'installer.sh'
             installer.write_text(SOURCE.replace('/var/www/html/admin/modules', str(fixture/'admin/modules')))
             result = subprocess.run(['bash', '-c', HARNESS, '_', str(installer), str(fixture), scenario],
                 capture_output=True, text=True, timeout=20, env={**os.environ,'SLS_MASS_NOTIFY_MODULE':MODULE})
-            self.assertEqual(result.returncode,73,result.stdout+result.stderr)
-            self.assertEqual((fixture/'failure-marker').read_text().strip(),'73 install_rollback_failed')
+            self.assertEqual(result.returncode,1 if scenario=='config-failure' else 73,result.stdout+result.stderr)
+            self.assertEqual((fixture/'failure-marker').read_text().strip(),
+                             '1 install_recovery_config_conflict' if scenario=='config-failure' else '73 install_rollback_failed')
             for path in (backup,snapshot,fixture/'stage',fixture/'recovery',fixture/'bootstrap'):
                 self.assertTrue(path.exists(),str(path))
-            self.assertFalse((fixture/'download').exists())
-            log=(fixture/'commands.log').read_text()
+            self.assertEqual((fixture/'download').exists(),scenario=='config-failure')
+            log=(fixture/'commands.log').read_text() if (fixture/'commands.log').exists() else ''
             self.assertNotIn('FORBIDDEN',log)
+            if scenario == 'config-failure':
+                self.assertNotIn('static-restore', log)
+                self.assertEqual(config.read_text(),'changed by failed install')
+                self.assertEqual((installed/'payload').read_text(),'failed new release')
+                self.assertEqual((fixture/'delivery-ledger').read_text(),'new receipt committed during install')
+                return
             self.assertIn('static-restore',log)
             self.assertIn('static-verify',log)
             self.assertIn('restore-module-registration',log)
+            self.assertIn('restored-asterisk-config:-rx manager reload',log)
+            self.assertIn('restored-asterisk-config:-rx dialplan reload',log)
             self.assertEqual((fixture/'delivery-ledger').read_text(),'new receipt committed during install')
             if scenario != 'config-failure':
-                self.assertEqual((fixture/'config').read_text(),'original protected config')
+                self.assertEqual(config.read_text(),'original protected config')
             if scenario.startswith('fresh'): self.assertFalse(installed.exists())
             elif scenario not in ('move-failure','pre-activation'):
                 self.assertEqual((installed/'payload').read_text(),'original release')
@@ -203,14 +228,18 @@ except (m.IdleError,OSError,ValueError):sys.exit(1)
                 launcher = base / 'idle-launcher.py'
                 launcher.write_text('import os,sys\nos.execv('+repr(str(wrapper))+','+repr([str(wrapper)])+'+sys.argv[1:])\n')
                 script = '''source "$1"
-WORKER_LOCK_PID=$$
 DATA_DIR="$2/data"; RECOVERY_DIR="$2/recovery"; IDLE_TOOL="$2/idle-launcher.py"
+WORKER_GUARD_TOOL="$4"
+ensure_data_directory() { :; }
+acquire_worker_coordination
+trap release_worker_coordination EXIT
 ROLLBACK_ATTEMPTED=1
 if [[ "$3" == *enterprise-worker ]]; then ROLLBACK_ATTEMPTED=0; fi
 sleep() { :; }
 verify_install_idle_history
 '''
-                result = subprocess.run(['bash','-c',script,'fixture',str(ROOT/'tools/install_release.sh'),str(base),failure],
+                result = subprocess.run(['bash','-c',script,'fixture',str(ROOT/'tools/install_release.sh'),str(base),failure,
+                    str(ROOT/'slsmassnotifyserver/bin/sls_mass_notify/sls_install_guard.py')],
                     capture_output=True,text=True,timeout=15)
                 if failure in ('delayed-startup', 'transient-enterprise-worker'):
                     self.assertEqual(result.returncode,0,result.stderr)

@@ -132,6 +132,21 @@ class PermissionRecoveryTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
         self.assertEqual(recovery.repair(self.data, self.approval)['repaired_files'], [])
 
+    def test_disconnected_display_cache_keeps_its_contents_and_requires_a_boolean(self):
+        name = 'phone-collector-display.json'
+        state = self.collector_caches()[name]
+        for invalid in (0, 'false', None):
+            self.file(name, json.dumps(dict(state, connected=invalid)).encode())
+            before = self.metadata()
+            with self.assertRaises(recovery.PermissionRecoveryError):
+                recovery.repair(self.data, self.approval)
+            self.assertEqual(self.metadata(), before)
+        body = json.dumps(dict(state, connected=False)).encode()
+        path = self.file(name, body)
+        original_inode = path.stat().st_ino
+        self.assertIn(name, recovery.repair(self.data, self.approval)['repaired_files'])
+        self.assertEqual((path.stat().st_ino, path.read_bytes()), (original_inode, body))
+
     def test_collector_cache_lost_mutex_or_malformed_content_never_changes_metadata(self):
         values = self.collector_caches()
         name = 'phone-collector-heartbeat.json'

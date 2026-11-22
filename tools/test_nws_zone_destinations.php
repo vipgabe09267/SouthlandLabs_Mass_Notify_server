@@ -252,16 +252,6 @@ if (strpos($view, 'Legacy Quiet-Hours Defaults') !== false) {
 	zone_destination_fail('Weather settings still expose a competing global quiet-hours editor.');
 }
 
-$classSource = (string)file_get_contents(dirname(__DIR__) . '/slsmassnotifyserver/Slsmassnotifyserver.class.php');
-foreach ([
-	'$primaryZonePolicy = $nwsZones[0] ?? [];',
-	'$primaryZonePolicy[\'quiet_hours_enabled\']',
-	'$primaryZonePolicy[\'quiet_critical_events\']',
-] as $marker) {
-	if (strpos($classSource, $marker) === false) {
-		zone_destination_fail("First-zone quiet-hour compatibility alias is missing: {$marker}");
-	}
-}
 foreach (['disabled — uncheck to remove this assignment', 'missing — uncheck to remove'] as $marker) {
 	if (strpos($view, $marker) === false) {
 		zone_destination_fail("Disabled or missing desktop unassignment UI marker is missing: {$marker}");

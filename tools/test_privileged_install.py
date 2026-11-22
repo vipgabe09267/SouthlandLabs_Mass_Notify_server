@@ -8,6 +8,8 @@ import json
 import hashlib
 import re
 import os
+import socketserver
+import ssl
 from pathlib import Path
 import stat
 import subprocess
@@ -15,6 +17,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 sys.dont_write_bytecode = True
@@ -496,6 +499,14 @@ class PrivilegedInstall(unittest.TestCase):
         with self.assertRaisesRegex(INSTALL.InstallError,'fixture'): self.action.dependencies()
         self.assertEqual(len(self.services.calls),1)
         self.assertEqual(self.services.calls[0][0],['/bin/bash',INSTALL.RUNTIME + '/sls_mass_notify_install_piper_voices.sh','--runtime-only','--workers-paused'])
+
+    def test_explicit_profile_reaches_both_dependency_builds(self):
+        self.action.prepare()
+        self.services.calls.clear()
+        self.action.dependencies(resource_profile='lite')
+        for arguments, options in self.services.calls[:2]:
+            self.assertEqual(arguments[arguments.index('--resource-profile') + 1], 'lite')
+        self.assertNotIn('--resource-profile', self.services.calls[2][0])
     def test_activation_and_root_verification_never_bootstrap_pbx(self):
         self.action.prepare(); self.action.dependencies(); self.action.activate(); self.assertTrue(self.action.verify())
         self.assertTrue(any(args == ['/usr/bin/systemctl','restart',INSTALL.SERVICE] for args,_ in self.services.calls))
@@ -571,6 +582,8 @@ class PrivilegedInstall(unittest.TestCase):
         assets=self.base/'offline-assets';assets.mkdir(mode=0o700)
         for name in ('wheels','voices'):(assets/name).mkdir(mode=0o700)
         self.action.dependencies(assets)
+        self.assertTrue(all(not options.get('network') for args, options in self.services.calls
+                            if args[0] == '/bin/bash'))
         operations=[args for args,_ in self.services.calls if args and args[0]=='/bin/bash' and '--repair-permissions-only' not in args]
         self.assertEqual(len(operations),2)
         for args in operations:
@@ -614,6 +627,176 @@ class PrivilegedInstall(unittest.TestCase):
         self.action.prepare()
         self.assertEqual(path.stat().st_size,80*1024*1024)
         with path.open('rb') as input: self.assertEqual(input.read(23),b'preserved log beginning')
+    def test_system_runner_uses_only_qualified_private_install_workspace(self):
+        private='/var/spool/sls-mass-notify-installer-tmp'
+        with mock.patch.dict(os.environ,{'TMPDIR':private,'GITHUB_TOKEN':'never-forward'}), mock.patch.object(INSTALL,'private_install_temporary_state',return_value={'exists':True},create=True) as checked:
+            result=INSTALL.runner(['/usr/bin/python3','-I','-c','import os,json;print(json.dumps({"tmp":os.environ.get("TMPDIR"),"token":os.environ.get("GITHUB_TOKEN")}))'])
+        checked.assert_called_once_with()
+        self.assertEqual(json.loads(result.stdout),{'tmp':private,'token':None})
+        with mock.patch.dict(os.environ,{'TMPDIR':private}), mock.patch.object(INSTALL,'private_install_temporary_state',side_effect=ValueError('unsafe'),create=True), mock.patch.object(INSTALL.subprocess,'Popen') as started:
+            with self.assertRaises(INSTALL.InstallError):INSTALL.runner(['/bin/true'])
+            started.assert_not_called()
+
+    def test_authenticated_build_phases_receive_operator_network_settings_only(self):
+        self.action.prepare()
+        certificate = self.base / 'operator-ca.pem'
+        certificate.write_text('public fixture certificate\n'); certificate.chmod(0o644)
+        network = {'HTTPS_PROXY': 'http://fixture-user:fixture-secret@proxy.invalid:3128',
+                   'NO_PROXY': 'localhost,127.0.0.1,.internal', 'PIP_CERT': str(certificate),
+                   'PYTHONPATH': '/untrusted/python', 'BASH_ENV': '/untrusted/shell',
+                   'PIP_INDEX_URL': 'https://untrusted-index.invalid', 'GITHUB_TOKEN': 'fixture-token'}
+        observations = []
+        def builder(arguments, **kwargs):
+            command = ['/usr/bin/python3', '-I', '-c',
+                       'import os,json;print(json.dumps({k:os.environ.get(k) for k in '
+                       '["HTTPS_PROXY","NO_PROXY","PIP_CERT","PYTHONPATH","BASH_ENV","PIP_INDEX_URL","GITHUB_TOKEN"]}))']
+            result = INSTALL.runner(command, **kwargs)
+            observations.append(json.loads(result.stdout))
+            return result
+        self.action.run = builder
+        with mock.patch.dict(os.environ, network, clear=True):
+            self.action.dependencies()
+        self.assertEqual(len(observations), 3)
+        for actual in observations[:2]:
+            self.assertEqual(actual['HTTPS_PROXY'], network['HTTPS_PROXY'])
+            self.assertEqual(actual['NO_PROXY'], network['NO_PROXY'])
+            self.assertEqual(actual['PIP_CERT'], str(certificate))
+            for name in ('PYTHONPATH', 'BASH_ENV', 'PIP_INDEX_URL', 'GITHUB_TOKEN'):
+                self.assertIsNone(actual[name])
+        self.assertTrue(all(value is None for value in observations[2].values()),
+                        'Permission-only work must not inherit download credentials or trust overrides')
+
+    def test_download_environment_canonicalizes_root_certificate_symlinks_without_changing_files(self):
+        certificate = self.base / 'root-ca.pem'
+        certificate.write_text('public fixture CA\n'); certificate.chmod(0o644)
+        link = self.base / 'certificate-alias.pem'; link.symlink_to(certificate)
+        # Reading a symlink may update its access time on relatime mounts.
+        def identity(path):
+            info = path.lstat()
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        before = (identity(certificate), identity(link))
+        keys = ('https_proxy', 'ALL_PROXY', 'no_proxy', 'SSL_CERT_FILE', 'PIP_CERT',
+                'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE')
+        values = dict.fromkeys(keys[3:], str(link))
+        values.update(https_proxy='http://proxy.invalid:3128', ALL_PROXY='https://proxy.invalid:8443',
+                      no_proxy='localhost,10.0.0.0/8,[::1]')
+        with mock.patch.dict(os.environ, values, clear=True):
+            result = INSTALL.runner(['/usr/bin/python3', '-I', '-c',
+                'import os,json;print(json.dumps({k:os.environ.get(k) for k in '+repr(list(keys))+'}))'], network=True)
+        actual = json.loads(result.stdout)
+        self.assertEqual({k: actual[k] for k in keys[:3]}, {k: values[k] for k in keys[:3]})
+        self.assertTrue(all(actual[k] == str(certificate) for k in keys[3:]))
+        self.assertEqual((identity(certificate), identity(link)), before)
+
+    def test_dependency_error_cannot_echo_operator_network_secrets(self):
+        with mock.patch.dict(os.environ, {'https_proxy': 'http://user:private-pass@proxy.invalid'}, clear=True):
+            with self.assertRaisesRegex(INSTALL.InstallError, 'exit 23') as error:
+                INSTALL.runner(['/bin/sh', '-c', 'echo "$https_proxy" >&2; exit 23'], network=True)
+        self.assertNotIn('private-pass', str(error.exception))
+        self.assertNotIn('proxy.invalid', str(error.exception))
+
+    def test_pinned_download_via_loopback_proxy_with_private_ca(self):
+        # Terminate CONNECT/TLS inside the fixture. The origin never resolves externally.
+        certificate = self.base / 'ca.pem'
+        key = self.base / 'test.key'
+        subprocess.run(['/usr/bin/openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                        '-subj', '/CN=speech.fixture.invalid', '-addext', 'subjectAltName=DNS:speech.fixture.invalid',
+                        '-days', '1', '-keyout', str(key), '-out', str(certificate)], capture_output=True, check=True)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(certificate, key)
+        wheel = self.base / 'sll_fixture-1-py3-none-any.whl'
+        metadata = 'sll_fixture-1.dist-info/'
+        with zipfile.ZipFile(wheel, 'w') as archive:
+            archive.writestr(metadata + 'METADATA', 'Metadata-Version: 2.1\nName: sll-fixture\nVersion: 1\n')
+            archive.writestr(metadata + 'WHEEL', 'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
+            archive.writestr(metadata + 'RECORD', '')
+        body = wheel.read_bytes()
+        observed = []
+        def headers(stream):
+            data = b''
+            while b'\r\n\r\n' not in data and len(data) < 8192:
+                part = stream.recv(1024)
+                if not part:
+                    break
+                data += part
+            return data
+        class LoopbackProxy(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.settimeout(5)
+                connect = headers(self.request)
+                if not connect.startswith(b'CONNECT speech.fixture.invalid:443 '):
+                    return
+                self.request.sendall(b'HTTP/1.1 200 Connection established\r\n\r\n')
+                with tls.wrap_socket(self.request, server_side=True) as secure:
+                    request = headers(secure)
+                    observed.append(request.split(b'\r\n', 1)[0])
+                    secure.sendall(b'HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: ' +
+                                   str(len(body)).encode() + b'\r\n\r\n' + body)
+        url = 'https://speech.fixture.invalid/' + wheel.name
+        lock = self.base / 'requirements.txt'
+        lock.write_text(url + ' --hash=sha256:' + hashlib.sha256(body).hexdigest() + '\n')
+        with socketserver.TCPServer(('127.0.0.1', 0), LoopbackProxy) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                env = {'HTTPS_PROXY': 'http://127.0.0.1:' + str(server.server_address[1]),
+                       'PIP_CERT': str(certificate), 'CURL_CA_BUNDLE': str(certificate)}
+                with mock.patch.dict(os.environ, env, clear=True):
+                    result = INSTALL.runner(['/usr/bin/curl', '--disable', '--fail', '--silent', url], network=True)
+                    self.assertEqual(result.stdout, body)
+                    dest = self.base / 'downloads'
+                    INSTALL.runner(['/usr/bin/python3', '-I', '-m', 'pip', '--isolated', '--cert', str(certificate),
+                                    '--disable-pip-version-check', 'download', '--no-index', '--no-cache-dir', '--no-deps',
+                                    '--retries', '0', '--require-hashes', '-r', str(lock), '--dest', str(dest)], network=True)
+                    self.assertEqual((dest / wheel.name).read_bytes(), body)
+            finally:
+                server.shutdown()
+                worker.join(timeout=5)
+        self.assertEqual(observed, [('GET /' + wheel.name + ' HTTP/1.1').encode()] * 2)
+
+    def test_invalid_network_values_fail_before_start_without_disclosing_values(self):
+        cases = {'HTTPS_PROXY': ['file:///etc/shadow', 'http://proxy.invalid:bad',
+                                 'http://fixture-secret@proxy.invalid\nInjected: yes', 'x' * 8193],
+                 'NO_PROXY': ['localhost\nfixture-secret'],
+                 'PIP_CERT': ['relative-fixture-secret.pem', '/no/such/fixture-secret.pem']}
+        for key, values in cases.items():
+            for value in values:
+                with self.subTest(setting=key), mock.patch.dict(os.environ, {key: value}, clear=True), \
+                     mock.patch.object(INSTALL.subprocess, 'Popen') as started:
+                    with self.assertRaises(INSTALL.InstallError) as error:
+                        INSTALL.runner(['/bin/true'], network=True)
+                    self.assertIn(key, str(error.exception))
+                    self.assertNotIn('fixture-secret', str(error.exception))
+                    started.assert_not_called()
+
+    def test_download_certificate_cannot_be_replaced_through_unprotected_owner_or_parent(self):
+        folder = self.base / 'operator-certificates'; folder.mkdir(mode=0o755)
+        certificate = folder / 'ca.pem'; certificate.write_text('public CA\n'); certificate.chmod(0o644)
+        for change in ('writable_file', 'writable_parent', 'other_owner', 'symlink_owner'):
+            certificate.chmod(0o644); folder.chmod(0o755); os.chown(certificate, 0, 0)
+            target = certificate
+            if change == 'writable_file': certificate.chmod(0o664)
+            elif change == 'writable_parent': folder.chmod(0o777)
+            elif change == 'other_owner': os.chown(certificate, 999, 999)
+            else:
+                target = folder / 'other-user-alias.pem'; target.symlink_to(certificate)
+                os.chown(target, 999, 999, follow_symlinks=False)
+            with self.subTest(change=change), mock.patch.dict(os.environ, {'SSL_CERT_FILE': str(target)}, clear=True), \
+                 mock.patch.object(INSTALL.subprocess, 'Popen') as started:
+                with self.assertRaises(INSTALL.InstallError):
+                    INSTALL.runner(['/bin/true'], network=True)
+                started.assert_not_called()
+        os.chown(certificate, 0, 0)
+
+    def test_network_context_requires_root_and_an_explicit_boolean(self):
+        for uid, value in ((999, True), (0, 1), (0, 'yes')):
+            with self.subTest(uid=uid), mock.patch.object(INSTALL.os, 'geteuid', return_value=uid), \
+                 mock.patch.object(INSTALL.subprocess, 'Popen') as started:
+                with self.assertRaises(INSTALL.InstallError):
+                    INSTALL.runner(['/bin/true'], network=value)
+                started.assert_not_called()
+
     def test_system_runner_bounds_output_during_execution_and_propagates_errors(self):
         for fd in (1,2):
             with self.subTest(fd=fd):

@@ -97,7 +97,7 @@ class Slsmassnotifyserver implements \BMO
 	use SlsEnterpriseCluster;
 	use SlsEnterpriseLabs;
 	use SlsEnterpriseIntegrations;
-	const MODULE_VERSION = '0.1.9-beta';
+	const MODULE_VERSION = '0.2.0-beta';
 	const INCIDENT_JOB_CONTRACT = 1;
 	const EVENTS_LOG = '/var/log/sls_mass_notify_events.jsonl';
 	const LEGACY_EVENTS_LOG = '/var/log/nws_weather_alert_events.jsonl';
@@ -266,6 +266,7 @@ class Slsmassnotifyserver implements \BMO
 	public function installUnprivilegedPhase()
 	{
 		$this->requireRuntimeAccount();
+		$this->preflightManagedIntegrationTargets();
 		$existing = $this->configurationPathMetadata(self::SETTINGS_JSON);
 		if ($existing !== null) {
 			// Validate before repair can change permissions or create a new file.
@@ -283,12 +284,39 @@ class Slsmassnotifyserver implements \BMO
 		$this->ensureAmiUser();
 		$this->ensureDialplan();
 		$this->ensureSipNotifyTemplates();
-		$this->ensureMenuPlacement();
 		$this->ensureDashboardWidget();
 		$this->ensureCronJob();
 		$backupEnrollment = $this->ensureFreePbxBackupEnrollment();
 		if (empty($backupEnrollment['success'])) {
 			throw new \RuntimeException(_('FreePBX backup enrollment could not be verified.'));
+		}
+		return true;
+	}
+
+
+	/** Read-only ownership admission before unprivileged integration changes. */
+	public function preflightManagedIntegrationTargets()
+	{
+		$this->requireRuntimeAccount();
+		$account = posix_getpwnam('asterisk');
+		$targets = [
+			'/etc/asterisk/manager_custom.conf', '/etc/asterisk/extensions_custom.conf',
+			'/etc/asterisk/sip_notify_custom.conf',
+			'/var/www/html/admin/modules/dashboard/sections/SlsMassNotifyAnnouncement.class.php',
+			'/var/www/html/admin/modules/dashboard/views/sections/sls-mass-notify-announcement.php',
+		];
+		$overview = '/var/www/html/admin/modules/dashboard/sections/Overview.class.php';
+		if (is_readable($overview)) {
+			$current = $this->readManagedTextFile($overview);
+			if ($this->removeLegacyDashboardOverviewPatch($current) !== $current) { $targets[] = $overview; }
+		}
+		foreach ($targets as $path) {
+			clearstatcache(true, $path); $metadata = @lstat($path);
+			if ($metadata === false) { continue; }
+			if (($metadata['mode'] & 0170000) !== 0100000 || $metadata['nlink'] !== 1
+				|| $metadata['uid'] !== $account['uid']) {
+				throw new \RuntimeException(sprintf(_('Managed integration ownership cannot be preserved for %s. Root-owned or foreign-owned mutable targets require an explicitly supported ownership adapter; no integration changes were started.'), $path));
+			}
 		}
 		return true;
 	}
@@ -314,11 +342,11 @@ class Slsmassnotifyserver implements \BMO
 			throw new \RuntimeException(_('Run the bundled uninstaller as root: /usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh. It removes SLL without running web-writable module PHP as root.'));
 		}
 		$this->requireRuntimeAccount();
+		$this->preflightManagedIntegrationTargets();
 		$this->removeFreePbxBackupEnrollment();
 		$this->removeCronJob();
 		$this->removeAmiUsers();
 		$this->removeDashboardWidget();
-		$this->removeMenuPlacement();
 		$this->removeManagedBlock('/etc/asterisk/sip_notify_custom.conf', 'SLS Mass Notifications SIP NOTIFY Templates');
 		$this->removeManagedBlock('/etc/asterisk/extensions_custom.conf', 'SLS Mass Notifications Dialplan');
 		$this->removeManagedBlock('/etc/asterisk/manager_custom.conf', 'SLS Mass Notifications AMI');
@@ -744,6 +772,39 @@ class Slsmassnotifyserver implements \BMO
 		return $result;
 	}
 
+
+	/** Undo only enrollment written by this installer; retain independent job edits. */
+	public function restoreFreePbxBackupEnrollment(array $snapshot)
+	{
+		$this->requireRuntimeAccount();
+		if (count($snapshot) > 1000) { throw new \RuntimeException(_('Too many backup enrollment recovery entries.')); }
+		foreach ($snapshot as $entry) {
+			if (!is_array($entry) || !is_string($entry['job'] ?? null) || $entry['job'] === ''
+				|| strlen($entry['job']) > 128 || preg_match('/[\x00-\x1f\x7f]/', $entry['job'])
+				|| !is_bool($entry['present'] ?? null) || !array_key_exists('value', $entry)
+				|| !(is_scalar($entry['value']) || $entry['value'] === null)
+				|| (!$entry['present'] && $entry['value'] !== null)) {
+				throw new \RuntimeException(_('Invalid backup enrollment recovery entry.'));
+			}
+		}
+		if (!$snapshot) { return 0; }
+		$backup = $this->FreePBX->Backup;
+		$jobs = (array)$backup->getAll('backupList'); $changed = 0;
+		foreach ($snapshot as $entry) {
+			$job = $entry['job'];
+			// Already-enabled baselines were never enrolled by this installation.
+			if (!array_key_exists($job, $jobs)
+				|| ($entry['present'] && $this->freePbxBackupSelectionIsEnabled($entry['value']))) { continue; }
+			$selected = (array)$backup->getAll('modules_' . $job);
+			// Native KV persistence returns the installer's true as string '1'.
+			if (!in_array($selected['slsmassnotifyserver'] ?? null, [true, 1, '1'], true)) { continue; }
+			if ($entry['present']) { $backup->setConfig('slsmassnotifyserver', $entry['value'], 'modules_' . $job); }
+			else { $backup->delConfig('slsmassnotifyserver', 'modules_' . $job); }
+			$changed++;
+		}
+		return $changed;
+	}
+
 	private function freePbxBackupSelectionIsEnabled($value)
 	{
 		if (is_bool($value)) {
@@ -844,12 +905,28 @@ class Slsmassnotifyserver implements \BMO
 		}
 		return $health;
 	}
-	public function myConfigPageInits() { return ['index', 'slsmassnotifyserver', 'slsmassnotifyserver_other',
+	public function myConfigPageInits() { return ['index', 'modules', 'updates', 'slsmassnotifyserver', 'slsmassnotifyserver_other',
 		'slsmassnotifyserver_help', 'slsmassnotifyserver_operators', 'slsmassnotifyserver_enterprise',
 		'slsmassnotifyserver_scheduling', 'slsmassnotifyserver_paging', 'slsmassnotifyserver_locations',
 		'slsmassnotifyserver_incidents', 'slsmassnotifyserver_automations', 'slsmassnotifyserver_nws', 'slsmassnotifyserver_lightning']; }
 	public function doConfigPageInit($page)
 	{
+		if ($page === 'modules' || $page === 'updates') {
+			// FreePBX resolves the proposed version on its own confirmation page.
+			// Keep the processing response and unrelated module updates untouched.
+			$actions = $_REQUEST['moduleaction'] ?? null;
+			if (($_REQUEST['action'] ?? null) === 'confirm' && is_array($actions)
+				&& in_array($actions['framework'] ?? null, [
+					'upgrade', 'force_upgrade', 'upgradeignoreconflicts', 'rollback',
+					'install', 'installignoreconflicts', 'downloadinstall', 'reinstall',
+				], true)) {
+				echo '<div class="alert alert-warning" role="alert"><strong>'
+					. _('SLL Mass Notify Server — Framework compatibility') . '</strong> '
+					. _('Check the proposed Framework version below before confirming. SLL requires FreePBX 17 with Framework 17.0.33 or later. Verified stock packages include 17.0.33, 17.0.33.1 through 17.0.33.5, and 17.0.34. Other versions may require compatibility review. Back up any custom Framework files before proceeding.')
+					. '</div>';
+			}
+			return;
+		}
 		if ($page === 'index') {
 			// Register before Dashboard inserts widgets containing external CDN scripts.
 			$revision = substr(hash_file('sha256', __DIR__ . '/views/dashboard_assets.js'), 0, 16);
@@ -864,29 +941,17 @@ class Slsmassnotifyserver implements \BMO
 	public function getRightNav($request) {}
 	public function getActionBar($request) {}
 
-	/** Apply staged settings as part of FreePBX's native Apply Config/reload. */
+	/** Apply staged settings without phone routes during native Apply Config. */
 	public function genConfig()
 	{
-		// A release reload regenerates PBX integration from active settings. It
-		// must preserve the administrator's staged changes for their own Apply.
-		if (PHP_SAPI === 'cli' && getenv('SLS_MASS_NOTIFY_PRESERVE_PENDING') === '1') {
-			$this->requireRuntimeAccount();
-			return [];
-		}
-		if ($this->getPendingSettings() === null) {
-			return [];
-		}
-		$result = $this->applySettings();
-		if (empty($result['success'])) {
-			throw new \RuntimeException((string)($result['message'] ?? _('Unable to apply Mass Notifications settings.')));
-		}
+		$this->applyStagedSettingsForPbxReload(false);
 		return [];
 	}
 
 	/**
 	 * FreePBX discovers native Apply Config participants by the presence of
-	 * writeConfig(). All module settings are written atomically by genConfig(),
-	 * so there is no additional generated file content to persist here.
+	 * writeConfig(). The shared settings transaction writes configuration during
+	 * genConfig or the phone dialplan hook. This module returns no extra files.
 	 */
 	public function writeConfig($config)
 	{
@@ -1488,6 +1553,9 @@ class Slsmassnotifyserver implements \BMO
 			];
 		}
 
+		if (($input['nws_zones_present'] ?? null) === '1') {
+			$input['nws_zones'] = $this->normalizeNwsZoneFormInput(array_key_exists('nws_zones', $input) ? $input['nws_zones'] : []);
+		}
 		$defaults = $this->getDefaultSettings();
 		$currentSettings = $this->getPendingSettings() ?? $this->getActiveSettings();
 		$errors = [];
@@ -1563,9 +1631,9 @@ class Slsmassnotifyserver implements \BMO
 		// Weather saves must not rewrite those canonical destination arrays;
 		// live email recipients remain attached to the matching zone group.
 		// Top-level quiet-hour keys are rolling-upgrade aliases only. The active
-		// policy belongs to each normalized zone; mirror the first zone without
-		// overwriting edits made in the zone manager.
-		$primaryZonePolicy = $nwsZones[0] ?? [];
+		// policy belongs to each normalized zone. With no zones, retain the saved
+		// schedule and bypass events when changing unrelated Weather settings.
+		$primaryZonePolicy = $nwsZones[0] ?? $currentSettings;
 		$quietHoursEnabled = empty($primaryZonePolicy['quiet_hours_enabled']) ? '0' : '1';
 		$quietHoursStart = $this->normalizeHour((string)($primaryZonePolicy['quiet_hours_start'] ?? $defaults['quiet_hours_start']), $defaults['quiet_hours_start']);
 		$quietHoursEnd = $this->normalizeHour((string)($primaryZonePolicy['quiet_hours_end'] ?? $defaults['quiet_hours_end']), $defaults['quiet_hours_end']);
@@ -2819,30 +2887,47 @@ class Slsmassnotifyserver implements \BMO
 		}
 	}
 
-	private function applyPendingSettingsTransaction()
+	private function applyPendingSettingsTransaction($pbxReload = false, bool $dialplanHook = false)
 	{
 		$this->ensurePluginDataDir();
 		$lock = $this->acquireSettingsLock(true);
 		try {
-			$activeSettings = $this->normalizeSettings($this->loadSettingsFile(self::SETTINGS_JSON));
-			if ($this->configurationPathMetadata(self::PENDING_SETTINGS_JSON) !== null) {
-				$settings = $this->normalizeSettings($this->loadSettingsFile(self::PENDING_SETTINGS_JSON));
+			$activeRaw = $this->loadSettingsFile(self::SETTINGS_JSON);
+			$activeSettings = $this->normalizeSettings($activeRaw, $activeRaw);
+			$pendingPath = null;
+			foreach ([self::PENDING_SETTINGS_JSON, self::LEGACY_PENDING_SETTINGS_JSON, self::LEGACY_OLD_PENDING_SETTINGS_JSON] as $candidate) {
+				if ($this->configurationPathMetadata($candidate) !== null) { $pendingPath = $candidate; break; }
+			}
+			if ($pbxReload && $pendingPath === null) { return; }
+			if ($pendingPath !== null) {
+				$rawSettings = $this->loadSettingsFile($pendingPath);
+				$settings = $this->normalizeSettings($rawSettings, $rawSettings);
 			} else {
+				$rawSettings = $activeRaw;
 				$settings = $activeSettings;
 			}
 			$settings = \SLS\MassNotify\ImmediateSettings::reconcile($activeSettings, $settings);
+			if ($pbxReload) {
+				// Only the dialplan hook can publish phone routes. A separate
+				// genConfig invocation must not activate a revision after that
+				// hook generated the old routes on an unavailable prompt.
+				if (!$dialplanHook && ($this->hasPbxPhoneRoutes($activeSettings) || $this->hasPbxPhoneRoutes($settings))) { return; }
+				$this->validatePbxReloadReferences($settings, \SLS\MassNotify\ImmediateSettings::reconcile($activeRaw, $rawSettings));
+			}
 			if ($this->isSetupComplete($activeSettings)) {
 				$settings['setup'] = $activeSettings['setup'];
 			}
 			foreach ($this->automationDependencyChecks($settings) as $check) { if ($check['state'] !== 'ok') { throw new \DomainException($check['detail']); } }
-			if ($this->getPanicExtensionUsage(true,$settings)) { $this->validatePanicExtensions($settings); $this->ensureLivePagingPrompts($settings); }
+			$panic = (bool)$this->getPanicExtensionUsage(true, $settings);
+			if ($panic) { $this->validatePanicExtensions($settings); }
 			$paging = $this->normalizeLivePagingSettings($settings['live_paging'] ?? []);
 			if ($paging['enabled'] === '1') {
 				$this->validateLivePagingSelection($paging, $settings);
 				$this->assertLivePagingExtensionAvailable($paging['extension']);
-				$this->ensureLivePagingPrompts($settings);
 			}
-			$this->writeSettingsFileUnlocked(self::SETTINGS_JSON, $this->normalizeSettings($settings), true);
+			if ($panic || $paging['enabled'] === '1') { $this->ensureLivePagingPrompts($settings); }
+			$this->writeSettingsFileUnlocked(self::SETTINGS_JSON, $this->normalizeSettings($settings,
+				\SLS\MassNotify\ImmediateSettings::reconcile($activeRaw, $rawSettings)), true);
 			$this->removePendingSettingsFileUnlocked(
 				_('Changes were applied, but the staged settings file could not be removed safely.')
 			);
@@ -4017,9 +4102,6 @@ class Slsmassnotifyserver implements \BMO
 		}
 		$maxSeconds = $this->normalizeTtsMaxSeconds($settings['tts_max_seconds'] ?? 30);
         $ttsText = $this->buildAnnouncementTtsText($message, $maxSeconds, $settings['announcement_pronunciation'] ?? [], (string)($settings['announcement_piper_voice'] ?? $settings['piper_voice'] ?? self::PIPER_VOICE));
-		if (!empty($settings['_tts_prompt_only'])) {
-			$ttsText = trim(preg_replace('/\s+/', ' ', (string)$message));
-		}
 		if ($ttsText === '') {
 			throw new \DomainException(_('Speech cannot be generated from an empty announcement. Enter the message before sending.'));
 		}
@@ -4924,10 +5006,9 @@ class Slsmassnotifyserver implements \BMO
 		];
 	}
 
-	/** Restore only files that FreePBX Dashboard/Framework upgrades can replace. */
+	/** Restore the SLL widgets supplied to FreePBX Dashboard. */
 	public function repairUpdateSensitiveIntegration()
 	{
-		$this->ensureMenuPlacement();
 		$this->ensureDashboardWidget();
 		return true;
 	}
@@ -5165,13 +5246,14 @@ class Slsmassnotifyserver implements \BMO
 			$checks[] = $this->diagnosticCheck(_('Storage free-space measurement'), is_int($storage['free_bytes'] ?? null) && $storage['free_bytes'] >= 0,
 				sprintf(_('%s MiB free on the PBX data filesystem. This reports the measurement only; installation/capacity checks calculate SLL workspace separately, and retention requires additional provisioning.'), number_format((int)($storage['free_bytes'] ?? 0) / 1048576)));
 			$checks[] = $this->diagnosticCheck(_('External delivery queue'), !$queueFaults['external'],
-				sprintf(_('%d pending; %d unreadable queues; %d expired in retained history. Only failures in the last 15 minutes affect current delivery health.'), (int)($storage['pending_external'] ?? 0), (int)($storage['queue_errors'] ?? 0), (int)($storage['expired_external'] ?? 0))
+				sprintf(_('%d pending; %d unreadable queues; %d expired in retained history. Recent delivery failures cover the last 15 minutes.'), (int)($storage['pending_external'] ?? 0), (int)($storage['queue_errors'] ?? 0), (int)($storage['expired_external'] ?? 0))
 				. (!empty($storage['queue_scan_incomplete']) ? ' ' . sprintf(_('Inventory incomplete after %d queue files; displayed counts are lower bounds. Inspect the maintenance log.'), (int)($storage['queue_files_scanned'] ?? 0)) : ''));
 			$checks[] = $this->diagnosticCheck(_('Weather delivery queue'), !$queueFaults['weather'],
-				sprintf(_('%d pending; %d running; %d failed; %d uncertain; %d expired. Oldest queued: %d seconds; oldest running: %d seconds; %d missed deadlines in the last seven days. Only failures in the last 15 minutes affect current delivery health.'),
+				sprintf(_('%d pending; %d running; %d failed; %d uncertain; %d expired. Oldest queued: %d seconds; oldest running: %d seconds; %d missed deadlines in the last seven days. Recent delivery failures cover the last 15 minutes.'),
 					(int)($storage['pending_weather'] ?? 0), (int)($storage['weather_running'] ?? 0), (int)($storage['failed_weather'] ?? 0),
 					(int)($storage['uncertain_weather'] ?? 0), (int)($storage['expired_weather'] ?? 0),
-					(int)($storage['weather_oldest_queued_age_seconds'] ?? 0), (int)($storage['weather_oldest_running_age_seconds'] ?? 0), (int)($storage['weather_deadline_misses'] ?? 0)));
+					(int)($storage['weather_oldest_queued_age_seconds'] ?? 0), (int)($storage['weather_oldest_running_age_seconds'] ?? 0), (int)($storage['weather_deadline_misses'] ?? 0))
+				. (!empty($storage['weather_scan_incomplete']) ? ' ' . _('Weather inventory is incomplete; displayed counts are lower bounds. Inspect the maintenance log.') : ''));
 		}
 
 		return [
@@ -5926,7 +6008,8 @@ class Slsmassnotifyserver implements \BMO
 			if (!empty($storage['maintenance_failed_stages'])) { $warnings[] = _('Storage maintenance has deferred steps. Open Help diagnostics and review /var/log/sls_mass_notify.log.'); }
 			if (isset($storage['free_bytes']) && (int)$storage['free_bytes'] <= 0) { $warnings[] = _('No free space is reported for PBX data; free space before sending notifications.'); }
 			if (!empty($storage['queue_errors'])) { $warnings[] = _('An external delivery queue is unreadable; inspect the maintenance log'); }
-			if (!empty($storage['queue_scan_incomplete'])) { $warnings[] = _('The external delivery queue scan reached its time or size limit; displayed counts may omit deliveries. Inspect the maintenance log.'); }
+			if (!empty($storage['queue_scan_incomplete'])) { $warnings[] = _('The external delivery inventory could not be fully inspected; displayed counts are lower bounds. Review Help diagnostics and the maintenance log.'); }
+			if (!empty($storage['weather_scan_incomplete'])) { $warnings[] = _('The Weather or Lightning delivery inventory could not be fully inspected; displayed counts are lower bounds. Review Help diagnostics and the maintenance log.'); }
 			if (!empty($storage['recent_expired_external'])) { $warnings[] = sprintf(_('%d external deliveries recently expired without acceptance; historical results remain in Delivery details'), (int)$storage['recent_expired_external']); }
 			if (!empty($storage['security_audit_at_capacity'])) { $warnings[] = _('Authentication and administrator security audit storage reached its limit; recent security events may be missing.'); }
 			if (!empty($storage['security_audit_fault_active'])) { $warnings[] = _('Security audit storage has an unresolved write failure. Review security-audit-fault.json and the maintenance log before security changes. Missing-record evidence is preserved.'); }
@@ -8207,17 +8290,19 @@ class Slsmassnotifyserver implements \BMO
 					throw new \RuntimeException(_('Another request changed the active Mass Notifications settings. Reload this page and try again.'));
 				}
 			}
+			$activeRaw = $this->loadSettingsFile(self::SETTINGS_JSON);
+			$sourceRaw = $activeRaw;
+			foreach ([self::PENDING_SETTINGS_JSON, self::LEGACY_PENDING_SETTINGS_JSON, self::LEGACY_OLD_PENDING_SETTINGS_JSON] as $candidate) {
+				if ($this->configurationPathMetadata($candidate) !== null) { $sourceRaw = $this->loadSettingsFile($candidate); break; }
+			}
 			if (!$replaceSchedules) {
-				if ($this->configurationPathMetadata(self::PENDING_SETTINGS_JSON) !== null) {
-					$latestSettings = $this->normalizeSettings($this->loadSettingsFile(self::PENDING_SETTINGS_JSON));
-				} else {
-					$latestSettings = $this->normalizeSettings($this->loadSettingsFile(self::SETTINGS_JSON));
-				}
+				$latestSettings = $this->normalizeSettings($sourceRaw, $sourceRaw);
 				$settings['scheduled_announcements'] = $latestSettings['scheduled_announcements'] ?? [];
 			}
-			$active = $this->normalizeSettings($this->loadSettingsFile(self::SETTINGS_JSON));
+			$active = $this->normalizeSettings($activeRaw, $activeRaw);
 			$settings = \SLS\MassNotify\ImmediateSettings::reconcile($active, $settings);
-			$this->writeSettingsFileUnlocked(self::PENDING_SETTINGS_JSON, $this->normalizeSettings($settings), false);
+			$this->writeSettingsFileUnlocked(self::PENDING_SETTINGS_JSON, $this->normalizeSettings($settings,
+				\SLS\MassNotify\ImmediateSettings::reconcile($activeRaw, $sourceRaw)), false);
 			$this->rememberSettingsFingerprint(self::PENDING_SETTINGS_JSON);
 		} finally {
 			$this->releaseSettingsLock($lock);
@@ -9051,7 +9136,8 @@ PY;
 		}
 		for ($attempt = 0; $attempt < 3; $attempt++) {
 			$before = $attempt === 0 ? $fingerprint : $this->settingsCacheFingerprint(self::SETTINGS_JSON);
-			$settings = $this->normalizeSettings($this->loadSettingsFile(self::SETTINGS_JSON));
+			$raw = $this->loadSettingsFile(self::SETTINGS_JSON);
+			$settings = $this->normalizeSettings($raw, $raw);
 			$after = $this->settingsCacheFingerprint(self::SETTINGS_JSON);
 			if (hash_equals($before, $after)) {
 				$this->rememberSettingsFingerprint(self::SETTINGS_JSON);
@@ -9079,7 +9165,8 @@ PY;
 			$settings = null;
 			foreach ([self::PENDING_SETTINGS_JSON, self::LEGACY_PENDING_SETTINGS_JSON, self::LEGACY_OLD_PENDING_SETTINGS_JSON] as $candidate) {
 				if ($this->configurationPathMetadata($candidate) !== null) {
-					$settings = $this->normalizeSettings($this->loadSettingsFile($candidate));
+					$raw = $this->loadSettingsFile($candidate);
+					$settings = $this->normalizeSettings($raw, $raw);
 					break;
 				}
 			}
@@ -9231,7 +9318,7 @@ PY;
 		return $settings;
 	}
 
-	private function normalizeSettings(array $settings)
+	private function normalizeSettings(array $settings, ?array $protectedSource = null)
 	{
 		\SLS\MassNotify\RuntimeState::running($settings);
 		$settings = $this->migrateConfigCompatibility($settings);
@@ -9443,7 +9530,8 @@ PY;
 		$settings['announcement_email'] = $this->normalizeAnnouncementEmail(array_key_exists('announcement_email', $settings) ? $settings['announcement_email'] : []);
 		$settings['announcement_sms'] = \SLS\MassNotify\Sms\Config::normalize(array_key_exists('announcement_sms', $settings) ? $settings['announcement_sms'] : []);
 		$settings['desktop_clients'] = $this->normalizeDesktopClients($desktopClientSource, $settings);
-		$settings['announcement_groups'] = $this->normalizeAnnouncementGroups($settings['announcement_groups'] ?? []);
+		$settings['announcement_groups'] = $this->normalizeAnnouncementGroups($settings['announcement_groups'] ?? [],
+			$this->unchangedLegacyPagingAudienceIds($settings, $protectedSource));
 		$settings['live_paging'] = $this->normalizeLivePagingSettings($settings['live_paging'] ?? []);
 		$settings['incident_workflows'] = \SLS\MassNotify\IncidentConfig::normalize($settings['incident_workflows'] ?? []);
 		foreach (['beta_notice'=>\SLS\MassNotify\BetaNotice::class,'labs_safety'=>\SLS\MassNotify\LabsSafety::class,'enterprise_labs'=>\SLS\MassNotify\EnterpriseLabsConfig::class,'enterprise_operations'=>\SLS\MassNotify\EnterpriseOperationsConfig::class,
@@ -10929,14 +11017,61 @@ PY;
 		return $errors;
 	}
 
-	private function normalizeAnnouncementGroups($value)
+	/** Preserve only an unchanged, selected audience supplied by a protected read. */
+	private function unchangedLegacyPagingAudienceIds(array $settings, ?array $protectedSource): array
 	{
-		return $this->normalizeAnnouncementGroupsForExtensions($value, $this->getConfiguredPjsipExtensionNumbers(), null);
+		$paging = \SLS\MassNotify\LivePagingConfig::normalize((array)($settings['live_paging'] ?? []));
+		$selected = array_column(array_filter($paging['groups'], static fn($row) => !\SLS\MassNotify\LivePagingConfig::isStandalone($row)), 'group_id');
+		if (!$selected) { return []; }
+		$groups = $settings['announcement_groups'] ?? [];
+		if (!is_array($groups) || $this->validateAnnouncementGroupFields($groups)) {
+			throw new \InvalidArgumentException(_('The saved legacy paging audiences are malformed. Review the saved groups.'));
+		}
+		$groups = array_column($groups, null, 'id');
+		$available = array_map('strval', $this->getConfiguredPjsipExtensionNumbers());
+		$missing = array_filter($selected, static fn($id) => isset($groups[$id]) && array_diff($groups[$id]['extensions'] ?? [], $available));
+		if (!$missing) { return []; }
+		if ($protectedSource === null) {
+			// Some unrelated editors normalize before the pending writer. Join
+			// their still-present audience to current protected bytes here; never
+			// restore an absent group or trust a user-proposed replacement.
+			$pending = false;
+			foreach ([self::PENDING_SETTINGS_JSON, self::LEGACY_PENDING_SETTINGS_JSON, self::LEGACY_OLD_PENDING_SETTINGS_JSON] as $candidate) {
+				if ($this->configurationPathMetadata($candidate) !== null) { $pending = true; break; }
+			}
+			$protectedSource = $this->rawSettingsForPbxReload(null, $pending);
+		}
+		$protectedSource = $this->migrateConfigCompatibility($protectedSource);
+		$sourcePaging = \SLS\MassNotify\LivePagingConfig::normalize((array)($protectedSource['live_paging'] ?? []));
+		$sourceSelected = array_column(array_filter($sourcePaging['groups'], static fn($row) => !\SLS\MassNotify\LivePagingConfig::isStandalone($row)), 'group_id');
+		$sourceGroups = $protectedSource['announcement_groups'] ?? [];
+		if (!is_array($sourceGroups) || $this->validateAnnouncementGroupFields($sourceGroups)) {
+			throw new \InvalidArgumentException(_('The saved legacy paging audiences are malformed. Review the saved groups.'));
+		}
+		$sourceGroups = array_column($sourceGroups, null, 'id'); $retained = [];
+		foreach ($selected as $id) {
+			$group = $groups[$id] ?? null;
+			if ($group === null || !array_diff($group['extensions'] ?? [], $available)) { continue; }
+			$source = $sourceGroups[$id] ?? null;
+			$canonical = $this->normalizeAnnouncementGroupsForExtensions([$group], $group['extensions'], null);
+			$sourceCanonical = $source === null ? [] : $this->normalizeAnnouncementGroupsForExtensions([$source], $source['extensions'] ?? [], null);
+			if (!in_array($id, $sourceSelected, true) || !$canonical || $canonical !== $sourceCanonical) {
+				throw new \InvalidArgumentException(_('Changed paging audiences must select existing PBX extensions. Review and save Paging before changing that audience.'));
+			}
+			$retained[] = $id;
+		}
+		return $retained;
 	}
 
-	private function normalizeAnnouncementGroupsForExtensions($value, array $allowedExtensions, array $allowedDesktopUsernames = null)
+	private function normalizeAnnouncementGroups($value, array $retainedLegacyIds = [])
+	{
+		return $this->normalizeAnnouncementGroupsForExtensions($value, $this->getConfiguredPjsipExtensionNumbers(), null, $retainedLegacyIds);
+	}
+
+	private function normalizeAnnouncementGroupsForExtensions($value, array $allowedExtensions, array $allowedDesktopUsernames = null, array $retainedLegacyIds = [])
 	{
 		$available = array_fill_keys($allowedExtensions, true);
+		$retained = array_fill_keys($retainedLegacyIds, true);
 		$availableDesktops = $allowedDesktopUsernames === null ? null : array_fill_keys($allowedDesktopUsernames, true);
 		$groups = [];
 		$usedIds = [];
@@ -10956,7 +11091,7 @@ PY;
 			$extensions = [];
 			foreach ((array)($group['extensions'] ?? []) as $extension) {
 				$extension = $this->normalizeExtensionSelector($extension);
-				if ($extension !== '' && ($locationSnapshot !== null || isset($group['desktop_bindings']) || isset($available[$extension]))) {
+				if ($extension !== '' && (isset($retained[(string)($group['id'] ?? '')]) || $locationSnapshot !== null || isset($group['desktop_bindings']) || isset($available[$extension]))) {
 					$extensions[$extension] = $extension;
 				}
 			}
@@ -11371,65 +11506,20 @@ PY;
 
 	private function cleanupLegacyBundledSystemRecordings()
 	{
-		$legacy = [
-			['filename' => 'custom/Paging_Tone_Opening', 'path' => '/var/lib/asterisk/sounds/en/custom/Paging_Tone_Opening.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_ANNOUNCEMENT_OPENING_TONE . '.wav', 'name' => 'Paging Tone Opening', 'description' => 'Default Southland Servers regular announcement opening tone.'],
-			['filename' => 'custom/Paging_Tone_Closing', 'path' => '/var/lib/asterisk/sounds/en/custom/Paging_Tone_Closing.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_ANNOUNCEMENT_CLOSING_TONE . '.wav', 'name' => 'Paging Tone Closing', 'description' => 'Default Southland Servers regular announcement closing tone.'],
-			['filename' => 'custom/NWS_alert', 'path' => '/var/lib/asterisk/sounds/en/custom/NWS_alert.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_NWS_OPENING_TONE . '.wav', 'name' => 'NWS Alert', 'description' => 'Default Southland Servers NWS alert opening tone.'],
-			['filename' => 'custom/Lightning_alert', 'path' => '/var/lib/asterisk/sounds/en/custom/Lightning_alert.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_LIGHTNING_OPENING_TONE . '.wav', 'name' => 'Lightning Alert', 'description' => 'Default Southland Servers cloud-to-ground lightning warning opening tone.'],
-		];
-		try {
-			$lookup = $this->FreePBX->Database()->prepare('SELECT displayname, description FROM recordings WHERE filename = ? LIMIT 1');
-			$delete = $this->FreePBX->Database()->prepare('DELETE FROM recordings WHERE filename = ?');
-			foreach ($legacy as $recording) {
-				$fileExists = is_file($recording['path']) && !is_link($recording['path']);
-				$toneHash = is_file($recording['tone']) ? @hash_file('sha256', $recording['tone']) : false;
-				$fileHash = $fileExists ? @hash_file('sha256', $recording['path']) : false;
-				$fileOwned = is_string($toneHash) && $toneHash !== '' && is_string($fileHash) && hash_equals($toneHash, $fileHash);
-				$lookup->execute([$recording['filename']]);
-				$row = $lookup->fetch(\PDO::FETCH_ASSOC);
-				$rowOwned = is_array($row) && $this->bundledRecordingRowOwned($row, $recording);
-				if (!$rowOwned || ($fileExists && !$fileOwned)) {
-					continue;
-				}
-				$delete->execute([$recording['filename']]);
-				if ($fileOwned && (!is_array($row) || $rowOwned)) {
-					@unlink($recording['path']);
-				}
-			}
-		} catch (\Throwable $exception) {
-			// Legacy names are left untouched whenever ownership cannot be proven.
-		}
+		// Legacy recording IDs and filenames may still be used by native IVRs, ring groups or compound recordings.
+		// FreePBX has per-module usage callbacks, but no complete dependency
+		// authority is established here. Preserve these shared native resources;
+		// an administrator can remove them through System Recordings after review.
+		return;
 	}
 
 	private function removeBundledSystemRecordings()
 	{
-		$recordings = [
-			['filename' => 'custom/SLS_Mass_Notify_Paging_Tone_Opening', 'path' => '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Opening.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_ANNOUNCEMENT_OPENING_TONE . '.wav', 'name' => 'SLL Mass Notify Server - Paging Tone Opening', 'description' => 'Default Southland Labs regular announcement opening tone.'],
-			['filename' => 'custom/SLS_Mass_Notify_Paging_Tone_Closing', 'path' => '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Paging_Tone_Closing.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_ANNOUNCEMENT_CLOSING_TONE . '.wav', 'name' => 'SLL Mass Notify Server - Paging Tone Closing', 'description' => 'Default Southland Labs regular announcement closing tone.'],
-			['filename' => 'custom/SLS_Mass_Notify_NWS_Alert', 'path' => '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_NWS_Alert.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_NWS_OPENING_TONE . '.wav', 'name' => 'SLL Mass Notify Server - NWS Alert', 'description' => 'Default Southland Labs NWS alert opening tone.'],
-			['filename' => 'custom/SLS_Mass_Notify_Lightning_Alert', 'path' => '/var/lib/asterisk/sounds/en/custom/SLS_Mass_Notify_Lightning_Alert.wav', 'tone' => self::TONES_DIR . '/' . self::DEFAULT_LIGHTNING_OPENING_TONE . '.wav', 'name' => 'SLL Mass Notify Server - Lightning Alert', 'description' => 'Default Southland Labs cloud-to-ground lightning warning opening tone.'],
-		];
-		try {
-			$lookup = $this->FreePBX->Database()->prepare('SELECT displayname, description FROM recordings WHERE filename = ? LIMIT 1');
-			$delete = $this->FreePBX->Database()->prepare('DELETE FROM recordings WHERE filename = ?');
-			foreach ($recordings as $recording) {
-				$fileExists = is_file($recording['path']) && !is_link($recording['path']);
-				$toneHash = is_file($recording['tone']) ? @hash_file('sha256', $recording['tone']) : false;
-				$fileHash = $fileExists ? @hash_file('sha256', $recording['path']) : false;
-				$fileOwned = is_string($toneHash) && $toneHash !== '' && is_string($fileHash) && hash_equals($toneHash, $fileHash);
-				$lookup->execute([$recording['filename']]);
-				$row = $lookup->fetch(\PDO::FETCH_ASSOC);
-				$rowOwned = is_array($row) && $this->bundledRecordingRowOwned($row, $recording);
-				if ($rowOwned && (!$fileExists || $fileOwned)) {
-					$delete->execute([$recording['filename']]);
-				}
-				if ($fileOwned && (!is_array($row) || $rowOwned)) {
-					@unlink($recording['path']);
-				}
-			}
-		} catch (\Throwable $exception) {
-			// The standalone uninstaller repeats this bounded cleanup.
-		}
+		// Removing the SLL module does not prove that native recording IDs or their sound files are unused.
+		// FreePBX has per-module usage callbacks, but no complete dependency
+		// authority is established here. Preserve these shared native resources;
+		// an administrator can remove them through System Recordings after review.
+		return;
 	}
 
 	private function cleanupLegacyRuntimeArtifacts()
@@ -11676,6 +11766,7 @@ executables = {
     'sls_nws_http.py',
     'sls_weather_payload.py',
     'sls_speech_admission.py',
+    'sls_render_paging_prompt.py',
     'sls_piper_worker.py',
     'sls_desktop_history.py',
     'sls_desktop_feed_cache.py',
@@ -12118,6 +12209,18 @@ PY;
 		}
 	}
 
+	private function verifyManagedAmiFile($contents, bool $requireUnusedName = false)
+	{
+		require_once __DIR__ . '/AmiUserOwnership.php';
+		$ami = $this->getActiveSettings()['ami'] ?? [];
+		$name = (string)($ami['username'] ?? 'slsmassnotify');
+		$owned = \SLS\MassNotify\AmiUserOwnership::fileAccount((string)$contents, $name,
+			hash('sha256', (string)($ami['password'] ?? '')), $requireUnusedName);
+		if ($owned !== null && strcasecmp($owned, (string)$this->getFreePbxConfigValue('AMPMGRUSER')) === 0) {
+			throw new \RuntimeException(_('The managed AMI file collides with the PBX administrative user. Preserve the file for review.'));
+		}
+	}
+
 	private function ensureAmiUser()
 	{
 		$configuredManagerHost = strtolower(trim((string)$this->getFreePbxConfigValue('ASTMANAGERHOST')));
@@ -12136,49 +12239,19 @@ PY;
 			throw new \RuntimeException(_('Protected central configuration has an invalid AMI credential. Repair or restore the configuration before installing runtime integration.'));
 		}
 		require_once __DIR__ . '/AmiUserOwnership.php';
-		if ($username === (string)$this->getFreePbxConfigValue('AMPMGRUSER')) {
+		$pbxUser = (string)$this->getFreePbxConfigValue('AMPMGRUSER');
+		if (strcasecmp($username, $pbxUser) === 0) {
 			throw new \RuntimeException(_('The SLL AMI username conflicts with the PBX administrative manager account. Restore the dedicated SLL credential before repairing integration.'));
 		}
+		$this->verifyManagedAmiFile($this->readManagedTextFile('/etc/asterisk/manager_custom.conf', 8 * 1024 * 1024, true), true);
 		$manager = null;
 		try {
 			$manager = \FreePBX::Manager();
 		} catch (\Throwable $e) {
 			$manager = null;
 		}
-		if ($manager !== null) {
-			if ($manager->isExist_manager($username, true)
-				&& !\SLS\MassNotify\AmiUserOwnership::matches($manager->get_manager($username, true), $username, hash('sha256', $password))) {
-				throw new \RuntimeException(_('The configured SLL AMI username is already used by a different account. Preserve that account and restore the dedicated SLL credential before repairing integration.'));
-			}
-			try {
-				if ($username !== 'sls_mass_notify' && $manager->isExist_manager('sls_mass_notify', true)
-					&& \SLS\MassNotify\AmiUserOwnership::matches($manager->get_manager('sls_mass_notify', true), 'sls_mass_notify', hash('sha256', $password))) {
-					$manager->del_manager('sls_mass_notify', true);
-				}
-				if ($manager->isExist_manager($username, true)) {
-					$manager->del_manager($username, true);
-				}
-				$manager->add_manager(
-					$username,
-					$password,
-					'0.0.0.0/0.0.0.0&::/0',
-					'127.0.0.1/255.255.255.255&::1/128',
-					'system,call,originate,reporting',
-					'system,call,originate,reporting',
-					1000
-				);
-				$this->removeManagedBlock('/etc/asterisk/manager_custom.conf', 'SLS Mass Notifications AMI');
-			} catch (\Throwable $e) {
-				$block = "[{$username}]\n"
-					. "secret = {$password}\n"
-					. "deny = 0.0.0.0/0.0.0.0\n"
-					. "deny = ::/0\n"
-					. "permit = 127.0.0.1/255.255.255.255\n"
-					. "permit = ::1/128\n"
-					. "read = system,call,originate,reporting\n"
-					. "write = system,call,originate,reporting\n";
-				$this->writeManagedBlock('/etc/asterisk/manager_custom.conf', 'SLS Mass Notifications AMI', $block);
-			}
+		if (\SLS\MassNotify\AmiUserOwnership::reconcile(\FreePBX::Database(), $manager, $username, $password, $pbxUser)) {
+			$this->removeManagedBlock('/etc/asterisk/manager_custom.conf', 'SLS Mass Notifications AMI');
 		} else {
 			$block = "[{$username}]\n"
 				. "secret = {$password}\n"
@@ -12444,13 +12517,10 @@ PY;
 	private function ensureDashboardWidget()
 	{
 		$overview = '/var/www/html/admin/modules/dashboard/sections/Overview.class.php';
-		$backup = self::PLUGIN_DATA_DIR . '/backups/dashboard/Overview.class.php';
-		if (is_readable($backup)) {
-			$restored = $this->readNativeBackupFile($backup, 16 * 1024 * 1024,
-				_('The saved Dashboard recovery file is unsafe or unavailable.'));
-			$this->writeManagedTextFile($overview, $restored, 0644);
-			if (!@unlink($backup)) { throw new \RuntimeException(_('The restored Dashboard recovery file could not be removed.')); }
-		} elseif (is_readable($overview)) {
+		// A legacy saved Overview is recovery evidence, not authority to replace
+		// the currently installed vendor source. Only remove our recognized
+		// in-place overlay and leave any old backup untouched for review.
+		if (is_readable($overview)) {
 			$current = $this->readManagedTextFile($overview);
 			$clean = $this->removeLegacyDashboardOverviewPatch($current);
 			if ($clean !== $current) {
@@ -12576,79 +12646,43 @@ PY;
 		return (string)$content;
 	}
 
-	private function ensureMenuPlacement()
+	/** The signed installer supplies both independently approved complete file digests. */
+	public function retireLegacyFrameworkMenu(string $before, string $after): void
 	{
-		$path = '/var/www/html/admin/views/menu_items.php';
-		if (!is_readable($path) || !is_writable($path)) {
-			return;
+		$this->requireRuntimeAccount();
+		if (!preg_match('/^[a-f0-9]{64}$/D', $before) || !preg_match('/^[a-f0-9]{64}$/D', $after)) {
+			throw new \RuntimeException(_('The legacy menu migration needs both approved file hashes.'));
 		}
-		$current = $this->readManagedTextFile($path);
-		$current = $this->removeMenuPlacementBlock($current);
-		$needles = [
-			"\telse if (\$a == 'other')\n\t\treturn 1;\n",
-			"\telse if (\$a == 'other')\n\t\treturn true;\n",
-		];
-		$insert = "\t// SLS Mass Notifications menu placement: keep Mass Notify after UCP/User Panel.\n"
-			. "\telse if (in_array(\$a, ['mass notifications', 'mass notify'], true) && \$b == 'other')\n"
-			. "\t\treturn -1;\n"
-			. "\telse if (\$a == 'other' && in_array(\$b, ['mass notifications', 'mass notify'], true))\n"
-			. "\t\treturn 1;\n"
-			. "\telse if (in_array(\$a, ['mass notifications', 'mass notify'], true) && in_array(\$b, ['user panel', 'ucp'], true))\n"
-			. "\t\treturn 1;\n"
-			. "\telse if (in_array(\$a, ['user panel', 'ucp'], true) && in_array(\$b, ['mass notifications', 'mass notify'], true))\n"
-			. "\t\treturn -1;\n"
-			. "\telse if (in_array(\$a, ['mass notifications', 'mass notify'], true))\n"
-			. "\t\treturn 1;\n"
-			. "\telse if (in_array(\$b, ['mass notifications', 'mass notify'], true))\n"
-			. "\t\treturn -1;\n";
-		$needle = null;
-		foreach ($needles as $candidate) {
-			if (strpos($current, $candidate) !== false) {
-				$needle = $candidate;
-				break;
+		$path = '/var/www/html/admin/views/menu_items.php';
+		$limit = 8 * 1024 * 1024;
+		$current = $this->readManagedTextFile($path, $limit, true);
+		$digest = hash('sha256', $current);
+		if (hash_equals($after, $digest)) { return; }
+		$marker = "\t// SLS Mass Notifications menu placement:";
+		$position = strpos($current, $marker);
+		// The published menu insertion occupies exactly 695 bytes including its terminal newline.
+		if (!hash_equals($before, $digest) || $position === false || substr_count($current, $marker) !== 1
+			|| hash('sha256', substr($current, $position, 695)) !== 'b95a902541a9d115b06ef70ccb9fd7557db5c011d3838ee0f381bdc11987b257') {
+			throw new \RuntimeException(_('The previous Framework menu differs from its approved SLL integration. Preserve it for review.'));
+		}
+		$restored = substr_replace($current, '', $position, 695);
+		if (!hash_equals($after, hash('sha256', $restored))) {
+			throw new \RuntimeException(_('Removing the previous SLL integration does not produce the approved Framework menu.'));
+		}
+		$this->writeManagedTextFile($path, $restored, null, $limit, $current);
+	}
+
+	/** Read the same module metadata FreePBX uses to build its native navigation. */
+	public function verifyFrameworkMenuRegistration(): void
+	{
+		$module = 'slsmassnotifyserver';
+		$info = \FreePBX::Modules()->getInfo($module);
+		$items = $info[$module]['items'] ?? [];
+		foreach ([$module, $module . '_operations', $module . '_other', $module . '_nws'] as $page) {
+			if (($items[$page]['category'] ?? null) !== 'Mass Notify') {
+				throw new \RuntimeException(_('FreePBX has not registered the Mass Notify navigation entries.'));
 			}
 		}
-		if ($needle === null) {
-			return;
-		}
-		$this->writeManagedTextFile($path, str_replace($needle, $insert . $needle, $current), 0644);
-	}
-
-	private function removeMenuPlacement()
-	{
-		$path = '/var/www/html/admin/views/menu_items.php';
-		if (!is_readable($path) || !is_writable($path)) {
-			return;
-		}
-		$current = $this->readManagedTextFile($path);
-		$updated = $this->removeMenuPlacementBlock($current);
-		if ($updated !== $current) {
-			$this->writeManagedTextFile($path, $updated, 0644);
-		}
-	}
-
-	private function removeMenuPlacementBlock($content)
-	{
-		$content = preg_replace(
-			"/\t\/\/ SLS Mass Notifications menu placement:.*?(?=\telse if \\(\\\$a == 'other'\\)\n\t\treturn (?:1|true);\n)/s",
-			'',
-			$content
-		);
-		$legacy = [
-			"\telse if (\$a == 'mass notifications' && \$b == 'other')\n\t\treturn -1;\n",
-			"\telse if (\$a == 'other' && \$b == 'mass notifications')\n\t\treturn 1;\n",
-			"\telse if (\$a == 'mass notifications' && \$b == 'user panel')\n\t\treturn 1;\n",
-			"\telse if (\$a == 'user panel' && \$b == 'mass notifications')\n\t\treturn -1;\n",
-			"\telse if (\$a == 'mass notifications')\n\t\treturn 1;\n",
-			"\telse if (\$b == 'mass notifications')\n\t\treturn -1;\n",
-			"\telse if (\$a == 'mass notify' && \$b == 'other')\n\t\treturn -1;\n",
-			"\telse if (\$a == 'other' && \$b == 'mass notify')\n\t\treturn 1;\n",
-			"\telse if (\$a == 'mass notify' && \$b == 'user panel')\n\t\treturn 1;\n",
-			"\telse if (\$a == 'user panel' && \$b == 'mass notify')\n\t\treturn -1;\n",
-			"\telse if (\$a == 'mass notify')\n\t\treturn 1;\n",
-			"\telse if (\$b == 'mass notify')\n\t\treturn -1;\n",
-		];
-		return str_replace($legacy, '', (string)$content);
 	}
 
 	/** Read a bounded managed configuration without following a replacement path. */
@@ -12697,9 +12731,9 @@ PY;
 	}
 
 	/** Atomically replace a small, fixed PBX integration file on its own filesystem. */
-	private function writeManagedTextFile($path, $contents, $mode = 0644, $maxBytes = 16 * 1024 * 1024)
+	private function writeManagedTextFile($path, $contents, $mode = 0644, $maxBytes = 16 * 1024 * 1024, $expectedContents = null)
 	{
-		$path = (string)$path; $contents = (string)$contents; $mode = (int)$mode;
+		$path = (string)$path; $contents = (string)$contents; $mode = $mode === null ? null : (int)$mode;
 		$maxBytes = max(1, min(16 * 1024 * 1024, (int)$maxBytes));
 		$allowed = ['/etc/asterisk/', '/etc/apache2/', '/etc/logrotate.d/', '/var/www/html/',
 			'/usr/local/bin/', '/usr/local/sbin/', rtrim(self::PLUGIN_DATA_DIR, '/') . '/'];
@@ -12707,7 +12741,7 @@ PY;
 		foreach ($allowed as $prefix) { if (strpos($path, $prefix) === 0) { $approved = true; break; } }
 		$directory = dirname($path); $parent = @lstat($directory); $account = posix_getpwnam('asterisk');
 		$owners = is_array($account) ? array_unique([0, posix_geteuid(), $account['uid']]) : [];
-		if (!$approved || !in_array($mode, [0640, 0644, 0755], true) || strlen($contents) > $maxBytes
+		if (!$approved || !in_array($mode, [null, 0640, 0644, 0755], true) || strlen($contents) > $maxBytes
 			|| !is_array($parent) || !is_array($account) || ($parent['mode'] & 0170000) !== 0040000
 			|| ($parent['mode'] & 0002) !== 0 || (($parent['mode'] & 0020) !== 0 && $parent['gid'] !== $account['gid'])
 			|| !in_array($parent['uid'], $owners, true) || realpath($directory) !== $directory) {
@@ -12722,6 +12756,15 @@ PY;
 		clearstatcache(true, $path); $existing = @lstat($path);
 		if ($existing !== false && !$safeExisting($existing)) {
 			throw new \RuntimeException(_('The managed PBX configuration file is not a safe regular file.'));
+		}
+		if ($existing !== false && posix_geteuid() !== 0 && $existing['uid'] !== posix_geteuid()) {
+			throw new \RuntimeException(_('Managed integration ownership cannot be preserved by the runtime account; no staging file was created.'));
+		}
+		if ($mode === null) {
+			if ($existing === false || $expectedContents === null) {
+				throw new \RuntimeException(_('Preserving file permissions requires an approved, existing integration file.'));
+			}
+			$mode = $existing['mode'] & 0777;
 		}
 		$temporary = $directory . '/.' . basename($path) . '.sls.' . bin2hex(random_bytes(16));
 		$mask = umask(0077);
@@ -12762,6 +12805,9 @@ PY;
 				|| $existing['dev'] !== $current['dev'] || $existing['ino'] !== $current['ino']))) {
 				throw new \RuntimeException(_('The managed PBX configuration changed before replacement.'));
 			}
+			if ($expectedContents !== null && $this->readManagedTextFile($path, $maxBytes, true) !== $expectedContents) {
+				throw new \RuntimeException(_('The managed PBX configuration changed before replacement. Preserve it for review.'));
+			}
 			if (!@rename($temporary, $path)) { throw new \RuntimeException(_('Unable to replace the managed PBX configuration.')); }
 			$installed = true;
 			$directoryHandle = @fopen($directory, 'r');
@@ -12788,6 +12834,9 @@ PY;
 		$legacyStart = ';-- BEGIN ' . $name . ' --';
 		$legacyEnd = ';-- END ' . $name . ' --';
 		$current = $baseContent === null ? $this->readManagedTextFile($path) : (string)$baseContent;
+		$amiFile = $path === '/etc/asterisk/manager_custom.conf';
+		$original = $amiFile ? $current : null;
+		if ($amiFile) { $this->verifyManagedAmiFile($current, true); }
 		$managed = $start . "\n" . rtrim($block) . "\n" . $end . "\n";
 		$pattern = '/' . preg_quote($start, '/') . '.*?' . preg_quote($end, '/') . "\\n?/s";
 		$legacyPattern = '/' . preg_quote($legacyStart, '/') . '.*?' . preg_quote($legacyEnd, '/') . "\\n?/s";
@@ -12802,7 +12851,7 @@ PY;
 		}
 		$current = rtrim($current);
 		$current = ($current === '' ? '' : $current . "\n\n") . $managed;
-		$this->writeManagedTextFile($path, $current, $path === '/etc/asterisk/manager_custom.conf' ? 0640 : 0644);
+		$this->writeManagedTextFile($path, $current, $amiFile ? 0640 : 0644, 16 * 1024 * 1024, $original);
 	}
 
 	private function removeManagedBlock($path, $name)
@@ -12816,13 +12865,16 @@ PY;
 		$legacyStart = ';-- BEGIN ' . $name . ' --';
 		$legacyEnd = ';-- END ' . $name . ' --';
 		$current = $this->readManagedTextFile($path);
+		$amiFile = $path === '/etc/asterisk/manager_custom.conf';
+		if ($amiFile) { $this->verifyManagedAmiFile($current); }
+
 		$pattern = '/' . preg_quote($start, '/') . '.*?' . preg_quote($end, '/') . "\\n?/s";
 		$legacyPattern = '/' . preg_quote($legacyStart, '/') . '.*?' . preg_quote($legacyEnd, '/') . "\\n?/s";
 		$updated = preg_replace($pattern, '', $current);
 		$updated = preg_replace($legacyPattern, '', (string)$updated);
 		if ($updated !== null && $updated !== $current) {
 			$this->writeManagedTextFile($path, trim($updated) === '' ? '' : rtrim($updated) . "\n",
-				$path === '/etc/asterisk/manager_custom.conf' ? 0640 : 0644);
+				$amiFile ? 0640 : 0644, 16 * 1024 * 1024, $amiFile ? $current : null);
 		}
 	}
 
@@ -12854,8 +12906,7 @@ PY;
 		if (is_dir('/var/www/html/admin/modules/dashboard')) {
 			$modules[] = 'dashboard';
 		}
-		// Menu placement modifies a framework-owned view, so cover that managed
-		// integration with the same trusted local signature.
+		// Keep the existing reviewed local Framework signature current after a legacy upgrade.
 		if (is_dir('/var/www/html/admin/modules/framework')) {
 			$modules[] = 'framework';
 		}
@@ -13515,6 +13566,39 @@ PY;
 	{
 		$value = strtoupper(trim((string)$value));
 		return preg_match('/^[A-Z]{2}[CZ][0-9]{3}$/D', $value) ? $value : '';
+	}
+
+	private function normalizeNwsZoneFormInput($value)
+	{
+		// HTML forms cannot encode an empty checkbox list. The zone editor sends
+		// one trailing empty sentinel, and its critical-event editor is CSV text.
+		// Decode only this form representation before the unchanged strict schema;
+		// JSON/API settings never pass through this adapter.
+		if (!is_array($value) || !array_is_list($value) || count($value) > 5) {
+			return $value;
+		}
+		foreach ($value as &$group) {
+			if (!is_array($group)) { continue; }
+			foreach (['discord_webhook_ids', 'generic_webhook_ids'] as $field) {
+				if (!array_key_exists($field, $group)) {
+					$group[$field] = [];
+				} elseif (is_array($group[$field]) && array_is_list($group[$field])
+					&& $group[$field] && $group[$field][count($group[$field]) - 1] === '') {
+					// Remove exactly the one form sentinel, preserving duplicate,
+					// empty interior or noncanonical IDs for validation to reject.
+					array_pop($group[$field]);
+				}
+			}
+			$critical = $group['quiet_critical_events'] ?? null;
+			if (is_array($critical) && array_is_list($critical) && count($critical) === 1) {
+				$critical = $critical[0];
+			}
+			if (is_string($critical) && strlen($critical) <= 8192 && !preg_match('/[\x00-\x1f\x7f]/', $critical)) {
+				$group['quiet_critical_events'] = trim($critical) === '' ? [] : array_map('trim', explode(',', $critical));
+			}
+		}
+		unset($group);
+		return $value;
 	}
 
 	private function normalizeNwsZoneGroups($value, $legacyZone = '', $legacyRecipients = [], array $legacyQuiet = [])
@@ -16837,12 +16921,7 @@ PY;
 				throw new \RuntimeException(_('Post-restore verification found runtime or Dashboard files that do not match the installed module payload.'));
 			}
 		}
-		$menuContents = is_readable('/var/www/html/admin/views/menu_items.php')
-			? (string)@file_get_contents('/var/www/html/admin/views/menu_items.php')
-			: '';
-		if (strpos($menuContents, 'SLS Mass Notifications menu placement: keep Mass Notify after UCP/User Panel.') === false) {
-			throw new \RuntimeException(_('Post-restore verification found incomplete FreePBX menu integration.'));
-		}
+		$this->verifyFrameworkMenuRegistration();
 		$dashboardHooks = (array)\FreePBX::Dashboard()->getConfig('allhooks');
 		$dashboardFound = false;
 		foreach ($dashboardHooks as $page) {
@@ -17153,7 +17232,6 @@ PY;
 			. ' ' . escapeshellarg(self::RUNTIME_DIR . '/sls_nws_delivery_claims.py');
 		$syntaxCommands = [
 			'/usr/bin/php -l ' . escapeshellarg(__FILE__),
-			'/usr/bin/php -l ' . escapeshellarg('/var/www/html/admin/views/menu_items.php'),
 			'/usr/bin/php -l ' . escapeshellarg(self::RUNTIME_DIR . '/sls_mass_notify_schedule_worker.php'),
 			'/usr/bin/php -l ' . escapeshellarg(self::RUNTIME_DIR . '/sls_mass_notify_announcement_worker.php'),
 			'/usr/bin/php -l ' . escapeshellarg(self::RUNTIME_DIR . '/sls_announcement_jobs.php'),

@@ -35,6 +35,18 @@ QUEUE_FIELDS = (
 )
 
 
+def inspection_issues(storage: dict) -> list:
+    rows = storage.get('inspection_issues', [])
+    if not isinstance(rows, list):
+        return []
+    components = {'external', 'weather', 'control_audit', 'security_audit'}
+    codes = {'snapshot_busy', 'snapshot_changed', 'unreadable', 'invalid', 'unsafe', 'scan_limit'}
+    return [dict(component=row['component'], code=row['code']) for row in rows[:32]
+            if isinstance(row, dict) and set(row) == {'component', 'code'}
+            and isinstance(row['component'], str) and row['component'] in components
+            and isinstance(row['code'], str) and row['code'] in codes]
+
+
 def postfix_health() -> dict:
     """Inspect the daemon and queue without submitting or modifying mail."""
     from sls_mail_admission import inspect_queue, MailAdmissionBlocked, QUEUE_LIMIT
@@ -216,11 +228,18 @@ def collect(
         storage = read_json(
             data / "storage-summary.json", maximum=65536, runtime_owner=True
         )
+        external_incomplete = storage.get('queue_scan_incomplete') is True
+        weather_incomplete = storage.get('weather_scan_incomplete') is True
         result["queues"] = {
             key: storage[key]
             for key in QUEUE_FIELDS
             if type(storage.get(key)) is int and 0 <= storage[key] <= 1000000
+            and not (weather_incomplete and 'weather' in key)
+            and not (external_incomplete and key in {'pending_external', 'expired_external', 'queue_errors'})
         }
+        result['queue_scan_incomplete'] = external_incomplete
+        result['weather_scan_incomplete'] = weather_incomplete
+        result['inspection_issues'] = inspection_issues(storage)
         result["storage_checked_at"] = (
             storage.get("checked_at")
             if type(storage.get("checked_at")) is int

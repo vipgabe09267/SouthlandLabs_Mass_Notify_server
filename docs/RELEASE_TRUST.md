@@ -92,6 +92,59 @@ when available. Fresh installations bootstrap using the pinned current key;
 deploy the reviewed overlap policy before distributing releases signed only by a
 replacement key. Downloaded code cannot establish authority for its own signature.
 
+The `0.2.0-beta` bootstrap's existing-installation mode and temporary candidate
+registries consult that same current root-approved policy. They do not reset to
+the original key or accept policy supplied inside a downloaded candidate.
+
+## Expired retained release metadata
+
+In `0.2.0-beta`, an expired manifest for the exact protected active generation
+has an explicit root-review path. Normal downloaded candidates still require
+unexpired metadata. An expired or revoked signing key remains a refusal.
+
+Using the installed `0.2.0-beta` protected helper, inspect the evidence first:
+
+```bash
+sudo /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_upgrade_trust.py \
+  --workspace /root/sls-retained-review --review-retained
+```
+
+If the installed release predates this review feature, use a separately
+publisher-authenticated `0.2.0-beta` installer as the launch boundary:
+
+```bash
+sudo /bin/bash ./install_release.sh --review-retained
+sudo /bin/bash ./install_release.sh --approve-retained EXACT_SHA256_CHALLENGE \
+  --operator 'Administrator name' \
+  --reason 'Independently reviewed this exact retained release for upgrade continuity.'
+```
+
+These modes verify the current candidate before loading its new root-protected
+helper, then inspect or explicitly approve the existing live trust root. They do
+not start a transaction, bootstrap native FreePBX PHP, pause workers, activate a
+module or install software. The bootstrap forwards these modes only with
+`--upgrade`. Candidate-provided trust policy is never existing authority. Ordinary
+`--inspect` uses the same source-only staging boundary and creates no approval.
+
+After independently reviewing its exact generation and evidence hashes, use the
+displayed challenge with the administrator's identity and review reason:
+
+```bash
+sudo /usr/bin/python3 -I /usr/local/bin/sls_mass_notify/sls_upgrade_trust.py \
+  --workspace /root/sls-retained-review --approve-retained EXACT_SHA256_CHALLENGE \
+  --operator 'Administrator name' \
+  --reason 'Independently reviewed this exact retained release for upgrade continuity.'
+```
+
+These actions do not write to the required workspace argument. Approval joins
+the installation/maintenance and publisher locks and writes a root-private
+`retained-release-approval.json` in the protected trust directory. It expires
+after seven days and does not renew automatically. Every use rechecks the exact
+active reference, inventory, manifest, signature, source bytes and current trust
+policy. Changed evidence or policy invalidates the approval. The exception covers
+only this retained manifest's expiration; it cannot authorize a fresh candidate,
+revoked/expired key, altered module or restoration of an old operational ledger.
+
 ## Emergency recovery
 
 Stop automatic release installation at the operating-system level and investigate

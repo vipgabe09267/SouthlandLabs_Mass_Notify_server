@@ -39,6 +39,12 @@ class SpeechAdmissionError(RuntimeError):
         self.code = code
 
 
+class SpeechCapacityError(SpeechAdmissionError):
+    """A measured file-count, cache or free-space limit refused the write."""
+    def __init__(self, message):
+        super().__init__(message, 73)
+
+
 def setting(config, name, default, minimum, maximum):
     value = config.get(name, default)
     if type(value) is not int or not minimum <= value <= maximum:
@@ -47,7 +53,8 @@ def setting(config, name, default, minimum, maximum):
 
 
 class Admission:
-    def __init__(self, config, seconds, directory=DATA, web=WEB, clock=time.monotonic):
+    def __init__(self, config, seconds, directory=DATA, web=WEB, clock=time.monotonic, *,
+                 additional_media_directory_fd=None):
         self.directory, self.web = Path(directory), Path(web)
         profile = config.get('deployment_profile', 'standard')
         if profile not in ('standard', 'lite'):
@@ -65,6 +72,15 @@ class Admission:
         self.fd = open_directory(self.directory)
         self.parent_metadata = os.fstat(self.fd)
         self.handles = []
+        self.additional_media_directory_fd = None
+        if additional_media_directory_fd is not None:
+            try:
+                self.additional_media_directory_fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+                                                             dir_fd=additional_media_directory_fd)
+            except (OSError, TypeError, ValueError):
+                os.close(self.fd)
+                raise
+            self.handles.append(self.additional_media_directory_fd)
         self.names = {}
         self.active = None
         self.waiter = None
@@ -188,6 +204,61 @@ class Admission:
             try: os.unlink(temporary, dir_fd=self.fd)
             except FileNotFoundError: pass
 
+    def _check_media_capacity(self, slots, *, include_web):
+        media = generated_inventory(self.directory, self.web)
+        if len(media) >= MAX_GENERATED_FILES:
+            raise SpeechCapacityError(
+                f'Generated-media file count reached its safety limit. file_count={len(media)} limit_files={MAX_GENERATED_FILES}.')
+        used = sum(row[3].st_size for row in media)
+        reservations = [row for slot in slots for row in self.record(slot)]
+        reserved = sum(row['bytes'] for row in reservations)
+        required_cache = used + reserved + self.bytes
+        if required_cache > self.budget:
+            raise SpeechCapacityError(
+                f'Generated media has insufficient cache budget. used_bytes={used} reserved_bytes={reserved} '
+                f'requested_bytes={self.bytes} required_bytes={required_cache} limit_bytes={self.budget}.')
+        locations = [('data', self.fd, 1)]
+        if include_web and self.web.exists():
+            locations.append(('web', self.web, 1))
+        destination = self.additional_media_directory_fd
+        locations.append(('temporary', Path('/tmp'), 3 if destination is not None else 1))
+        if destination is not None:
+            locations.append(('destination', destination, 1))
+        required_free = self.reserve + reserved + self.bytes
+        inode_demand = {}
+        prior_inodes_per_job = {}
+        inode_supply = []
+        for role, path, new_inodes in locations:
+            filesystem = os.statvfs(path)
+            if filesystem.f_flag & os.ST_RDONLY:
+                raise SpeechCapacityError(f'Generated media requires a writable filesystem. role={role} read_only=1.')
+            available = filesystem.f_bavail * filesystem.f_frsize
+            # The byte reservation covers the entire render. Aliases share this single
+            # requirement, but a read-only bind or a local quota can differ by path.
+            if available < required_free:
+                raise SpeechCapacityError(
+                    f'Generated media would consume the protected free-space reserve. role={role} '
+                    f'available_bytes={available} required_bytes={required_free} reserve_bytes={self.reserve} '
+                    f'reserved_bytes={reserved} requested_bytes={self.bytes}.')
+            device = (os.fstat(path) if isinstance(path, int) else os.stat(path)).st_dev
+            inode_demand[device] = inode_demand.get(device, 0) + new_inodes
+            # Historical reservations identify neither their target mount nor how far
+            # conversion progressed. Allow one outstanding output per job per candidate
+            # device, plus its ledger replacement and private scratch on their devices.
+            prior_inodes_per_job.setdefault(device, 1)
+            if role == 'data':
+                prior_inodes_per_job[device] += 1
+            elif role == 'temporary':
+                prior_inodes_per_job[device] += 3
+            if filesystem.f_files > 0:
+                inode_supply.append((role, device, filesystem.f_favail))
+        for role, device, available in inode_supply:
+            required = inode_demand[device] + len(reservations) * prior_inodes_per_job[device]
+            if available < required:
+                raise SpeechCapacityError(
+                    f'Generated media needs additional file entries. role={role} '
+                    f'available_inodes={available} required_inodes={required} outstanding_reservations={len(reservations)}.')
+
     def reserve_media(self, amount):
         """Budget a non-speech render without occupying a synthesis slot."""
         self.bytes = amount
@@ -196,18 +267,7 @@ class Admission:
         slots = [self.file('speech-slot-%02d.lock' % index) for index in range(MAX_SLOTS)]
         self.lock_control(control)
         try:
-            media = generated_inventory(self.directory, self.web)
-            if len(media) >= MAX_GENERATED_FILES:
-                raise SpeechAdmissionError('Generated-media file count reached its safety limit. Run storage maintenance and review retained references.', 73)
-            used = sum(row[3].st_size for row in media)
-            reserved = sum(row['bytes'] for slot in slots for row in self.record(slot))
-            if used + reserved + amount > self.budget:
-                raise SpeechAdmissionError('Generated media has insufficient cache budget for this render. Review queued alerts or increase the cache budget.', 73)
-            for path in (self.directory, self.web, Path('/tmp')):
-                if not path.exists(): continue
-                filesystem = os.statvfs(path)
-                if filesystem.f_bavail * filesystem.f_frsize < self.reserve + reserved + amount:
-                    raise SpeechAdmissionError('Generated media would consume the protected free-space reserve. Free disk space before retrying.', 73)
+            self._check_media_capacity(slots, include_web=True)
             target = next((slot for slot in slots if len(self.record(slot)) < 64), None)
             if target is None:
                 raise SpeechAdmissionError('Generated-media reservation capacity is full. Wait for current renders to finish.', 75)
@@ -241,17 +301,7 @@ class Admission:
                 if MAX_SLOTS - len(unlocked) < self.limit:
                     candidate = next((slot for slot in unlocked if len(self.record(slot)) < 64), None)
                     if candidate is not None:
-                        rows = generated_inventory(self.directory, self.web)
-                        if len(rows) >= MAX_GENERATED_FILES:
-                            raise SpeechAdmissionError('Generated-media file count reached its safety limit. Run storage maintenance and review retained references.', 73)
-                        used = sum(row[3].st_size for row in rows)
-                        reserved = sum(row['bytes'] for slot in slots for row in self.record(slot))
-                        if used + reserved + self.bytes > self.budget:
-                            raise SpeechAdmissionError('Generated media has insufficient cache budget for this speech job. Review queued alerts or increase the cache budget.', 73)
-                        for path in (self.directory, Path('/tmp')):
-                            filesystem = os.statvfs(path)
-                            if filesystem.f_bavail * filesystem.f_frsize < self.reserve + reserved + self.bytes:
-                                raise SpeechAdmissionError('Speech generation would consume the protected free-space reserve. Free disk space before retrying.', 73)
+                        self._check_media_capacity(slots, include_web=False)
                         self.write(candidate, self.record(candidate) + [{'token': self.token, 'bytes': self.bytes, 'expires': time.time() + min(900, 2 * self.bytes / 160000 + 30) + 65}])
                         self.active = candidate
                         self.slot_number = slots.index(candidate)
@@ -267,26 +317,40 @@ class Admission:
                 raise SpeechAdmissionError('Speech generation waited too long for capacity. Current speech jobs are still running.')
             time.sleep(.1)
 
+    def complete(self):
+        """Release this worker's reservation after publication and workspace cleanup."""
+        self._finish(completed=True)
+
     def close(self):
-        if self.fd is None: return
+        """Keep a bounded reservation for callers that still need to convert audio."""
+        self._finish(completed=False)
+
+    def _finish(self, *, completed):
+        if self.fd is None:
+            return
         try:
             if self.active is not None:
-                # Hold space across duration checks/conversion, including a
-                # short grace after failed jobs without inferring success.
                 try:
                     self.lock_control(self.control)
                 except (OSError, SpeechAdmissionError) as error:
-                    print('Speech cleanup could not update its reservation: '+str(error),file=sys.stderr)
+                    if completed:
+                        raise
+                    print('Speech cleanup could not update its reservation: ' + str(error), file=sys.stderr)
                     return
                 try:
                     rows = self.record(self.active)
-                    for row in rows:
-                        if row['token'] == self.token: row['expires'] = time.time() + 60
+                    if completed:
+                        rows = [row for row in rows if row['token'] != self.token]
+                    else:
+                        for row in rows:
+                            if row['token'] == self.token:
+                                row['expires'] = time.time() + 60
                     self.write(self.active, rows)
                 finally:
                     fcntl.flock(self.control, fcntl.LOCK_UN)
         finally:
-            for fd in reversed(self.handles): os.close(fd)
+            for fd in reversed(self.handles):
+                os.close(fd)
             self.handles = []
             os.close(self.fd)
             self.fd = None

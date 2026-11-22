@@ -346,7 +346,7 @@ m.configuration_image(pathlib.Path(sys.argv[2]),'configuration-mfa-',b'complete 
             with self.assertRaises(journal.TransactionError): journal.prepare_configuration_recovery(*args)
             self.assertFalse((recovery / 'configuration-mfa-recovery.json').exists())
 
-    def test_saved_paired_mfa_target_handles_active_absence_but_preserves_missing_pending_conflict(self):
+    def test_saved_paired_mfa_target_preserves_absence_conflicts_and_original_evidence(self):
         helper = Path(__file__).resolve().parents[1] / 'slsmassnotifyserver/bin/sls_mass_notify/sls_install_transaction.py'
         spec = importlib.util.spec_from_file_location('saved_mfa_absence_fixture', helper)
         journal = importlib.util.module_from_spec(spec); spec.loader.exec_module(journal)
@@ -367,13 +367,27 @@ m.configuration_image(pathlib.Path(sys.argv[2]),'configuration-mfa-',b'complete 
                 path.write_text(json.dumps(settings)); path.chmod(0o640)
             arguments = (recovery, hashes[0], snapshots[0], active, 'present', hashes[1], snapshots[1], pending)
             target = journal.prepare_configuration_recovery(*arguments)
-            pending_bytes = pending.read_bytes(); active.unlink()
             self.assertEqual(journal.prepare_configuration_recovery(*arguments), target)
             self.assertEqual(json.loads(Path(target['active_snapshot']).read_bytes())['operator_access']['accounts'][0]['auth']['totp_last_counter'], 11)
+            active_bytes, pending_bytes = active.read_bytes(), pending.read_bytes()
+            retained = {path: path.read_bytes() for path in recovery.iterdir() if path.is_file()}
+            active.unlink()
+            # A durable target cannot prove that no later login consumed a
+            # counter before the active file disappeared. Never recreate it.
+            with self.assertRaisesRegex(journal.TransactionError, 'Established active settings disappeared'):
+                journal.prepare_configuration_recovery(*arguments)
+            self.assertFalse(active.exists())
             self.assertEqual(pending.read_bytes(), pending_bytes)
+            self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+            # Independently retain the original missing-pending conflict with
+            # the known live active settings present, so it cannot be masked
+            # by the earlier established-active refusal.
+            active.write_bytes(active_bytes); active.chmod(0o640)
             pending.unlink()
             with self.assertRaises(journal.TransactionError): journal.prepare_configuration_recovery(*arguments)
-            self.assertFalse(active.exists()); self.assertFalse(pending.exists())
+            self.assertEqual(active.read_bytes(), active_bytes); self.assertFalse(pending.exists())
+            self.assertEqual({path: path.read_bytes() for path in retained}, retained)
+            self.assertEqual([hashlib.sha256(path.read_bytes()).hexdigest() for path in snapshots], hashes)
 
     def test_configuration_snapshot_retention_is_repeatable(self):
         with tempfile.TemporaryDirectory() as name:

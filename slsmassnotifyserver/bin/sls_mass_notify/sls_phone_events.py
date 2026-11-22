@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import signal
 from pathlib import Path
 import sys
 import time
@@ -29,7 +30,7 @@ def collect(store, settings, *, ami_factory=PhoneAmi, should_stop=lambda: False)
                 print('SLL emergency observation unavailable; review trigger journal/configuration.', file=sys.stderr)
                 record.last_error = time.monotonic()
     generation = os.urandom(16).hex()
-    store.mark_event_gap()
+    store.mark_event_gap(offline_display=True)
     display_stop = start_refresh_worker(store.directory)
     voicemail_stop = None
     try:
@@ -58,7 +59,7 @@ def collect(store, settings, *, ami_factory=PhoneAmi, should_stop=lambda: False)
         if voicemail_stop is not None:
             voicemail_stop.set()
         display_stop.set()
-        store.mark_event_gap()
+        store.mark_event_gap(generation=generation, offline_display=True)
 
 
 def main():
@@ -68,6 +69,12 @@ def main():
         return 0 if result['ok'] else 1
     if sys.argv[1:]:
         return 64
+    stopped = False
+    def stop(signum, frame):
+        nonlocal stopped
+        stopped = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
     directory_fd = _open_directory(DATA)
     try:
         _validate_parent_directory(directory_fd)
@@ -78,7 +85,8 @@ def main():
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return 0
-            collect(PhoneAdmissionStore(), read_settings())
+            if not stopped:
+                collect(PhoneAdmissionStore(), read_settings(), should_stop=lambda: stopped)
     except Exception:
         # Never print socket/config exceptions: these may contain credentials,
         # phone numbers, or arbitrary provider text. systemd records the exit.

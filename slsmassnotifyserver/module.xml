@@ -2,13 +2,13 @@
 	<rawname>slsmassnotifyserver</rawname>
 	<repo>custom</repo>
 	<name>SLL Mass Notify Server</name>
-	<version>0.1.9-beta</version>
+	<version>0.2.0-beta</version>
 	<publisher>Southland Labs</publisher>
 	<license>AGPLv3+</license>
 	<licenselink>https://www.gnu.org/licenses/agpl-3.0.txt</licenselink>
 	<candisable>yes</candisable>
 	<canuninstall>yes</canuninstall>
-	<category>User Panel Z</category>
+	<category>Mass Notify</category>
 	<description>
 		SLL Mass Notify Server for FreePBX. Provides SIP NOTIFY alerts, scheduled announcements, U.S. weather.gov and optional Xweather notifications, live desktop notifications, and Piper TTS audio.
 	</description>

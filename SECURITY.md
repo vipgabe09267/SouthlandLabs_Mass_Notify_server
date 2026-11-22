@@ -1,3 +1,5 @@
+> **Development candidate.** `0.2.0-beta` is undergoing private qualification. The published prerelease remains `0.1.9-beta`. Historical results below apply to the release indicated.
+
 # Security policy
 
 SLL Mass Notify Server is beta software for noncritical testing. It is not an emergency or life-safety service. Restrict administration, keep the host patched and qualify changes on a separate test PBX.
@@ -101,6 +103,12 @@ Protected journals use bounded validated state, permanent history markers, locki
 Queues claim irreversible work before submission. Accepted or uncertain calls, SMS, webhook, mail and physical effects are not automatically replayed. Scheduled deadlines remain absolute through preparation and delivery; active playback is not interrupted to serve urgent work. Registration, queue and speech limits refuse oversized/unavailable work without silently truncating recipients.
 
 Speech/recording conversion has process, duration, output-byte and free-space bounds. Oversized speech is rejected rather than cut off. Cleanup preserves active references and incomplete inventories. Phone input/AMI operations use cumulative monotonic deadlines and bounded buffers, including partial lines. Handset provisioning and physical outcomes still require acceptance testing.
+
+SLL AMI clients use loopback destinations only. The dedicated SLL manager account
+denies other IPv4/IPv6 addresses and permits only `127.0.0.1` and `::1`. SLL does
+not change AMI's shared global bind address or open firewall ports. The PBX's
+other AMI accounts, router forwarding and external proxies remain separate
+administrator-controlled configuration; verify those when checking WAN exposure.
 
 Generated image/XML URLs retain anonymous compatibility access by default. Administrators can require event-bound desktop authentication and short-lived exact-file phone capabilities. Network and absolute download-expiry policies still apply; malformed policy fails closed. Random URLs do not prove recipient identity. Private floor plans use authenticated, permission-checked responses outside document roots. See [media access](docs/MEDIA_ACCESS.md).
 

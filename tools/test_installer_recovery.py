@@ -106,7 +106,7 @@ echo (new ServiceTemplateFixture())->contents();'''
         self.snapshot()
         self.file(r.RUNTIME+'/worker.py',b'new worker\n',0o755)
         self.file(r.RUNTIME+'/new.py',b'new only\n',0o755)
-        self.file('/etc/asterisk/extensions_custom.conf',b'new dialplan\n')
+        self.file('/etc/asterisk/extensions_custom.conf',b'original dialplan\n\n; BEGIN SLS Mass Notifications Dialplan\n[candidate-owned]\n; END SLS Mass Notifications Dialplan\n')
         data='/var/lib/asterisk/SLS_Mass_Notifications_Plugin/sipnotify/events.jsonl'
         self.file(data,b'new operational ledger\n')
         self.cron+=b'13 2 * * * /usr/bin/true\n'
@@ -166,13 +166,26 @@ echo (new ServiceTemplateFixture())->contents();'''
         user_path='/var/lib/asterisk/sounds/en/custom/User_Recording.wav'
         self.file(user_path,b'prior user audio')
         self.snapshot()
-        for path in (*r.CUSTOM_RECORDINGS,*r.FACTORY_TONES): self.file(path,b'candidate audio')
+        for path in (*r.CUSTOM_RECORDINGS[1:],*r.FACTORY_TONES): self.helper.dest(path).unlink()
+        self.file(r.CUSTOM_RECORDINGS[0],b'new native recording audio')
         self.file(user_path,b'concurrent user audio')
         self.helper.restore()
-        self.assertFalse(self.helper.dest(r.CUSTOM_RECORDINGS[0]).exists())
+        self.assertEqual(self.helper.dest(r.CUSTOM_RECORDINGS[0]).read_bytes(),b'new native recording audio')
         for path in (*r.CUSTOM_RECORDINGS[1:],*r.FACTORY_TONES):
             self.assertEqual(self.helper.dest(path).read_bytes(),('prior '+path).encode())
         self.assertEqual(self.helper.dest(user_path).read_bytes(),b'concurrent user audio')
+    def test_changed_required_recording_audio_preserves_all_live_audio_and_static_files(self):
+        path=r.CUSTOM_RECORDINGS[1]
+        self.file(path,b'prior required audio');self.snapshot()
+        self.file(path,b'independently changed required audio')
+        user='/var/lib/asterisk/sounds/en/custom/User_Recording.wav'
+        self.file(user,b'concurrent user audio')
+        self.file(r.RUNTIME+'/worker.py',b'candidate worker')
+        with self.assertRaisesRegex(r.RecoveryError,'recording audio changed'):
+            self.helper.restore()
+        self.assertEqual(self.helper.dest(path).read_bytes(),b'independently changed required audio')
+        self.assertEqual(self.helper.dest(user).read_bytes(),b'concurrent user audio')
+        self.assertEqual(self.helper.dest(r.RUNTIME+'/worker.py').read_bytes(),b'candidate worker')
     def test_original_snapshot_cannot_be_replaced(self):
         self.snapshot(); original=(self.private/'static/manifest.json').read_bytes()
         self.file(r.RUNTIME+'/worker.py',b'other')
@@ -232,7 +245,7 @@ echo (new ServiceTemplateFixture())->contents();'''
         manifest=self.helper.load()
         blob=self.private/'static/blobs'/manifest['records']['/var/www/html/api/sipnotify/index.php']['sha256']
         self.assertEqual((blob.stat().st_uid,stat.S_IMODE(blob.stat().st_mode)),(0,0o600))
-        source.write_bytes(b'candidate web\n');config.write_bytes(b'candidate dialplan\n')
+        source.write_bytes(b'candidate web\n');config.write_bytes(b'original dialplan\n\n; BEGIN SLS Mass Notifications Dialplan\n[candidate-owned]\n; END SLS Mass Notifications Dialplan\n')
         self.helper.restore()
         self.assertEqual(source.read_bytes(),b'old web\n')
         self.assertEqual(config.read_bytes(),b'original dialplan\n')

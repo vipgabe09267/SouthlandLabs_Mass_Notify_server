@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Bounded retention for audit, jobs and generated media. No configuration writes."""
+import errno
 import fcntl
 import importlib.util
 import json
@@ -656,6 +657,149 @@ def read_locked_object_at(parent, name, limit=4 * 1024 * 1024):
         raise ValueError('Invalid state object')
     return value
 
+class SummaryInspectionError(ValueError):
+    """Fixed, non-sensitive reason why an observational snapshot is unavailable."""
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def summary_object_at(parent, name, limit=4 * 1024 * 1024, *, lock_name,
+                      marker=None, optional=False, deadline=None, budget=None):
+    """Inspect a coherent snapshot without creating or repairing writer state.
+
+    Writers replace JSON under permanent mutexes. Lock that existing mutex
+    before opening the JSON, retaining inode checks for legacy state without a
+    mutex. Only contention or an observed replacement gets a bounded retry.
+    Retention's stricter read_at remains unchanged.
+    """
+    deadline = time.monotonic() + DIRECTORY_SCAN_SECONDS if deadline is None else deadline
+    budget = [limit] if budget is None else budget
+    seen = False
+    fields = ('st_dev', 'st_ino', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode', 'st_uid')
+
+    def identity(info):
+        return tuple(getattr(info, field) for field in fields)
+
+    def safe(info, maximum):
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid not in (0, os.geteuid()) or info.st_mode & 0o022
+                or info.st_size > maximum):
+            raise SummaryInspectionError('unsafe')
+
+    for attempt in range(3):
+        mutex = source = None
+        try:
+            if time.monotonic() > deadline:
+                raise SummaryInspectionError('scan_limit')
+            established = False
+            try:
+                mutex = os.open(lock_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            if mutex is not None:
+                mutex_before = os.fstat(mutex)
+                safe(mutex_before, 64)
+                fcntl.flock(mutex, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                if identity(mutex_before) != identity(os.fstat(mutex)):
+                    raise SummaryInspectionError('snapshot_changed')
+                if identity(mutex_before) != identity(os.stat(lock_name, dir_fd=parent, follow_symlinks=False)):
+                    raise SummaryInspectionError('snapshot_changed')
+                lock_marker = os.read(mutex, 65)
+                if marker is not None and lock_marker not in (b'', marker):
+                    raise SummaryInspectionError('unsafe')
+                # A read-only Weather query may create an empty mutex without
+                # ever writing history. Only its nonempty protocol marker
+                # proves initialization; audit mutexes have no such marker.
+                established = marker is not None and bool(lock_marker)
+            try:
+                named_before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                seen = True
+            except FileNotFoundError:
+                if optional and not seen and not established:
+                    raise
+                raise SummaryInspectionError('unreadable')
+            safe(named_before, limit)
+            if named_before.st_size > budget[0]:
+                raise SummaryInspectionError('scan_limit')
+            source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                             dir_fd=parent)
+            before = os.fstat(source)
+            if before.st_nlink == 0:
+                raise SummaryInspectionError('snapshot_changed')
+            safe(before, limit)
+            if identity(named_before) != identity(before):
+                raise SummaryInspectionError('snapshot_changed')
+            fcntl.flock(source, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            if before.st_size > budget[0]:
+                raise SummaryInspectionError('scan_limit')
+            maximum = min(limit, budget[0])
+            chunks = []
+            length = 0
+            while length <= maximum:
+                if time.monotonic() > deadline:
+                    raise SummaryInspectionError('scan_limit')
+                chunk = os.read(source, min(65536, maximum + 1 - length))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                length += len(chunk)
+                budget[0] -= len(chunk)
+            if length > maximum:
+                raise SummaryInspectionError('scan_limit' if maximum < limit else 'unsafe')
+            after = os.fstat(source)
+            try:
+                named_after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                raise SummaryInspectionError('snapshot_changed')
+            # Unlink by atomic replacement is retriable; additional hard links
+            # and unsafe metadata remain hard faults on every attempt.
+            if after.st_nlink == 0:
+                raise SummaryInspectionError('snapshot_changed')
+            safe(after, limit)
+            safe(named_after, limit)
+            if identity(before) != identity(after) or identity(after) != identity(named_after):
+                raise SummaryInspectionError('snapshot_changed')
+            if mutex is not None:
+                if (identity(mutex_before) != identity(os.fstat(mutex))
+                        or identity(mutex_before) != identity(os.stat(lock_name, dir_fd=parent, follow_symlinks=False))):
+                    raise SummaryInspectionError('snapshot_changed')
+            value = runtime_json(b''.join(chunks))
+            if not isinstance(value, dict):
+                raise SummaryInspectionError('invalid')
+            return value
+        except BlockingIOError:
+            problem = SummaryInspectionError('snapshot_busy')
+        except SummaryInspectionError as error:
+            problem = error
+        except FileNotFoundError:
+            if optional and not seen and not established:
+                raise
+            problem = SummaryInspectionError('snapshot_changed' if seen else 'unreadable')
+        except OSError as error:
+            problem = SummaryInspectionError('unsafe' if error.errno in (errno.ELOOP, errno.ENOTDIR) else 'unreadable')
+        except (ValueError, UnicodeError, RecursionError):
+            problem = SummaryInspectionError('invalid')
+        finally:
+            if source is not None:
+                os.close(source)
+            if mutex is not None:
+                os.close(mutex)
+        if problem.code not in ('snapshot_busy', 'snapshot_changed') or attempt == 2:
+            raise problem
+        if time.monotonic() + .01 > deadline:
+            raise problem
+        time.sleep(.01)
+
+
+def summary_inspection_issue(summary, component, code):
+    issue = {'component': component, 'code': code}
+    if issue not in summary['inspection_issues'] and len(summary['inspection_issues']) < 32:
+        summary['inspection_issues'].append(issue)
+        print('Storage inspection %s: %s.' % (component, code), file=sys.stderr)
+
+
 def audit_regular(parent, name, create=False):
     """Open without following links or blocking on substituted special files."""
     flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -1053,33 +1197,56 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
     total = filesystem.f_blocks * filesystem.f_frsize
     summary = {'checked_at': int(now), 'maintenance_failed_stages': list(failed_stages), 'free_bytes': free, 'total_bytes': total,
                'pending_external': 0, 'expired_external': 0, 'recent_expired_external': 0, 'oldest_pending_at': 0, 'queue_errors': 0,
-               'queue_scan_incomplete': False, 'queue_files_scanned': 0, 'queue_files_seen': 0}
+               'queue_scan_incomplete': False, 'queue_files_scanned': 0, 'queue_files_seen': 0,
+               'weather_scan_incomplete': False, 'inspection_issues': []}
     summary['retained_components']=retained_usage(directory)
     deadline = time.monotonic() + DIRECTORY_SCAN_SECONDS
-    remaining = MAX_REFERENCE_BYTES
+    remaining = [MAX_REFERENCE_BYTES]
+    inspected_queues = set()
     parent = open_directory(directory)
     try:
         with os.scandir(parent) as entries:
             for index, entry in enumerate(entries):
                 if index >= MAX_SCAN or time.monotonic() > deadline:
                     summary['queue_scan_incomplete'] = True
+                    summary_inspection_issue(summary, 'external', 'scan_limit')
                     break
                 name = entry.name
+                from_marker = name.endswith('.json.lock')
+                if from_marker:
+                    name = name[:-5]
                 if not (name.startswith('external-deliveries-') and name.endswith('.json')
                         or name.endswith('-external-deliveries.json')):
                     continue
+                if name in inspected_queues:
+                    continue
+                if from_marker:
+                    # An initialized permanent marker survives JSON loss.
+                    # Inspect it instead of silently reporting an empty queue.
+                    try: marker_info = entry.stat(follow_symlinks=False)
+                    except OSError: marker_info = None
+                    if (marker_info is not None and stat.S_ISREG(marker_info.st_mode)
+                            and marker_info.st_nlink == 1 and marker_info.st_size == 0
+                            and marker_info.st_uid in (0, os.geteuid())
+                            and stat.S_IMODE(marker_info.st_mode) in (0o600, 0o640, 0o644)):
+                        continue  # Empty mutexes do not prove prior delivery state.
+                    try:
+                        os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    except OSError:
+                        pass
+                    else:
+                        continue  # Its JSON entry supplies the ordinary snapshot.
+                inspected_queues.add(name)
                 summary['queue_files_seen'] += 1
-                if summary['queue_files_scanned'] >= MAX_QUEUE_FILES or remaining <= 0:
+                if summary['queue_files_scanned'] >= MAX_QUEUE_FILES or remaining[0] <= 0:
                     summary['queue_scan_incomplete'] = True
+                    summary_inspection_issue(summary, 'external', 'scan_limit')
                     break
                 summary['queue_files_scanned'] += 1
                 try:
-                    size = entry.stat(follow_symlinks=False).st_size
-                    if size > remaining:
-                        summary['queue_scan_incomplete'] = True
-                        break
-                    remaining -= max(0, size)
-                    records = read_locked_object_at(parent, name).get('deliveries', {})
+                    records = summary_object_at(parent, name, lock_name=name + '.lock',
+                                                marker=b'SLS_JSON_V1\n', deadline=deadline,
+                                                budget=remaining).get('deliveries')
                     if not isinstance(records, dict):
                         raise ValueError('Invalid delivery queue')
                     for record in records.values():
@@ -1094,9 +1261,12 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
                             created = int(record.get('created_at') or 0)
                             previous = summary['oldest_pending_at']
                             summary['oldest_pending_at'] = min(previous, created) if previous else created
-                except (OSError, ValueError, TypeError):
+                except (OSError, ValueError, TypeError, OverflowError):
                     summary['queue_errors'] += 1
                     summary['queue_scan_incomplete'] = True
+                    error = sys.exc_info()[1]
+                    summary_inspection_issue(summary, 'external', error.code if isinstance(error, SummaryInspectionError)
+                                             else 'unreadable' if isinstance(error, OSError) else 'invalid')
     finally:
         os.close(parent)
     audit = directory / 'control-api-audit.jsonl'
@@ -1107,12 +1277,16 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
                    weather_oldest_running_age_seconds=0, weather_deadline_misses=0,
                    weather_dispatch_updated_at=0)
     try:
-        weather = read_locked_object(directory / 'weather-delivery.json', limit=16 * 1024 * 1024)
+        weather = summary_object_at(destination, 'weather-delivery.json', limit=16 * 1024 * 1024,
+                                    lock_name='weather-delivery.lock', marker=b'SLS_WEATHER_OUTBOX_V1\n', optional=True)
         metrics = weather.get('dispatch_metrics', {})
         if isinstance(metrics, dict):
             summary['weather_max_workers'] = max(0, min(2, int(metrics.get('max_workers', 0))))
             summary['weather_dispatch_updated_at'] = max(0, min(int(now), int(metrics.get('updated_at', 0))))
-        for job in weather.get('jobs', {}).values():
+        jobs = weather.get('jobs')
+        if not isinstance(jobs, dict):
+            raise ValueError('Invalid Weather delivery inventory')
+        for job in jobs.values():
             state = job.get('state')
             if state in ('queued', 'running'):
                 summary['pending_weather'] += 1
@@ -1131,8 +1305,10 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
                     summary['recent_weather_deadline_misses'] += 1
     except FileNotFoundError:
         pass
-    except (OSError, ValueError, TypeError, AttributeError, OverflowError):
-        summary['queue_errors'] += 1
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError) as error:
+        summary['weather_scan_incomplete'] = True
+        summary_inspection_issue(summary, 'weather', error.code if isinstance(error, SummaryInspectionError)
+                                 else 'unreadable' if isinstance(error, OSError) else 'invalid')
     try:
         audit_info = os.stat(audit.name, dir_fd=destination, follow_symlinks=False)
         if not stat.S_ISREG(audit_info.st_mode) or audit_info.st_nlink != 1:
@@ -1142,7 +1318,8 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
         summary['audit_at_capacity'] = False
     summary.update(audit_failed_records=0, audit_last_failure_at=0, audit_failure_code='', audit_fault_active=False)
     try:
-        fault = read_locked_object(directory / 'control-api-audit-fault.json', limit=4096)
+        fault = summary_object_at(destination, 'control-api-audit-fault.json', limit=4096,
+                                  lock_name='control-api-audit-fault.lock', optional=True)
         summary['audit_failed_records'] = max(0, min(2147483647, int(fault.get('failed_records', 0))))
         summary['audit_last_failure_at'] = max(0, int(fault.get('last_failure_at', 0)))
         summary['audit_failure_code'] = re.sub('[^a-z_]', '', str(fault.get('error_code', '')))[:64]
@@ -1152,10 +1329,11 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
         summary['audit_fault_active'] = active
     except FileNotFoundError:
         pass
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError) as error:
         summary['audit_failure_code'] = 'audit_fault_state_unavailable'
         summary['audit_fault_active'] = True
-        summary['queue_errors'] += 1
+        summary_inspection_issue(summary, 'control_audit', error.code if isinstance(error, SummaryInspectionError)
+                                 else 'unreadable' if isinstance(error, OSError) else 'invalid')
     summary.update(media_bytes=0, media_files=0, media_cache_limit_bytes=0, media_over_budget=False, media_scan_incomplete=False,
                    media_near_budget=False, media_free_reserve_bytes=0, free_below_media_reserve=False)
     try:
@@ -1186,7 +1364,8 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
         summary['audit_forwarding_error'] = 'audit_forwarding_config_unavailable'
     if summary['audit_forwarding_enabled']:
         try:
-            health = read_locked_object(directory / 'control-api-audit-forwarding.json', limit=4096)
+            health = summary_object_at(destination, 'control-api-audit-forwarding.json', limit=4096,
+                                       lock_name='control-api-audit-forwarding.lock', optional=True)
             if type(health.get('active')) is not bool:
                 raise ValueError('Invalid forwarding health flag')
             summary['audit_forwarding_active'] = health['active']
@@ -1195,9 +1374,11 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
             summary['audit_forwarding_error'] = re.sub('[^a-z_]', '', str(health.get('error_code', '')))[:64]
         except FileNotFoundError:
             pass
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, OverflowError) as error:
             summary['audit_forwarding_active'] = True
             summary['audit_forwarding_error'] = 'audit_forwarding_health_unavailable'
+            summary_inspection_issue(summary, 'control_audit', error.code if isinstance(error, SummaryInspectionError)
+                                     else 'unreadable' if isinstance(error, OSError) else 'invalid')
     try:
         security_info = os.stat('security-audit.jsonl', dir_fd=destination, follow_symlinks=False)
         if not stat.S_ISREG(security_info.st_mode) or security_info.st_nlink != 1:
@@ -1217,7 +1398,8 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
         stem = 'security-audit-forwarding' if forwarding else 'security-audit-fault'
         prefix = 'security_audit_forwarding_' if forwarding else 'security_audit_'
         try:
-            health = read_locked_object(directory / (stem + '.json'), limit=4096)
+            health = summary_object_at(destination, stem + '.json', limit=4096,
+                                       lock_name=stem + '.lock', optional=True)
             active = health.get('active', bool(health.get('failed_records') or health.get('error_code')))
             if type(active) is not bool:
                 raise ValueError('Invalid security audit health flag')
@@ -1227,9 +1409,11 @@ def collect_storage_summary(directory, now, destination, failed_stages=()):
             summary[prefix + ('error' if forwarding else 'failure_code')] = re.sub('[^a-z_]', '', str(health.get('error_code', '')))[:64]
         except FileNotFoundError:
             pass
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, OverflowError) as error:
             summary[prefix + ('active' if forwarding else 'fault_active')] = True
             summary[prefix + ('error' if forwarding else 'failure_code')] = 'audit_health_unavailable'
+            summary_inspection_issue(summary, 'security_audit', error.code if isinstance(error, SummaryInspectionError)
+                                     else 'unreadable' if isinstance(error, OSError) else 'invalid')
     parent = open_directory(directory)
     try:
         audit_separation_ready(parent)

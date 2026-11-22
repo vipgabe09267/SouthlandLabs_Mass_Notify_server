@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Download commit/cleanup tests with a local inert curl replacement."""
 import hashlib
+import importlib.util
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import pwd
@@ -9,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 if os.environ.get('SLS_TEST_NAMESPACE') != 'entered' or any(
     os.environ.get('SLS_TEST_PARENT_' + label + '_NS') in
@@ -27,9 +30,122 @@ COMPATIBILITY_FUNCTION = re.search(r'^install_piper_compatibility_path\(\) \{.*?
 
 PROMOTION = SOURCE.split('SLS_PIPER_VOICE_SOURCE="$tmp"',1)[1].split("<<'PY' || {\n",1)[1].split('\nPY\n',1)[0]
 VOICE_REPAIR = SOURCE.split('secure_piper_voice_tree() {',1)[1].split("<<'PY'\n",1)[1].split('\nPY\n',1)[0]
+# Stream and checksum fixtures use intentionally small tmpfs mounts. The tests
+# below exercise the separate admission predicate and its real writer boundaries.
+STREAM_FIXTURE = PREFIX + '\nadmit_voice_write() { return 0; }\n'
 
 
 class VoiceDownload(unittest.TestCase):
+    def test_normal_writer_calls_the_installed_capacity_cli(self):
+        filename = 'en_US-lessac-low.onnx.json'
+        home = Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices')
+        home.mkdir(parents=True, exist_ok=True)
+        # Both the protected interpreter's helper and the CLI below run on
+        # the namespace's small, volatile PBX volumes.
+        script = PREFIX + '\nPIPER_RESOURCE_PROFILE=lite\nadmit_voice_write "$1" download\n'
+        result = subprocess.run(['/bin/bash', '-c', script, '_', filename],
+                                env={**os.environ, 'TMPDIR': '/tmp'}, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('Voice download refused for ' + filename, result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
+
+    def test_writer_rechecks_space_before_creating_scratch_and_before_promotion(self):
+        filename = 'en_US-lessac-low.onnx.json'
+        target = Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices') / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        original = b'previous model metadata'
+        target.write_bytes(original)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            cache = base / 'cache'
+            cache.mkdir(mode=0o700)
+            body = b'{' + b' ' * 4880 + b'}'
+            (cache / filename).write_bytes(body)
+            digest = hashlib.sha256(body).hexdigest()
+            for stop in ('download', 'promote'):
+                trace = base / 'trace'
+                trace.write_text('')
+                script = PREFIX + FUNCTION + r'''
+PIPER_VOICE_CACHE="$1"
+admit_voice_write() {
+  printf '%s %s\n' "$1" "$2" >> "$TRACE"
+  [ "$2" != "$STOP" ]
+}
+mktemp() { printf 'scratch\n' >> "$TRACE"; command mktemp "$@"; }
+download_file ignored "$2" "$3"
+'''
+                result = subprocess.run(['/bin/bash', '-c', script, '_', str(cache), str(target), digest],
+                    env={**os.environ, 'TMPDIR': directory, 'STOP': stop, 'TRACE': str(trace)},
+                    capture_output=True, text=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0, stop)
+                self.assertEqual(trace.read_text().splitlines(),
+                    [filename + ' download'] if stop == 'download' else
+                    [filename + ' download', 'scratch', filename + ' promote'])
+                self.assertEqual(target.read_bytes(), original)
+                self.assertFalse(list(base.glob('sls-piper-voice.*')))
+
+    def test_voice_write_budgets_include_both_copies_and_protect_remaining_space(self):
+        spec = importlib.util.spec_from_file_location('voice_capacity_fixture',
+            ROOT / 'slsmassnotifyserver/bin/sls_mass_notify/sls_resource_capacity.py')
+        resource = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(resource)
+        calculate = getattr(resource, 'voice_write_budgets', None)
+        self.assertTrue(callable(calculate), 'Per-write voice admission is missing')
+        full = resource.storage_requirements()
+        voice = resource.MANAGED_TREES['voices']
+        name = 'en_US-lessac-low.onnx.json'
+        for stage in ('download', 'promote'):
+            budgets, inodes = calculate(full, name, '/tmp', stage,
+                                        target_unit=8192, scratch_unit=4096, audio_floor=1000)
+            self.assertEqual(budgets[voice], 8192)
+            self.assertEqual(inodes[voice], 1)
+            self.assertEqual(budgets['/tmp'], 1000 + (8192 if stage == 'download' else 0))
+            self.assertEqual(inodes['/tmp'], 32 + int(stage == 'download'))
+            for role in ('data', 'module', 'config_backups'):
+                path = resource.MANAGED_TREES[role]
+                self.assertEqual(budgets[path], full['free_budgets_bytes'][path])
+            self.assertEqual(budgets['/var/log'], full['free_budgets_bytes']['/var/log'])
+            with self.assertRaises(ValueError):
+                calculate(full, '../unrelated', '/tmp', stage, target_unit=8192, scratch_unit=4096, audio_floor=1000)
+        # Real private tmpfs mounts supply st_dev and free block/inode counts.
+        # Other future installer obligations and the filesystem types are fixture
+        # inputs so a small volatile test mount can represent a durable target.
+        target = Path(voice)
+        target.mkdir(parents=True, exist_ok=True)
+        for colocated in (False, True):
+            with self.subTest(colocated=colocated), ExitStack() as scope:
+                tables = dict(resource.MANAGED_TREES)
+                if colocated:
+                    tables['voices'] = scope.enter_context(tempfile.TemporaryDirectory(dir='/tmp'))
+                scope.enter_context(patch.object(resource, 'MANAGED_TREES', tables))
+                scope.enter_context(patch.object(resource, 'probe_storage', return_value=full))
+                scope.enter_context(patch.object(resource, '_piper_preparation_payloads', return_value={}))
+                scope.enter_context(patch.object(resource, 'configured_limits', return_value={}))
+                scope.enter_context(patch.object(resource, 'filesystem_types', return_value=[('/', 'ext4', set())]))
+                state = os.statvfs('/tmp')
+                free = state.f_bavail * state.f_frsize
+                def writer_only(*args, **kwargs):
+                    budgets, counts = calculate(*args, **kwargs)
+                    paths = ('/tmp', tables['voices'])
+                    return ({p: budgets[p] for p in paths}, {p: counts[p] for p in paths})
+                scope.enter_context(patch.object(resource, 'voice_write_budgets', writer_only))
+                for deficit in (False, True):
+                    audio = free - (2 if colocated else 1) * 8192 + int(deficit)
+                    with patch.object(resource, 'probe_runtime_speech_scratch', return_value={'required_free_bytes': audio}):
+                        if deficit:
+                            with self.assertRaisesRegex(ValueError, 'Available/required bytes'):
+                                resource.admit_voice_write(name, '/tmp', 'download')
+                        else:
+                            resource.admit_voice_write(name, '/tmp', 'download')
+                for condition in ({'available_inodes': 1}, {'read_only': True}, {'volatile_targets': ['/var/lib/asterisk']}):
+                    filesystem = dict(paths=[tables['voices']], read_only=False, volatile_targets=[], inodes_exhausted=False,
+                                      available_bytes=10**10, required_free_bytes=8192, available_inodes=3, required_inodes=2)
+                    filesystem.update(condition)
+                    with patch.object(resource, 'probe_filesystems', return_value=[filesystem]), \
+                         patch.object(resource, 'probe_runtime_speech_scratch', return_value={'required_free_bytes': 1000}), \
+                         self.assertRaisesRegex(ValueError, 'Voice promote refused'):
+                        resource.admit_voice_write(name, '/tmp', 'promote')
+
     def test_compatibility_scan_rejects_excess_entries_before_mutation(self):
         if os.environ.get('SLS_TEST_NAMESPACE') != 'entered': self.fail('Run through the isolation wrapper')
         result=subprocess.run(['/bin/bash','-c',DIRECTORY_FUNCTION+'\nensure_piper_install_directories'],capture_output=True,text=True,timeout=5)
@@ -201,7 +317,7 @@ class VoiceDownload(unittest.TestCase):
             source=cache/filename;source.write_bytes(body);source.chmod(0o600)
             voices=Path('/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices');voices.mkdir(parents=True,exist_ok=True)
             target=voices/filename;target.write_bytes(b'preserved')
-            script=PREFIX+'\nPIPER_VOICE_CACHE="$1"\ncurl() { printf network >"$3"; return 99; }\n'+FUNCTION+'\ndownload_file https://example.invalid "$2" "$4"\n'
+            script=STREAM_FIXTURE+'\nPIPER_VOICE_CACHE="$1"\ncurl() { printf network >"$3"; return 99; }\n'+FUNCTION+'\ndownload_file https://example.invalid "$2" "$4"\n'
             digest=hashlib.sha256(body).hexdigest()
             for mode,success in (('valid',True),('corrupt',False),('writable',False),('missing',False)):
                 target.write_bytes(b'preserved')
@@ -249,7 +365,7 @@ if os.environ['FIXTURE_CASE'].startswith('interrupt_'):
             target.write_bytes(b'preserved voice')
             for case, success in [('oversize',False),('flood',False),('interrupt_TERM',False),('interrupt_INT',False),('interrupt_HUP',False),('valid',True)]:
                 fixture_function=FUNCTION.replace('/usr/bin/curl',str(curl))
-                script = PREFIX+fixture_function+'\nLOG_FILE="$TMPDIR/log"\nexport FIXTURE_OWNER_PID="$BASHPID"\ndownload_file "$1" "$2" "$3"\n'
+                script = STREAM_FIXTURE+fixture_function+'\nLOG_FILE="$TMPDIR/log"\nexport FIXTURE_OWNER_PID="$BASHPID"\ndownload_file "$1" "$2" "$3"\n'
                 result = subprocess.run(['bash','-c',script,'fixture','https://fixture.invalid/voice',str(target),hashlib.sha256(body).hexdigest()],
                     env={**os.environ,'FIXTURE_TOOLS':str(tools),'TMPDIR':name,'FIXTURE_BODY':str(source),'FIXTURE_CASE':case},
                     capture_output=True,text=True,timeout=10)

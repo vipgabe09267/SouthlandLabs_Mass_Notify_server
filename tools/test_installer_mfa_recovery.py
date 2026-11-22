@@ -82,7 +82,13 @@ if($operation==='seed'){
 '''
 GUARD=r'''
 source "$1"
-fixture="$2"; CONFIG_FILE="$fixture/data/mass-notifications.config"
+fixture="$2"; DATA_DIR="$fixture/data"; CONFIG_FILE="$fixture/data/mass-notifications.config"
+WORKER_GUARD_TOOL="$fixture/bootstrap/sls_install_guard.py"
+if [ -n "${FIXTURE_KEEPER_PID:-}" ]; then
+ WORKER_LOCK_PID="$FIXTURE_KEEPER_PID"; WORKER_COORDINATION_REQUIRED=1
+ exec {WORKER_LOCK_KEEPALIVE_FD}>&"$FIXTURE_KEEPER_WRITE_FD"
+ exec {WORKER_LOCK_RESPONSE_FD}<&"$FIXTURE_KEEPER_READ_FD"
+fi
 CONFIG_SNAPSHOT="$fixture/transaction-aaaaaaaaaaaaaaaaaaaaaaaa/config.snapshot"
 CONFIG_HASH_BEFORE="$(safe_config_hash "$CONFIG_SNAPSHOT")"
 PENDING_CONFIG_PATH="$fixture/data/mass-notifications.pending.config"
@@ -121,7 +127,7 @@ class MfaRecoveryIntegration(unittest.TestCase):
   self.data=self.root/'data';self.data.mkdir(mode=0o700)
   self.transaction=self.root/('transaction-'+'a'*24);self.transaction.mkdir(mode=0o700);(self.transaction/'recovery').mkdir(mode=0o700)
   bootstrap=self.root/'bootstrap';bootstrap.mkdir(mode=0o700)
-  for name in ['sls_install_transaction.py','sls_config_crypto.py']:
+  for name in ['sls_install_transaction.py','sls_config_crypto.py','sls_install_guard.py']:
    shutil.copyfile(HELPERS/name,bootstrap/name);(bootstrap/name).chmod(0o600)
   self.php=self.root/'actual-mfa.php';self.php.write_text(PHP);self.now=1900000000;self.assertTrue(self.run_php('seed')['seeded'])
   spec=importlib.util.spec_from_file_location('mfa_fixture_crypto',HELPERS/'sls_config_crypto.py')
@@ -137,9 +143,13 @@ class MfaRecoveryIntegration(unittest.TestCase):
  @contextlib.contextmanager
  def keeper(self):
   process=subprocess.Popen([sys.executable,'-I',str(HELPERS/'sls_install_guard.py'),'--data',str(self.data),'--settings','--timeout','5','hold'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  previous=getattr(self,'keeper_process',None)
   try:
-   self.assertTrue(select.select([process.stdout],[],[],8)[0],'keeper did not become ready');self.assertEqual(process.stdout.readline().strip(),'ready');yield
+   self.assertTrue(select.select([process.stdout],[],[],8)[0],'keeper did not become ready');self.assertEqual(process.stdout.readline().strip(),'ready')
+   self.keeper_process=process
+   yield
   finally:
+   self.keeper_process=previous
    if process.poll() is None:process.stdin.write('release\n');process.stdin.flush()
    stdout,stderr=process.communicate(timeout=8);self.assertEqual(process.returncode,0,stderr)
  def test_actual_totp_login_is_accepted_by_recovery(self):
@@ -160,7 +170,12 @@ class MfaRecoveryIntegration(unittest.TestCase):
    'crash-after-targets':'verify_recovery_configuration || exit $?\nkill -KILL "$$"\n',
    'crash-between-restores':'verify_recovery_configuration || exit $?\nsafe_config_restore "$CONFIG_RECOVERY_SNAPSHOT" "$CONFIG_FILE" || exit $?\nkill -KILL "$$"\n',
   }
-  def execute():return subprocess.run(['bash','-c',setup+commands[action],'fixture',str(ROOT/'tools/install_release.sh'),str(self.root)],capture_output=True,text=True,timeout=20)
+  def execute():
+   keeper=getattr(self,'keeper_process',None);environment=dict(os.environ);descriptors=()
+   if keeper is not None:
+    descriptors=(keeper.stdin.fileno(),keeper.stdout.fileno())
+    environment.update(FIXTURE_KEEPER_PID=str(keeper.pid),FIXTURE_KEEPER_WRITE_FD=str(descriptors[0]),FIXTURE_KEEPER_READ_FD=str(descriptors[1]))
+   return subprocess.run(['bash','-c',setup+commands[action],'fixture',str(ROOT/'tools/install_release.sh'),str(self.root)],capture_output=True,text=True,timeout=20,env=environment,pass_fds=descriptors)
   if already_locked:return execute()
   with self.keeper():return execute()
 

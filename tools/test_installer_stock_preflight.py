@@ -21,7 +21,7 @@ class StockPreflightTests(unittest.TestCase):
   for module in ('dashboard','framework'):
    modulepath=self.web/'admin/modules'/module;modulepath.mkdir(parents=True)
    (modulepath/'module.xml').write_bytes(b'reviewed upstream')
-   self.data['approved'][module]={'files':{'module.xml':{'target':'admin/modules/'+module+'/module.xml','sha256':digest(b'reviewed upstream')}},'uninstall':{'replace':{}}}
+   self.data['approved'][module]={'module':module,'source':{'kind':'reviewed-upstream-and-overlays','archive_sha256':'c'*64},'files':{'module.xml':{'target':'admin/modules/'+module+'/module.xml','sha256':digest(b'reviewed upstream')}},'uninstall':{'replace':{}}}
   for name in ('sections/SlsMassNotifyAnnouncement.class.php','views/sections/sls-mass-notify-announcement.php'):
    candidate=self.candidate/'dashboard'/name;candidate.parent.mkdir(parents=True,exist_ok=True);candidate.write_bytes(b'authenticated candidate')
    target=self.web/'admin/modules/dashboard'/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b'prior approved widget')

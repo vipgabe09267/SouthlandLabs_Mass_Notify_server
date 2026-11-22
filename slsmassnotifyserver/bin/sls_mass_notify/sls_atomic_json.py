@@ -151,7 +151,7 @@ def append_json_line(path, value, *, maximum=64 * 1024 * 1024, line_maximum=2621
 
 
 @contextmanager
-def locked_json(path, *, maximum=2 * 1024 * 1024, timeout=2, require_existing=False, runtime_owner=False):
+def locked_json(path, *, maximum=2 * 1024 * 1024, timeout=2, require_existing=False, runtime_owner=False, existing_only=False):
     path = Path(path)
     account = pwd.getpwnam('asterisk') if runtime_owner else None
     owner = account.pw_uid if account else os.geteuid()
@@ -182,6 +182,8 @@ def locked_json(path, *, maximum=2 * 1024 * 1024, timeout=2, require_existing=Fa
         try:
             lock = os.open(lock_name, flags, dir_fd=parent)
         except FileNotFoundError:
+            if existing_only:
+                raise
             try:
                 lock = os.open(lock_name, flags | os.O_CREAT | os.O_EXCL, 0o640, dir_fd=parent)
                 if account and os.geteuid() == 0:
@@ -206,7 +208,7 @@ def locked_json(path, *, maximum=2 * 1024 * 1024, timeout=2, require_existing=Fa
         try:
             descriptor = os.open(path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
         except FileNotFoundError:
-            if marker and require_existing:
+            if existing_only or (marker and require_existing):
                 raise RuntimeError('json_storage_missing')
             data = {}
         else:
@@ -233,6 +235,11 @@ def locked_json(path, *, maximum=2 * 1024 * 1024, timeout=2, require_existing=Fa
             temporary = os.open(temporary_name, flags | os.O_CREAT | os.O_EXCL, 0o640, dir_fd=parent)
             if account and os.geteuid() == 0:
                 os.fchown(temporary, account.pw_uid, account.pw_gid)
+            if existing_only:
+                staged = os.fstat(temporary)
+                if (staged.st_uid, staged.st_gid) != (before.st_uid, before.st_gid):
+                    raise RuntimeError('json_storage_owner_changed')
+                os.fchmod(temporary, stat.S_IMODE(before.st_mode))
             with os.fdopen(temporary, 'wb') as stream:
                 temporary = -1
                 stream.write(raw)
@@ -255,7 +262,7 @@ def locked_json(path, *, maximum=2 * 1024 * 1024, timeout=2, require_existing=Fa
             os.replace(temporary_name, path.name, src_dir_fd=parent, dst_dir_fd=parent)
             temporary_name = ''
             os.fsync(parent)
-        if marker != b'SLS_JSON_V1\n':
+        if not existing_only and marker != b'SLS_JSON_V1\n':
             os.lseek(lock, 0, os.SEEK_SET)
             if os.write(lock, b'SLS_JSON_V1\n') != len(b'SLS_JSON_V1\n'):
                 raise RuntimeError('json_storage_commit_uncertain')

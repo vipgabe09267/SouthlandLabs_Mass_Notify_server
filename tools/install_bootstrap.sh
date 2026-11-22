@@ -33,10 +33,12 @@ PY
 bootstrap_verify() {
   local directory="$1" version="$2" expected_tag="${3:-}" existing_mode="${4:-0}"
   /usr/bin/openssl pkey -pubin -in "$directory/publisher.pem" -outform DER -out "$directory/publisher.der"
-  /usr/bin/openssl pkeyutl -verify -pubin -inkey "$directory/publisher.pem" -rawin \
-    -in "$directory/release-manifest.json" -sigfile "$directory/release-manifest.sig" >/dev/null || {
-      printf 'Publisher signature verification failed. No installer was executed.\n' >&2; return 1;
-    }
+  if [ "$existing_mode" != 1 ]; then
+    /usr/bin/openssl pkeyutl -verify -pubin -inkey "$directory/publisher.pem" -rawin \
+      -in "$directory/release-manifest.json" -sigfile "$directory/release-manifest.sig" >/dev/null || {
+        printf 'Publisher signature verification failed. No installer was executed.\n' >&2; return 1;
+      }
+  fi
   /usr/bin/python3 -I - "$directory" "$version" "$expected_tag" "$existing_mode" <<'PY'
 import hashlib,json,os,re,stat,sys,time,types
 from pathlib import Path
@@ -47,8 +49,72 @@ def unique(pairs):
         if name in value:raise ValueError('Duplicate manifest field')
         value[name]=item
     return value
+def retained_helper_source(name):
+    # Normal uninstall removes installed runtime while retaining this independent
+    # root-private publisher reference. Candidate/downloaded bytes are never
+    # authority for the verifier that decides whether an upgrade is trusted.
+    directory=Path('/var/lib/sls-mass-notify-trust')
+    def protected_read(path, maximum):
+        for item in (path,*path.parents):
+            info=item.lstat()
+            expected=stat.S_ISREG if item==path else stat.S_ISDIR
+            if (not expected(info.st_mode) or info.st_uid!=0
+                    or info.st_mode&0o022 and not (item!=path and info.st_mode&stat.S_ISVTX)):
+                raise ValueError('Retained publisher verifier is not root-protected')
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+        try:
+            before=os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>maximum:
+                raise ValueError('Retained publisher verifier evidence is not bounded regular source')
+            with os.fdopen(os.dup(fd),'rb') as stream:body=stream.read(maximum+1)
+            after=os.fstat(fd);current=path.lstat()
+            identity=lambda value:(value.st_dev,value.st_ino,value.st_uid,value.st_gid,value.st_mode,value.st_size,value.st_mtime_ns,value.st_ctime_ns,value.st_nlink)
+            if len(body)!=before.st_size or identity(before)!=identity(after) or identity(after)!=identity(current):
+                raise ValueError('Retained publisher verifier changed during authentication')
+            return body
+        finally:os.close(fd)
+    if directory.lstat().st_mode&0o077:
+        raise ValueError('Retained publisher directory must remain root-private')
+    reference=json.loads(protected_read(directory/'slsmassnotifyserver.active.json',1024),object_pairs_hook=unique)
+    if (not isinstance(reference,dict) or set(reference)!={'generation','sha256'}
+            or not isinstance(reference['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',reference['sha256'])
+            or reference['generation']!='slsmassnotifyserver-'+reference['sha256']):
+        raise ValueError('Retained publisher reference is invalid')
+    generation=directory/reference['generation']
+    if generation.lstat().st_mode&0o077:
+        raise ValueError('Retained publisher generation must remain root-private')
+    raw=protected_read(generation/'inventory.json',8388608)
+    if hashlib.sha256(raw).hexdigest()!=reference['sha256']:
+        raise ValueError('Retained publisher inventory differs from its protected reference')
+    inventory=json.loads(raw,object_pairs_hook=unique)
+    if (not isinstance(inventory,dict) or inventory.get('schema')!=1
+            or inventory.get('module')!='slsmassnotifyserver'
+            or not isinstance(inventory.get('source'),dict)
+            or inventory['source'].get('kind')!='publisher-ed25519'
+            or not re.fullmatch(r'[a-f0-9]{64}',str(inventory['source'].get('archive_sha256','')))
+            or not isinstance(inventory.get('files'),dict)):
+        raise ValueError('Retained publisher inventory has no independent SLL authority')
+    relative='bin/sls_mass_notify/'+name+'.py'
+    entry=inventory['files'].get(relative)
+    if (not isinstance(entry,dict) or set(entry)!={'sha256','target'}
+            or entry['target']!='admin/modules/slsmassnotifyserver/'+relative
+            or not isinstance(entry['sha256'],str) or not re.fullmatch(r'[a-f0-9]{64}',entry['sha256'])):
+        raise ValueError('Retained publisher verifier is absent from the protected inventory')
+    helper=generation/'module'/relative
+    source=protected_read(helper,262144)
+    if hashlib.sha256(source).hexdigest()!=entry['sha256']:
+        raise ValueError('Retained publisher verifier differs from its approved source')
+    return helper,source
+
 def installed_helper(name):
     helper=Path('/usr/local/bin/sls_mass_notify')/(name+'.py')
+    try:helper.lstat()
+    except FileNotFoundError:
+        helper,source=retained_helper_source(name)
+        sys.dont_write_bytecode=True
+        trusted=types.ModuleType('sls_bootstrap_retained_authority');trusted.__file__=str(helper)
+        exec(compile(source,str(helper),'exec'),trusted.__dict__)
+        return trusted
     for path in (helper,*helper.parents):
         info=path.lstat()
         expected=stat.S_ISREG if path==helper else stat.S_ISDIR
@@ -76,7 +142,7 @@ try:
     manifest=json.loads(raw,object_pairs_hook=unique)
     if set(manifest)!={'schema','version','tag','package','package_sha256','installer_sha256','signing'} or type(manifest['schema']) is not int or manifest['schema']!=1 or manifest['version']!=version or manifest['tag'] not in (('v'+version,'slsmassnotifyserver-'+version)+(('V0.1.9-beta','release-0.1.9-beta') if version=='0.1.9-beta' else ())) or (expected_tag and manifest['tag']!=expected_tag) or manifest['package']!='slsmassnotifyserver-'+version+'.tgz':raise ValueError('Release identity')
     signing=manifest['signing'];now=int(time.time())
-    if not isinstance(signing,dict) or set(signing)!={'key_id','issued_at','expires_at'} or signing['key_id']!=hashlib.sha256((root/'publisher.der').read_bytes()).hexdigest() or type(signing['issued_at']) is not int or type(signing['expires_at']) is not int or not 0<signing['issued_at']<=now+60 or not signing['issued_at']<signing['expires_at']<=signing['issued_at']+366*86400 or signing['expires_at']<=now:raise ValueError('Signing validity')
+    if not isinstance(signing,dict) or set(signing)!={'key_id','issued_at','expires_at'} or not isinstance(signing['key_id'],str) or not re.fullmatch(r'[a-f0-9]{64}',signing['key_id']) or (existing_mode!='1' and signing['key_id']!=hashlib.sha256((root/'publisher.der').read_bytes()).hexdigest()) or type(signing['issued_at']) is not int or type(signing['expires_at']) is not int or not 0<signing['issued_at']<=now+60 or not signing['issued_at']<signing['expires_at']<=signing['issued_at']+366*86400 or signing['expires_at']<=now:raise ValueError('Signing validity')
     for field in ('installer_sha256','package_sha256'):
         if not isinstance(manifest[field],str) or not re.fullmatch(r'[a-f0-9]{64}',manifest[field]):raise ValueError('Artifact hash')
     if existing_mode not in ('0','1'):
@@ -106,12 +172,49 @@ PY
 
 bootstrap_main() (
   [ "$EUID" -eq 0 ] || { printf 'Run the verified bootstrap as root on the PBX.\n' >&2; exit 2; }
-  [ "$#" -ge 1 ] && [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]] || { printf 'Usage: bash install_bootstrap.sh VERSION [--upgrade] [--lite|--standard] [--inspect | --recover TRANSACTION [--history-evidence FILE] [--review-history | --approve-history-loss SHA256 --history-loss-operator NAME --history-loss-reason TEXT]]\n' >&2; exit 2; }
+  [ "$#" -ge 1 ] && [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta)?$ ]] || { printf 'Usage: bash install_bootstrap.sh VERSION [--upgrade] [--lite|--standard] [--inspect | --recover TRANSACTION [recovery options]]; or VERSION --upgrade --review-retained; or VERSION --upgrade --approve-retained SHA256 --operator NAME --reason TEXT\n' >&2; exit 2; }
   local version="$1" directory release_tag existing_mode=0; shift
   if [ "${1:-}" = --upgrade ]; then existing_mode=1; shift; fi
   local -a installer_arguments=()
   if [ "${1:-}" = --lite ] || [ "${1:-}" = --standard ]; then installer_arguments+=("$1"); shift; fi
-  if [ "$#" -eq 1 ] && [ "$1" = --inspect ]; then installer_arguments+=(--inspect)
+  if [ "${1:-}" = --review-retained ]; then
+    [ "$existing_mode" = 1 ] && [ "${#installer_arguments[@]}" -eq 0 ] && [ "$#" -eq 1 ] || {
+      printf 'Use VERSION --upgrade --review-retained as a separate command without profile, inspection or recovery options. No installer was executed.\n' >&2; exit 2;
+    }
+    installer_arguments+=(--review-retained)
+  elif [ "${1:-}" = --approve-retained ]; then
+    [ "$existing_mode" = 1 ] && [ "${#installer_arguments[@]}" -eq 0 ] && [[ "${2:-}" =~ ^[a-f0-9]{64}$ ]] || {
+      printf 'Use --upgrade --approve-retained with the exact SHA256 from a separate retained-source review. No installer was executed.\n' >&2; exit 2;
+    }
+    installer_arguments+=(--approve-retained "$2"); shift 2
+    local retained_operator=0 retained_reason=0 retained_argument retained_value
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --operator|--reason)
+          retained_argument="$1"; retained_value="${2:-}"
+          [ -n "$retained_value" ] && [[ "$retained_value" != *[$'\001'-$'\037'$'\177']* ]] \
+            && [[ "$retained_value" != [[:space:]]* && "$retained_value" != *[[:space:]] ]] || {
+              printf 'Retained-review operator and reason require bounded text without control characters or surrounding whitespace. No installer was executed.\n' >&2; exit 2;
+            }
+          if [ "$retained_argument" = --operator ]; then
+            [ "$retained_operator" -eq 0 ] && [ "${#retained_value}" -le 128 ] || {
+              printf 'Use --operator once with at most 128 characters. No installer was executed.\n' >&2; exit 2;
+            }
+            retained_operator=1
+          else
+            [ "$retained_reason" -eq 0 ] && [ "${#retained_value}" -ge 10 ] && [ "${#retained_value}" -le 500 ] || {
+              printf 'Use --reason once with 10 through 500 characters. No installer was executed.\n' >&2; exit 2;
+            }
+            retained_reason=1
+          fi
+          installer_arguments+=("$retained_argument" "$retained_value"); shift 2 ;;
+        *) printf 'Unknown retained-source approval option. No installer was executed.\n' >&2; exit 2 ;;
+      esac
+    done
+    [ "$retained_operator" -eq 1 ] && [ "$retained_reason" -eq 1 ] || {
+      printf 'Retained approval requires --operator and --reason. No installer was executed.\n' >&2; exit 2;
+    }
+  elif [ "$#" -eq 1 ] && [ "$1" = --inspect ]; then installer_arguments+=(--inspect)
   elif [ "$#" -ge 2 ] && [ "$1" = --recover ] && [ "${#installer_arguments[@]}" -eq 0 ] && [[ "$2" =~ ^/var/lib/sls-mass-notify-installer/transaction-[a-f0-9]{24}$ ]]; then
     installer_arguments=(--recover "$2")
     shift 2

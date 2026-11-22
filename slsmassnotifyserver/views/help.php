@@ -96,6 +96,20 @@ $controlApiAudit = array_values((array)($diagnostics['control_api_audit'] ?? [])
     <p><a href="https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/blob/main/docs/QUALIFICATION_MATRIX.md" target="_blank" rel="noopener noreferrer"><?php echo _('Installer and integration qualification matrix'); ?></a></p>
     </div></details>
 
+
+	<details class="sls-help-section"><summary><?php echo _('Installer and recovery'); ?></summary><div class="sls-help-section-body">
+	<p><?php echo _('The 0.2.0-beta development revision improves installer preservation and prerequisite checks. It is not a published release. Installation still requires a publisher-verified package and the documented supported profile.'); ?></p>
+	<ul>
+		<li><?php echo _('Official FreePBX full and open-source-only installations use the same supported Asterisk account requirements. Numeric account IDs may differ. A remote console and the actual daemon are checked separately; the installer does not change the running daemon identity.'); ?></li>
+		<li><?php echo _('Installation stops before integration changes when ownership of a mutable native file cannot be preserved by the PBX account. Preserve the reported file and review the supported layout before retrying; do not change ownership broadly to bypass the check.'); ?></li>
+		<li><?php echo _('Dashboard repair uses the current vendor source and retains old recovery backups for review. It does not replace an updated Dashboard file with a stale saved copy.'); ?></li>
+		<li><?php echo _('Native System Recording rows and their audio remain after SLL removal because IVRs, ring groups or compound recordings may still use them. Review unused entries in Admin > System Recordings before removing them manually.'); ?></li>
+		<li><?php echo _('Authenticated local checks require the actual PBX hostname, listener and route. If private Apache configuration prevents an ordinary diagnostic from establishing that route, use the verified root-assisted installer check; credentials are not sent to a default website.'); ?></li>
+		<li><?php echo _('A failed Piper replacement keeps its original environment and private recovery evidence. Verified repair can qualify recognized retained evidence for resource diagnostics while leaving its contents private. Unknown evidence and unsupported mounts still require review.'); ?></li>
+		<li><?php echo _('Installer Desktop, media and Control API probes have a 60-second deadline with up to two seconds for termination. Interactive media readiness uses a separate timeout for each network read, so slowly arriving response data can extend its total wait.'); ?></li>
+	</ul>
+	</div></details>
+
 	<details class="sls-help-section" open><summary><?php echo _('Project Status'); ?></summary><div class="sls-help-section-body">
 	<ul>
 		<li><?php echo _('This is beta software. Test on a non-critical PBX before relying on it for emergency workflows.'); ?></li>
@@ -106,7 +120,7 @@ $controlApiAudit = array_values((array)($diagnostics['control_api_audit'] ?? [])
 		<li><?php echo _('Version 0.1.9-beta hardens Weather and Lightning delivery state, restore-time credential handling, caller-specific paging menus, SAML certificate lifecycle checks, and the optional authenticated browser display. See the changelog for qualification limits.'); ?></li>
 		<li><?php echo _('Device capacity checks, shared phone admission and call evidence apply across notification services. External voice remains experimental with restricted routing support. New integrations carry the Labs badge and require site acceptance.'); ?></li>
 		<li><?php echo _('Local signing now uses the web account, module root, and GPG home reported by FreePBX. Install, update, repair, and uninstall share a maintenance lock; each candidate signature must return trusted status 129 before it replaces the previous module.sig.'); ?></li>
-		<li><?php echo _('After a Dashboard or Framework upgrade, Repair Installation restores the managed announcement widget and menu placement, rebuilds the stored Dashboard hook index, and verifies that the announcement controls render. Framework 17.0.30 and earlier Framework 17 menu comparator forms are supported.'); ?></li>
+		<li><?php echo _('Module Admin displays the tested Framework versions before you confirm a Framework change. Back up custom Framework files before an update, including scheduled and command-line updates. FreePBX builds the Mass Notify menu from the module’s registration. Repair Installation can restore the managed Dashboard widget and its hook index.'); ?></li>
 	<li><a href="modules/slsmassnotifyserver/docs/ENTERPRISE_OPERATIONS.md">Enterprise Labs</a> <?php echo _('Optional continuity, identity, devices and incident coordination start disabled. Dangerous features require a timed acknowledgment and are for non-production labs only.'); ?></li>
 </ul>
 	<p><?php echo _('Generated phone images use the saved advertised hostname and phone image port in General Settings. Use the explicit address editor to change them after a domain or port-forward change. If HTTPS does not work try HTTP for legacy phones.'); ?></p>
@@ -120,6 +134,7 @@ $controlApiAudit = array_values((array)($diagnostics['control_api_audit'] ?? [])
 	<p><?php echo _('Paging answer timeout is one through five seconds, default five. It limits unanswered invitations, not visual-message expiry or audio length. Phones still need auto-answer enabled.'); ?></p>
 	<p><?php echo _('Weather observations run separately from delivery. Queued alerts are checked for current routing, expiry, cancellation, and fresh observations before submission. Interrupted or uncertain deliveries are not automatically repeated. For general announcements, retry is available only for confirmed failed destinations; inspect the channel results first.'); ?></p>
 	<p><?php echo _('Storage and Postfix reports refresh through protected maintenance every minute. A missing or stale report includes the relevant log path. Fault detection shows current conditions; older delivery faults remain in notification history. System fault email is opt-in and the same condition is suppressed for at least 24 hours, including brief recovery gaps.'); ?></p>
+	<p><?php echo _('Delivery inventory reads retry when an active writer briefly holds or replaces a snapshot. Counts remain incomplete if the read cannot finish. Busy or changing snapshots require a fresh matching observation at least two minutes later before sending fault email; corrupt, unsafe or unreadable data and scan limits still report faults. Maintenance diagnostics identify whether the inspection affected external deliveries, Weather or audit health.'); ?></p>
 	<p><?php echo _('Each numbered phone contact keeps its own format, transport and User-Agent together. Mixed phone brands on one extension use their respective display format. Desktop clients below the default 1.0.13-beta minimum, or without a fresh version report, show Update required; delivery remains allowed.'); ?></p>
 	<div class="sls-help-diagnostics">
 		<div class="panel panel-default">
@@ -318,7 +333,7 @@ $controlApiAudit = array_values((array)($diagnostics['control_api_audit'] ?? [])
 		<li><code>/usr/local/bin/sls_mass_notify/sls_mass_notify_test.sh</code> <?php echo _('manual test sender.'); ?></li>
 		<li><code>/usr/local/bin/sls_mass_notify/sls_mass_notify_update.sh</code> <?php echo _('root-owned manual and automatic beta updater.'); ?></li>
 		<li><code>/usr/local/bin/sls_mass_notify/sls_mass_notify_maintenance.sh</code> <?php echo _('root-owned worker for queued repairs and verified manual updates. Complete uninstall requires a local root shell.'); ?></li>
-		<li><code>/usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh</code> <?php echo _('standalone cleanup path used by local root command slsconsole uninstall. It snapshots the current transactional signer before the module hook removes installed copies, then deletes that protected snapshot before exit. If the FreePBX repository is unavailable, cleaned Dashboard and Framework copies receive a locally verified fallback signature. Normal uninstall preserves configuration and the schedule execution ledger; --purge removes them.'); ?></li>
+		<li><code>/usr/local/bin/sls_mass_notify/sls_mass_notify_uninstall.sh</code> <?php echo _('offline cleanup path used by local root command slsconsole uninstall. It retains authenticated helpers before removing installed copies and preserves their referenced recovery evidence when removal fails. Cleaned Dashboard and Framework files must still match their independently approved inventories before local signing. Normal uninstall preserves configuration and the schedule execution ledger; --purge removes retained SLL data. Native AMI removal status and its read-only retained verification command are reported separately.'); ?></li>
 		<li><code>/usr/local/bin/sls_mass_notify/piper/venv</code> <?php echo _('root-owned Piper executable environment, also exposed through the compatibility path /var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/venv.'); ?></li>
 		<li><code>/var/lib/asterisk/SLS_Mass_Notifications_Plugin/piper/voices</code> <?php echo _('checksum-verified Piper voice models.'); ?></li>
 		<li><code>/usr/local/bin/sls_mass_notify/sls_notify.py</code> <?php echo _('SIP NOTIFY and desktop journal publisher.'); ?></li>
@@ -445,7 +460,8 @@ $controlApiAudit = array_values((array)($diagnostics['control_api_audit'] ?? [])
 	<ul>
 		<li><?php echo _('Update checks run through the root-owned updater and record their result for General Settings and Dashboard health. A newer release produces a yellow warning even when automatic installation is disabled.'); ?></li>
 			<li><?php echo _('Update to Latest Release is shown only when a newer accepted release is available. It queues an immediate verified update and shows queued, installing, success, or failure status before refreshing the page.'); ?></li>
-		<li><?php echo _('Completely Uninstall in Danger Zone requires confirmation and permanently removes module code, runtime services, APIs, logs, credentials, backups, tones, and the central configuration. Download a config backup first if the deployment may be restored later.'); ?></li>
+		<li><?php echo _('Native PBX operations use fixed deadlines. If installation or removal reports a timeout, preserve its transaction and logs and use the authenticated recovery or retry command printed with the failure.'); ?></li>
+		<li><?php echo _('Completely Uninstall requires confirmation and purges retained SLL configuration, backups, media and logs after software removal checks. Native System Recordings and audio remain for independent PBX references; protected recovery keys and trust/removal evidence are retained. Download a config backup first. Software removal reports Manager account absence separately: verified absent, daemon absent, or pending verification. Existing authenticated sessions are outside that read-only check and are not disconnected. A loaded SLL Manager account may remain after a failed PBX reload. Use the retained transaction and read-only --verify-runtime command printed by the uninstaller after the desired native reload.'); ?></li>
 	</ul>
 
 	</div></details>

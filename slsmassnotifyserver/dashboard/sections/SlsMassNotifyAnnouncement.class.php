@@ -13,7 +13,7 @@ class SlsMassNotifyAnnouncement
 		return [[
 			'title' => _('SLL Mass Notify Server Announcements'),
 			'group' => _('Announcements'),
-			'width' => '680px',
+			'width' => '550px',
 			'order' => $order['sls_mass_notify_announcement'] ?? '50',
 			'section' => 'sls_mass_notify_announcement',
 		]];

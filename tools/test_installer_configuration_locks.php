@@ -23,18 +23,24 @@ $root=sys_get_temp_dir().'/sls-installer-locks-'.bin2hex(random_bytes(8));mkdir(
 register_shutdown_function(static function()use($root):void{foreach(glob($root.'/*') as $path){unlink($path);}rmdir($root);});
 eval('namespace SlsInstallerLocksFixture; use FreePBX\modules\SlsConfigCrypto; class Module {
  use \FreePBX\modules\SlsAutomations;
+ use \FreePBX\modules\SlsLivePaging;
  use \FreePBX\modules\SlsDesktopCapacity;
  const SETTINGS_JSON='.var_export($root.'/config',true).';
  const PENDING_SETTINGS_JSON='.var_export($root.'/pending',true).';
+ const LEGACY_PENDING_SETTINGS_JSON='.var_export($root.'/legacy-pending',true).';
+ const LEGACY_OLD_PENDING_SETTINGS_JSON='.var_export($root.'/old-pending',true).';
  const SETTINGS_LOCK='.var_export($root.'/settings.lock',true).';
  const ANNOUNCEMENT_ACTIVITY_LOCK_FILE='.var_export($root.'/activity.lock',true).';
  const NATIVE_BACKUP_MAX_CONFIG_BYTES=4194304;
  private $settingsActivityLocks=[];private $settingsReadFingerprints=[];private $normalizedSettingsCache=[];
- public $writes=0;public $pendingReads=0;
+ public $writes=0;public $pendingReads=0;public $preflights=0;
  public $capacityCalls=0;public $resourcesSufficient=true;
  protected function checkDesktopCapacityResources($limit,$phones=25){$this->capacityCalls++;return $this->resourcesSufficient?
   ["eligible_limit"=>1000,"eligible_phone_limit"=>1000,"errors"=>[]]:["errors"=>[["message"=>"Insufficient CPU for detected phone capacity."]]];}
  private function ensurePluginDataDir(){}
+ // Real managed-target ownership is exercised separately; this fixture keeps
+ // real configuration/activity flock contention without touching native files.
+ private function preflightManagedIntegrationTargets(){$this->preflights++;}
  private function setPrivateOwnership($path){}
  private function getDefaultSettings(){return ["enabled"=>"0","scheduled_announcements"=>[]];}
  private function getActiveSettings(){return is_file(self::SETTINGS_JSON)?$this->loadSettingsFile(self::SETTINGS_JSON):$this->getDefaultSettings();}
@@ -50,7 +56,7 @@ eval('namespace SlsInstallerLocksFixture; use FreePBX\modules\SlsConfigCrypto; c
  private function getPanicExtensionUsage($reload=false,$settings=null){return false;}
  private function removePendingSettingsFileUnlocked($message){if(is_file(self::PENDING_SETTINGS_JSON))unlink(self::PENDING_SETTINGS_JSON);}
  public function __call($name,$args){
-  if(!in_array($name,["migrateLegacyTestStatus","ensureBundledSystemRecordings","ensureAmiUser","ensureDialplan","ensureSipNotifyTemplates","ensureMenuPlacement","ensureDashboardWidget","ensureCronJob","ensureFreePbxBackupEnrollment"],true))throw new \\LogicException("Unexpected fixture integration: ".$name);
+  if(!in_array($name,["migrateLegacyTestStatus","ensureBundledSystemRecordings","ensureAmiUser","ensureDialplan","ensureSipNotifyTemplates","ensureDashboardWidget","ensureCronJob","ensureFreePbxBackupEnrollment"],true))throw new \\LogicException("Unexpected fixture integration: ".$name);
   return $name==="ensureFreePbxBackupEnrollment"?["success"=>true]:null;
  }
  '.$methods.'}');
@@ -61,6 +67,7 @@ $activity=fopen($root.'/activity.lock','c+');chmod($root.'/activity.lock',0640);
 try{$module->installUnprivilegedPhase();throw new LogicException('Uninitialized fresh hook bypassed parent activity lock.');}
 catch(RuntimeException $e){lock_check(strpos($e->getMessage(),'did not become idle')!==false,'Unexpected fresh-hook rejection.');}
 lock_check($module->writes===0&&!is_file($root.'/config'),'Blocked hook wrote fresh configuration.');
+lock_check($module->preflights===1,'Fresh hook skipped read-only managed-target qualification.');
 $module->initializeFreshInstallerConfiguration();
 lock_check($module->writes===1&&is_file($root.'/config'),'Narrow fresh initializer did not write once under independent settings mutex.');
 $original=file_get_contents($root.'/config');

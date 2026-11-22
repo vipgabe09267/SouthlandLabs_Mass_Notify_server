@@ -241,6 +241,8 @@ def collect_health_faults(worker: dict | None, storage: dict | None, *,
             faults['announcement_worker']['confirmation_seconds'] = HEALTH_CONFIRMATION_SECONDS
 
     storage_issues = []
+    inspection_messages = []
+    inspection_key = None
     storage_time = _health_time(storage.get("checked_at"), iso=False) if isinstance(storage, dict) else None
     if storage_error or not isinstance(storage, dict):
         storage_issues.append("Storage and delivery-queue health is unavailable. Check the maintenance log; missing data does not establish an empty queue.")
@@ -255,11 +257,35 @@ def collect_health_faults(worker: dict | None, storage: dict | None, *,
                     "recent_expired_weather", "recent_weather_deadline_misses")
         if any(type(storage.get(key, 0)) is not int or storage.get(key, 0) < 0 for key in counters):
             storage_issues.append("Storage health contains invalid counters. Check the maintenance log and regenerate diagnostics.")
-        elif any(type(storage.get(key, False)) is not bool for key in ("queue_scan_incomplete", "audit_at_capacity", "audit_fault_active", "audit_forwarding_active",
+        elif any(type(storage.get(key, False)) is not bool for key in ("queue_scan_incomplete", "weather_scan_incomplete", "audit_at_capacity", "audit_fault_active", "audit_forwarding_active",
                                                                         "security_audit_at_capacity", "security_audit_fault_active", "security_audit_forwarding_active",
                                                                         "media_scan_incomplete", "media_over_budget", "media_near_budget", "free_below_media_reserve")):
             storage_issues.append("Storage health contains invalid status flags. Check the maintenance log and regenerate diagnostics.")
+        elif any(not isinstance(storage.get(prefix + field, ''), str)
+                 for prefix in ('audit_', 'security_audit_') for field in ('failure_code', 'forwarding_error')):
+            storage_issues.append('Storage health contains invalid audit reason fields. Check the maintenance log and regenerate diagnostics.')
         else:
+            # These are fixed producer codes, never file names or exception
+            # text. Unknown diagnostics cannot establish a healthy inventory.
+            inspection = storage.get('inspection_issues', [])
+            labels = {'external': 'External delivery inventory', 'weather': 'Weather delivery inventory',
+                      'control_audit': 'API audit health inspection', 'security_audit': 'Operator security audit health inspection'}
+            codes = {'snapshot_busy', 'snapshot_changed', 'unreadable', 'invalid', 'unsafe', 'scan_limit'}
+            valid_inspection = (isinstance(inspection, list) and len(inspection) <= 32
+                and all(isinstance(row, dict) and set(row) == {'component', 'code'}
+                        and isinstance(row['component'], str) and row['component'] in labels
+                        and isinstance(row['code'], str) and row['code'] in codes for row in inspection))
+            grouped = {}
+            if not valid_inspection:
+                storage_issues.append('Storage inspection diagnostics are invalid. Review the maintenance log; inventory cannot be confirmed.')
+            else:
+                for row in inspection:
+                    grouped.setdefault(row['component'], set()).add(row['code'])
+                for component, reasons in sorted(grouped.items()):
+                    inspection_messages.append(labels[component] + ' could not be verified (' + ', '.join(sorted(reasons))
+                        + '). Review the maintenance log and storage-summary.json; displayed counts may be incomplete.')
+                if inspection and all(row['code'] in {'snapshot_busy', 'snapshot_changed'} for row in inspection):
+                    inspection_key = hashlib.sha256(json.dumps(sorted(grouped), separators=(',', ':')).encode()).hexdigest()
             failed_stages = storage.get('maintenance_failed_stages', [])
             if (not isinstance(failed_stages, list) or len(failed_stages)>6
                     or any(not isinstance(stage,str) or stage not in {'audit','security_audit','announcement_jobs','event_logs','generated_media','desktop_evidence'} for stage in failed_stages)):
@@ -271,16 +297,34 @@ def collect_health_faults(worker: dict | None, storage: dict | None, *,
             elif storage["free_bytes"] == 0:
                 storage_issues.append("No free space is reported for PBX data. Free space before sending announcements or changing settings.")
             if storage.get("queue_errors") or storage.get("queue_scan_incomplete"):
-                storage_issues.append("External delivery inventory is unreadable or incomplete. Review the maintenance log; displayed counts may omit deliveries.")
+                if 'external' not in grouped:
+                    inspection_messages.append("External delivery inventory is unreadable or incomplete. Review the maintenance log; displayed counts may omit deliveries.")
+                    # A historical producer did not categorize its read errors.
+                    # Recheck rather than calling an unknown inventory empty.
+                    if not inspection:
+                        inspection_key = 'legacy_external_inventory'
+                    else:
+                        storage_issues.append('External delivery inspection lacks matching diagnostic evidence. Review the maintenance log.')
+            if storage.get('weather_scan_incomplete') and 'weather' not in grouped:
+                storage_issues.append('Weather delivery inventory could not be verified. Review the maintenance log; displayed counts may be incomplete.')
             if storage.get("recent_expired_external", storage.get("expired_external")):
                 storage_issues.append("External deliveries expired without acceptance. Review delivery results and current recipient authorization.")
             if any(storage.get("recent_" + key, storage.get(key)) for key in ("failed_weather", "uncertain_weather", "expired_weather", "weather_deadline_misses")):
                 storage_issues.append("Weather or Lightning deliveries failed, expired or have an uncertain outcome. Review delivery evidence; do not blindly replay them.")
-            if (storage.get("audit_at_capacity") or storage.get("security_audit_at_capacity")
-                    or storage.get("audit_fault_active", bool(storage.get("audit_failed_records") or storage.get("audit_failure_code")))
-                    or storage.get("security_audit_fault_active", bool(storage.get("security_audit_failed_records") or storage.get("security_audit_failure_code")))):
+            audit_fault = False
+            for prefix, component in (('audit_', 'control_audit'), ('security_audit_', 'security_audit')):
+                active = storage.get(prefix + 'fault_active', bool(storage.get(prefix + 'failed_records') or storage.get(prefix + 'failure_code')))
+                unavailable_read = (component in grouped and not storage.get(prefix + 'failed_records')
+                    and storage.get(prefix + 'failure_code', '') in {'', 'audit_fault_state_unavailable', 'audit_health_unavailable'})
+                audit_fault = audit_fault or storage.get(prefix + 'at_capacity') or (active and not unavailable_read)
+            if audit_fault:
                 storage_issues.append("API or operator security audit storage reached capacity or could not confirm records. Review audit fault and recovery evidence; do not resend accepted actions to repair history.")
-            if storage.get("audit_forwarding_active") or storage.get("security_audit_forwarding_active"):
+            forwarding_fault = False
+            for prefix, component in (('audit_', 'control_audit'), ('security_audit_', 'security_audit')):
+                unavailable_read = (component in grouped and not storage.get(prefix + 'forwarding_failed_records')
+                    and storage.get(prefix + 'forwarding_error') in {'audit_forwarding_health_unavailable', 'audit_health_unavailable'})
+                forwarding_fault = forwarding_fault or (storage.get(prefix + 'forwarding_active') and not unavailable_read)
+            if forwarding_fault:
                 storage_issues.append("Audit forwarding cannot confirm local system-logger acceptance. Check /dev/log and logger health, then verify the separate collector. Do not replay accepted actions.")
             if storage.get("media_scan_incomplete"):
                 storage_issues.append("Generated-media storage could not be fully inspected. Check the storage maintenance log; cleanup preserves files when inspection fails.")
@@ -290,11 +334,14 @@ def collect_health_faults(worker: dict | None, storage: dict | None, *,
                 storage_issues.append("Generated media has reached 90% of its cache budget. Review retained or queued alerts before more renders are rejected.")
             if storage.get("free_below_media_reserve"):
                 storage_issues.append("PBX data free space is below the generated-media reserve. Speech and image admission reject new renders until space is available.")
-    if storage_issues:
+    if storage_issues or inspection_messages:
         faults["storage"] = _candidate("storage", "storage and delivery health",
-            " ".join(storage_issues), datetime.fromtimestamp(current, timezone.utc).isoformat())[1]
+            " ".join(storage_issues + inspection_messages), datetime.fromtimestamp(current, timezone.utc).isoformat())[1]
         if storage_error or storage_time is None or storage_time > current+60 or current-storage_time > 300:
             faults['storage']['confirmation_seconds'] = HEALTH_CONFIRMATION_SECONDS
+        elif not storage_issues and inspection_key is not None:
+            faults['storage'].update(confirmation_seconds=HEALTH_CONFIRMATION_SECONDS,
+                confirmation_key=inspection_key, confirmation_observed_at=storage_time)
     return faults
 
 
@@ -723,13 +770,26 @@ def process_faults(config: dict, faults: dict[str, dict], state_path: Path, *, s
             continue
         attempt = attempts.get(channel) if isinstance(attempts.get(channel), dict) else {}
         if fault.get('confirmation_seconds') == HEALTH_CONFIRMATION_SECONDS:
-            observing = attempt.get('fingerprint') == fingerprint and attempt.get('submission_started') is False
+            confirmation_key = fault.get('confirmation_key', '')
+            observed_at = fault.get('confirmation_observed_at')
+            # An observation token is not a submission fence. Keep the existing
+            # journal schema readable by the previous runtime during rollback;
+            # only actual mail uses the channel fingerprint in active/history.
+            observation_token = (hashlib.sha256((fingerprint + '|' + confirmation_key).encode()).hexdigest()
+                if confirmation_key else fingerprint)
+            observing = attempt.get('fingerprint') == observation_token and attempt.get('submission_started') is False
             if not observing:
-                if attempt.get('fingerprint') == fingerprint and current-_integer(attempt.get('at')) < RETRY_SECONDS:
+                if (attempt.get('fingerprint') == fingerprint and attempt.get('submission_started') is not False
+                        and current-_integer(attempt.get('at')) < RETRY_SECONDS):
                     continue
-                attempts[channel] = {'fingerprint':fingerprint, 'at':current, 'submission_started':False}
+                attempts[channel] = {'fingerprint':observation_token, 'at':current, 'submission_started':False}
                 continue
             if current-_integer(attempt.get('at')) < HEALTH_CONFIRMATION_SECONDS:
+                continue
+            # Re-reading one still-fresh summary is not independent evidence
+            # that a concurrent writer has remained unavailable for two minutes.
+            if confirmation_key and (type(observed_at) is not int
+                    or observed_at - attempt['at'] < HEALTH_CONFIRMATION_SECONDS):
                 continue
             attempt = {}
         if attempt.get("fingerprint") == fingerprint and current - _integer(attempt.get("at")) < RETRY_SECONDS:

@@ -1,6 +1,8 @@
 #!/usr/bin/python3
 """Signed old-to-new upgrade fixtures; no live PBX paths, network or services."""
 import argparse
+import copy
+import errno
 import importlib.util
 import io
 import json
@@ -9,6 +11,7 @@ import pwd
 from pathlib import Path
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -88,6 +91,27 @@ class UpgradeTrustTests(unittest.TestCase):
             contents,provenance=self.upgrade.upstream_contents(signed,'framework','17.0.5',workspace)
         self.assertEqual(contents,expected)
         self.assertEqual(provenance['upstream_signer'],self.upgrade.UPSTREAM_SIGNER)
+
+    def test_signed_stock_private_workspace_keeps_gpg_isolation_and_signature_checks(self):
+        private='/var/spool/sls-mass-notify-installer-tmp'
+        real_temporary=self.upgrade.tempfile.TemporaryDirectory
+        homes=[]
+        def isolated(*args,**kwargs):
+            self.assertEqual(Path(kwargs['dir']),Path(private))
+            kwargs['dir']='/tmp'
+            result=real_temporary(*args,**kwargs)
+            self.assertEqual(Path(result.name).stat().st_mode&0o777,0o700)
+            homes.append(result.name)
+            return result
+        with patch.dict(os.environ,{'TMPDIR':private}), patch.object(self.upgrade,'private_install_temporary_state',return_value={'exists':True},create=True) as checked, patch.object(self.upgrade.tempfile,'TemporaryDirectory',side_effect=isolated):
+            result,proof=self.upgrade.upstream_contents(self.offline/'framework-17.0.5.tgz.gpg','framework','17.0.5',self.root)
+        self.assertEqual(result,self.stock['framework']);self.assertEqual(proof['upstream_signer'],self.upgrade.UPSTREAM_SIGNER);checked.assert_called_once_with()
+        self.assertTrue(homes);self.assertTrue(all(not Path(p).exists()for p in homes))
+        longest=private+'/sls-upstream-gpg-'+'x'*8+'/S.gpg-agent.browser'
+        self.assertLess(len(longest.encode()),108)
+        with patch.dict(os.environ,{'TMPDIR':private}), patch.object(self.upgrade,'private_install_temporary_state',side_effect=ValueError('unsafe'),create=True), patch.object(self.upgrade.subprocess,'run') as started:
+            with self.assertRaises(self.upgrade.UpgradeError):self.upgrade.upstream_contents(self.offline/'framework-17.0.5.tgz.gpg','framework','17.0.5',self.root)
+            started.assert_not_called()
 
     def upstream_with_output_observation(self, signed, limit, observed):
         real_run = self.upgrade.subprocess.run
@@ -499,6 +523,99 @@ class UpgradeTrustTests(unittest.TestCase):
             body=json.dumps(data).encode();self.trust.store_manifest(self.args.trust_root,data,body)
         self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root)
 
+    def test_complete_stock_cache_capacity_binding_covers_native_versions_and_existing_pending(self):
+        self.seed_current_stock_cache()
+        binding_api=getattr(self.upgrade,'stock_cache_storage_binding',None)
+        self.assertTrue(callable(binding_api),'Authenticated complete stock cache growth proof is missing')
+        folder=self.args.trust_root/'stock-packages';before={p.name:p.read_bytes()for p in folder.iterdir()}
+        binding=binding_api(self.workspace,self.args.trust_root,web=self.web)
+        self.assertIsInstance(binding,dict)
+        self.assertEqual(set(binding['approved']),{'dashboard','framework'})
+        self.assertEqual(set(binding['cached']),{'dashboard-17.0.5.tgz.gpg','framework-17.0.5.tgz.gpg'})
+        self.assertEqual(binding['pending'],binding['cached'])
+        self.assertEqual({p.name:p.read_bytes()for p in folder.iterdir()},before)
+
+    def test_discounted_stock_publication_stops_before_writes_if_bound_cache_drifted(self):
+        self.seed_current_stock_cache();api=getattr(self.upgrade,'stock_cache_storage_binding',None)
+        self.assertTrue(callable(api),'Protected cache checkpoint binding is missing')
+        binding=api(self.workspace,self.args.trust_root,web=self.web)
+        proof={'schema':3,'kind':'sll-prepared-upgrade-storage-proof-v3','capacity_only':True,'stock_cache':binding}
+        path=self.workspace/'resource-relationship-proof.json';self.upgrade.write_json(path,proof)
+        digest=self.trust.digest(json.dumps(proof,sort_keys=True,separators=(',',':')).encode())
+        target=self.args.trust_root/'stock-packages/framework-17.0.5.tgz.gpg';target.write_bytes(b'changed root cache')
+        before={p.name:p.read_bytes()for p in target.parent.iterdir()}
+        with patch.object(self.upgrade,'WEB',self.web),patch.object(self.upgrade,'upstream_contents',side_effect=AssertionError('No GPG/temp or publication after drift')),self.assertRaisesRegex(self.upgrade.UpgradeError,'capacity|storage|changed'):
+            self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root,capacity_proof=path,capacity_proof_sha256=digest)
+        self.assertEqual({p.name:p.read_bytes()for p in target.parent.iterdir()},before)
+
+    def test_discounted_stock_writer_rechecks_current_native_version_before_any_publication(self):
+        self.seed_current_stock_cache()
+        binding=self.upgrade.stock_cache_storage_binding(self.workspace,self.args.trust_root,web=self.web)
+        self.assertIsInstance(binding,dict)
+        proof={'schema':3,'kind':'sll-prepared-upgrade-storage-proof-v3','capacity_only':True,'stock_cache':binding}
+        path=self.workspace/'resource-relationship-proof.json';self.upgrade.write_json(path,proof)
+        digest=self.trust.digest(json.dumps(proof,sort_keys=True,separators=(',',':')).encode())
+        xml=self.web/'admin/modules/framework/module.xml';xml.write_bytes(b'<module><rawname>framework</rawname><version>17.0.99</version></module>')
+        before={p.name:p.read_bytes()for p in(self.args.trust_root/'stock-packages').iterdir()}
+        with patch.object(self.upgrade,'WEB',self.web),patch.object(self.upgrade,'upstream_contents',side_effect=AssertionError('No GPG/write after native drift')),self.assertRaises(self.upgrade.UpgradeError):
+            self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root,capacity_proof=path,capacity_proof_sha256=digest)
+        self.assertEqual({p.name:p.read_bytes()for p in(self.args.trust_root/'stock-packages').iterdir()},before)
+
+    def test_stock_role_is_rechecked_after_gpg_before_any_cache_publication(self):
+        self.seed_current_stock_cache()
+        binding=self.upgrade.stock_cache_storage_binding(self.workspace,self.args.trust_root,web=self.web)
+        proof={'schema':3,'kind':'sll-prepared-upgrade-storage-proof-v3','capacity_only':True,'stock_cache':binding}
+        path=self.workspace/'resource-relationship-proof.json';self.upgrade.write_json(path,proof)
+        digest=self.trust.digest(json.dumps(proof,sort_keys=True,separators=(',',':')).encode())
+        folder=self.args.trust_root/'stock-packages';before={p.name:p.read_bytes()for p in folder.iterdir()}
+        cache_identity=(folder.stat().st_dev,folder.stat().st_ino)
+        original=self.upgrade.upstream_contents;original_unlink=self.upgrade.os.unlink;calls=[]
+        def verified_then_drift(*args,**kwargs):
+            result=original(*args,**kwargs);calls.append(1)
+            if len(calls)==1:
+                (self.web/'admin/modules/framework/module.xml').write_bytes(b'<module><rawname>framework</rawname><version>17.0.99</version></module>')
+            return result
+        def no_cache_retirement(name,*args,**kwargs):
+            fd=kwargs.get('dir_fd')
+            if fd is not None:
+                row=os.fstat(fd)
+                if(row.st_dev,row.st_ino)==cache_identity:raise AssertionError('No cache retirement after proof drift')
+            return original_unlink(name,*args,**kwargs)
+        with patch.object(self.upgrade,'WEB',self.web),patch.object(self.upgrade,'upstream_contents',side_effect=verified_then_drift), \
+             patch.object(self.trust,'atomic',side_effect=AssertionError('No publication after proof drift')), \
+             patch.object(self.upgrade.os,'unlink',side_effect=no_cache_retirement),self.assertRaises(self.upgrade.UpgradeError):
+            self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root,capacity_proof=path,capacity_proof_sha256=digest)
+        self.assertGreaterEqual(len(calls),1,'First capacity proof must pass and actual GPG validation must run before the controlled drift')
+        self.assertEqual({p.name:p.read_bytes()for p in folder.iterdir()},before)
+
+    def test_malformed_native_identity_declines_credit_and_writer_fails_with_bounded_error(self):
+        self.seed_current_stock_cache()
+        binding=self.upgrade.stock_cache_storage_binding(self.workspace,self.args.trust_root,web=self.web)
+        self.assertIsInstance(binding,dict)
+        proof={'schema':3,'kind':'sll-prepared-upgrade-storage-proof-v3','capacity_only':True,'stock_cache':binding}
+        path=self.workspace/'resource-relationship-proof.json';self.upgrade.write_json(path,proof)
+        digest=self.trust.digest(json.dumps(proof,sort_keys=True,separators=(',',':')).encode())
+        (self.web/'admin/modules/framework/module.xml').write_bytes(b'<module>PRIVATE_XML_SENTINEL')
+        self.assertIsNone(self.upgrade.stock_cache_storage_binding(self.workspace,self.args.trust_root,web=self.web))
+        with patch.object(self.upgrade,'WEB',self.web),patch.object(self.trust,'atomic',side_effect=AssertionError('No publication')),self.assertRaises(self.upgrade.UpgradeError)as caught:
+            self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root,capacity_proof=path,capacity_proof_sha256=digest)
+        self.assertNotIn('PRIVATE_XML_SENTINEL',str(caught.exception))
+
+    def test_missing_interrupted_foreign_or_new_pending_cache_keeps_full_reservation(self):
+        self.seed_current_stock_cache();api=getattr(self.upgrade,'stock_cache_storage_binding',None)
+        self.assertTrue(callable(api),'Conservative stock cache proof is missing')
+        folder=self.args.trust_root/'stock-packages'
+        for change in('missing','interrupted','new_pending','foreign'):
+            with self.subTest(change=change):
+                leaf=folder/'framework-17.0.5.tgz.gpg';original=leaf.read_bytes();extra=None
+                if change=='missing':leaf.unlink()
+                elif change=='interrupted':extra=folder/('.new-'+'a'*24);extra.write_bytes(original);extra.chmod(0o600)
+                elif change=='foreign':extra=folder/'unknown';extra.write_bytes(original);extra.chmod(0o600)
+                else:extra=self.workspace/'framework-17.0.99.tgz.gpg';extra.write_bytes(original);extra.chmod(0o600)
+                self.assertIsNone(api(self.workspace,self.args.trust_root,web=self.web))
+                if extra is not None:extra.unlink()
+                if change=='missing':leaf.write_bytes(original);leaf.chmod(0o600)
+
     def next_framework(self,extra=None):
         contents=dict(self.stock['framework']);contents['module.xml']=b'<module><rawname>framework</rawname><version>17.0.6</version></module>'
         contents.update(extra or {'amp_conf/htdocs/admin/i18n/amp.pot':b'independently signed new translations'})
@@ -509,8 +626,54 @@ class UpgradeTrustTests(unittest.TestCase):
             if not self.upgrade.deployed_framework(name):continue
             target=self.web/(name[16:] if name.startswith('amp_conf/htdocs/') else 'admin/modules/framework/'+name)
             target.parent.mkdir(parents=True,exist_ok=True)
-            target.write_bytes(self.upgrade.menu_overlay(body) if name==self.upgrade.MENU_NAME else body)
+            target.write_bytes(body)
         return signed
+
+    def test_interrupted_stock_evidence_preserves_cache_when_trust_volume_is_full(self):
+        self.seed_current_stock_cache()
+        folder=self.args.trust_root/'stock-packages'
+        package=folder/'framework-17.0.5.tgz.gpg'
+        partial=folder/('.new-'+'8'*24)
+        self.trust.atomic(partial,package.read_bytes())
+        before={p.name:p.read_bytes() for p in folder.iterdir()}
+        root_identity=self.args.trust_root.stat()
+        real_statvfs=os.fstatvfs
+        def capacity(fd):
+            actual=os.fstat(fd)
+            if (actual.st_dev,actual.st_ino)==(root_identity.st_dev,root_identity.st_ino):
+                from types import SimpleNamespace
+                return SimpleNamespace(f_bavail=0,f_frsize=4096,f_files=100,f_favail=100,f_flag=0)
+            return real_statvfs(fd)
+        with patch.object(os,'fstatvfs',side_effect=capacity), self.assertRaisesRegex(self.upgrade.UpgradeError,'capacity|space'):
+            self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root)
+        self.assertEqual({p.name:p.read_bytes() for p in folder.iterdir()},before)
+        self.assertEqual(list(self.args.trust_root.glob('.stock-cache-recovery-*')),[])
+
+    def test_new_native_signed_stock_package_publishes_after_exact_growth_check(self):
+        self.seed_current_stock_cache()
+        signed = self.next_framework()
+        name = signed.name
+        body = signed.read_bytes()
+        self.trust.atomic(self.workspace/name,body)
+        contents, provenance = self.upgrade.upstream_contents(signed,'framework','17.0.6',self.workspace)
+        current,unused = self.upgrade.upstream_inventory(contents,provenance,'framework','17.0.6',self.old,self.old,self.web)
+        self.upgrade.write_json(self.workspace/'framework.json',current)
+        # Dashboard's staged package was already present. The previous
+        # Framework package remains cached even after the new one is published.
+        binding=self.upgrade.stock_cache_storage_binding(self.workspace,self.args.trust_root,web=self.web)
+        self.assertIsInstance(binding,dict)
+        self.assertEqual(set(binding['pending'])-set(binding['cached']),{name})
+        self.assertEqual(binding['pending'][name]['bytes'],len(body))
+        proof={'schema':3,'kind':'sll-prepared-upgrade-storage-proof-v3','capacity_only':True,'stock_cache':binding}
+        path=self.workspace/'resource-relationship-proof.json'
+        self.upgrade.write_json(path,proof)
+        digest=self.trust.digest(json.dumps(proof,sort_keys=True,separators=(',',':')).encode())
+        folder=self.args.trust_root/'stock-packages'
+        old=(folder/'framework-17.0.5.tgz.gpg').read_bytes()
+        with patch.object(self.upgrade,'WEB',self.web):
+            self.upgrade.cache_stock_packages(self.workspace,self.args.trust_root,capacity_proof=path,capacity_proof_sha256=digest)
+        self.assertEqual((folder/name).read_bytes(),body)
+        self.assertEqual((folder/'framework-17.0.5.tgz.gpg').read_bytes(),old)
 
     def test_stock_reconciliation_accepts_signed_new_version_and_retains_offline_evidence(self):
         self.seed_current_stock_cache();self.next_framework()
@@ -523,6 +686,324 @@ class UpgradeTrustTests(unittest.TestCase):
         again=self.upgrade.reconcile_stock(self.root/'stock-review-again',self.args.trust_root,web=self.web)
         self.assertEqual(again['changed_modules'],[])
         for name,body in self.preserved.items():self.assertEqual((self.data/name).read_bytes(),body)
+
+    def stock_step(self, root, action, **options):
+        # The shell fixture's guarded signers produce an exact digest for each
+        # successfully verified module. Some old synthetic packages omit .sig.
+        if action == 'complete' and 'verified_signatures' not in options:
+            outputs = {}
+            for module in ('dashboard','framework'):
+                path = self.web/'admin/modules'/module/'module.sig'
+                if not path.exists(): path.write_bytes(('verified fixture signature '+module).encode())
+                outputs[module] = self.trust.digest(path.read_bytes())
+            options['verified_signatures'] = outputs
+        return self.upgrade.stock_maintenance(root, action, **options)
+
+    def test_completion_binds_verified_menu_and_both_actual_signer_outputs(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        menu = self.web/'admin/views/menu_items.php'
+        menu.write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+        signatures = {m:self.web/'admin/modules'/m/'module.sig' for m in ('dashboard','framework')}
+        def step(action, **kw):
+            return self.upgrade.stock_maintenance(root, action, web=self.web, packages=self.offline,
+                                                  now=1700000000, **kw)
+        for change in ('menu','dashboard','framework','missing proof','legitimate published signatures','edit during publication'):
+            with self.subTest(change=change):
+                menu.write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+                for m,p in signatures.items(): p.write_bytes(('old '+m).encode())
+                step('reserve'); step('reconcile')
+                for m,p in signatures.items(): p.write_bytes(('verified '+m).encode())
+                proofs = {m:self.trust.digest(p.read_bytes()) for m,p in signatures.items()}
+                if change == 'menu': menu.write_bytes(b'concurrent unexpected menu')
+                elif change in signatures: signatures[change].write_bytes(b'concurrent unexpected signature')
+                elif change == 'missing proof': del proofs['dashboard']
+                if change in ('legitimate published signatures','edit during publication'):
+                    save = self.upgrade.write_json
+                    def concurrent_publication(path, payload):
+                        if change == 'edit during publication' and path.name == 'stock-maintenance.json' and payload['phase'] == 'complete':
+                            signatures['dashboard'].write_bytes(b'changed after the last comparison')
+                        return save(path,payload)
+                    with patch.object(self.upgrade,'write_json',side_effect=concurrent_publication):
+                        self.assertEqual(step('complete',verified_signatures=proofs),'complete')
+                    if change == 'legitimate published signatures':
+                        self.assertEqual(step('probe'),'current')
+                    else:
+                        self.assertNotEqual(step('probe'),'current')
+                else:
+                    with self.assertRaisesRegex(self.upgrade.UpgradeError,'verified|Verified'):
+                        step('complete',verified_signatures=proofs)
+                    self.assertNotEqual(json.loads((root/'stock-maintenance.json').read_bytes())['phase'],'complete')
+                    if change in signatures or change == 'menu':
+                        self.assertTrue((root/'stock-maintenance-review.json').exists())
+                    step('failed')
+
+    def test_maintenance_discovers_stock_updates_even_with_intact_widgets_and_rechecks_replaced_signature(self):
+        self.seed_current_stock_cache()
+        (self.web/'admin/views/menu_items.php').write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+        root = self.args.trust_root
+        def step(action, now=1700000000):
+            return self.stock_step(root, action, web=self.web, packages=self.offline, now=now)
+        self.assertEqual(step('probe'), 'due')
+        step('reserve')
+        step('reconcile')
+        step('complete')
+        self.assertEqual(step('probe'), 'current')
+        self.next_framework()
+        self.assertEqual(step('probe'), 'due')
+        step('reserve')
+        step('reconcile')
+        self.assertEqual(self.trust.load(root, 'framework')[0]['version'], '17.0.6')
+        step('complete')
+        self.assertEqual(step('probe'), 'current')
+        (self.web/'admin/modules/framework/module.sig').write_bytes(b'replaced signature')
+        self.assertEqual(step('probe',1700000300), 'due')
+
+    def test_stock_update_during_signing_retries_version_never_attempted(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        (self.web/'admin/views/menu_items.php').write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+        def step(action, minute):
+            return self.stock_step(root, action, web=self.web, packages=self.offline,
+                                                  now=1700000000 + 60*minute)
+        step('reserve',0)
+        step('reconcile',0)
+        self.next_framework()
+        self.assertEqual(step('failed',1),'transition')
+        state = json.loads((root/'stock-maintenance.json').read_bytes())
+        self.assertEqual(state['attempted']['versions']['framework'],'17.0.5')
+        self.assertEqual(state['seen']['versions']['framework'],'17.0.6')
+        self.assertEqual(self.trust.load(root,'framework')[0]['version'],'17.0.5')
+        self.assertEqual(step('probe',5),'waiting')
+        self.assertEqual(step('probe',6),'due')
+        for action in ('reserve','reconcile','complete'): step(action,6)
+        self.assertEqual(step('probe',7),'current')
+        self.assertEqual(self.trust.load(root,'framework')[0]['version'],'17.0.6')
+
+    def test_stock_update_with_new_xml_but_old_payload_retries_after_updater_finishes(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        module = self.web/'admin/modules/framework'
+        previous = (module/'install.php').read_bytes()
+        self.next_framework({'install.php':b'signed new installer','module.sig':b'new native signature'})
+        (module/'install.php').write_bytes(previous)
+        (module/'module.sig').write_bytes(b'previous native signature')
+        def step(action, minute):
+            return self.stock_step(root, action, web=self.web, packages=self.offline,
+                                                  now=1700000000 + 60*minute)
+        step('reserve',0)
+        with self.assertRaisesRegex(self.upgrade.UpgradeError,'review'): step('reconcile',0)
+        self.assertEqual(step('failed',0),'transition')
+        self.assertEqual(self.trust.load(root,'framework')[0]['version'],'17.0.5')
+        self.assertIn('install.php',{i['path'] for i in json.loads((root/'stock-maintenance-review.json').read_bytes())['differences']})
+        self.assertEqual(step('probe',1),'waiting')
+        self.assertEqual(step('probe',5),'due')
+        step('reserve',5)
+        with self.assertRaisesRegex(self.upgrade.UpgradeError,'review'): step('reconcile',5)
+        self.assertEqual(step('failed',5),'transition')
+        (module/'install.php').write_bytes(b'signed new installer')
+        (module/'module.sig').write_bytes(b'new native signature')
+        self.assertEqual(step('probe',6),'waiting')
+        self.assertEqual(step('probe',20),'due')
+        for action in ('reserve','reconcile','complete'): step(action,20)
+        self.assertEqual(step('probe',21),'current')
+        self.assertEqual(self.trust.load(root,'framework')[0]['version'],'17.0.6')
+
+    def test_old_pending_stock_receipt_retries_once_and_interrupted_review_backs_off(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        record = root/'stock-maintenance.json'
+        start = 1700000000
+        self.upgrade.write_json(record, {'schema':1,'phase':'pending','time':start,
+                                        'seen':self.upgrade.stock_observation(root,self.web)})
+        def step(action, minute):
+            return self.stock_step(root, action, web=self.web, packages=self.offline,
+                                                  now=start + 60*minute)
+        self.assertEqual(step('probe',1),'due')
+        step('reserve',1)
+        self.assertEqual(step('probe',2),'waiting')
+        self.assertEqual(step('probe',6),'due')
+        step('reserve',6)
+        self.assertEqual(step('probe',11),'waiting')
+        self.assertEqual(step('probe',21),'due')
+
+    def test_stock_cron_ignores_metadata_only_rewrites_and_bounds_genuinely_changing_signatures(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        module = self.web/'admin/modules/framework'
+        menu = self.web/'admin/views/menu_items.php'
+        menu.write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+        signature = module/'module.sig'
+        signature.write_bytes(b'fixture signature')
+        def step(action, minute):
+            return self.stock_step(root, action, web=self.web, packages=self.offline,
+                                                  now=1700000000 + minute * 60)
+        step('reserve',0)
+        step('reconcile',0)
+        step('complete',0)
+        before = signature.read_bytes()
+        temp = signature.with_name('replacement')
+        temp.write_bytes(before)
+        temp.replace(signature)
+        os.utime(menu, None)
+        self.assertEqual(step('probe',1),'current')
+        step('reserve',5)
+        step('failed',5)
+        for minute in range(6,65):
+            signature.write_text('changed invalid signature at minute ' + str(minute))
+            self.assertEqual(step('probe',minute),'waiting')
+        self.assertEqual(step('probe',65),'due')
+        step('reserve',65)
+        step('failed',65)
+        self.next_framework()
+        self.assertEqual(step('probe',70),'due')
+
+    def test_stock_probe_skips_oversized_and_special_inputs_without_reading_their_bodies(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        signature = self.web/'admin/modules/framework/module.sig'
+        with signature.open('wb') as stream:
+            stream.truncate(256 * 1024 * 1024)
+        menu = self.web/'admin/views/menu_items.php'
+        menu.unlink(); os.mkfifo(menu)
+        original = self.trust.read
+        def bounded(path, limit, **kwargs):
+            self.assertNotIn(path, (signature,menu))
+            return original(path,limit,**kwargs)
+        with patch.object(self.trust,'read',side_effect=bounded):
+            observed = self.upgrade.stock_observation(root,self.web)
+        self.assertEqual(observed['signatures']['framework'],'unavailable')
+        self.assertEqual(observed['menu'],'unavailable')
+        (self.web/'admin/modules/framework/module.xml').write_bytes(
+            b'<?xml version="1.0" encoding="missing-codec"?><module><version>17.0.34</version></module>')
+        self.assertIsNone(self.upgrade.stock_observation(root,self.web)['versions']['framework'])
+
+    def test_successful_resigning_does_not_repeat_for_every_external_signature_rewrite(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        menu = self.web/'admin/views/menu_items.php'
+        menu.write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+        signature = self.web/'admin/modules/framework/module.sig'
+        def step(action, minute):
+            return self.stock_step(root, action, web=self.web, packages=self.offline,
+                                                  now=1700000000 + 60*minute)
+        for action in ('reserve','reconcile','complete'): step(action,0)
+        signature.write_bytes(b'first replacement')
+        self.assertEqual(step('probe',1),'due')
+        for action in ('reserve','reconcile','complete'): step(action,1)
+        for minute in range(2,61):
+            signature.write_text('different replacement number ' + str(minute))
+            self.assertEqual(step('probe',minute),'waiting')
+        self.assertEqual(step('probe',61),'due')
+        self.next_framework()
+        self.assertEqual(step('probe',2),'due')
+
+    def test_maintenance_retains_reviewed_missing_branding_and_throttles_failed_reconciliation(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        data,_ = self.trust.load(root, 'framework')
+        data['files']['sls-branding/footer.php'] = {'sha256': self.trust.digest(b'reviewed customization'),
+            'target': 'admin/modules/framework/sls-branding/footer.php'}
+        self.trust.store_manifest(root, data, json.dumps(data).encode())
+        previous = (root/'framework.active.json').read_bytes()
+        self.next_framework()
+        def step(action, now=1700000000):
+            return self.stock_step(root, action, web=self.web, packages=self.offline, now=now)
+        step('reserve')
+        with self.assertRaisesRegex(self.upgrade.UpgradeError,'review'):
+            step('reconcile')
+        self.assertEqual(step('failed'),'failed')
+        report = json.loads((root/'stock-maintenance-review.json').read_text())
+        self.assertIn('sls-branding/footer.php', [row['path'] for row in report['differences']])
+        self.assertEqual((root/'framework.active.json').read_bytes(), previous)
+        self.assertEqual(step('probe',1700000060),'waiting')
+        self.assertEqual(step('probe',1700086399),'waiting')
+        self.assertEqual(step('probe',1700086400),'due')
+        self.assertFalse((root/'stock-maintenance-work').exists())
+
+    def test_only_original_vendor_signature_on_entire_approved_stock_layout_can_be_reused(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        self.next_framework({'module.sig': b'signature from independent whole vendor package'})
+        self.upgrade.reconcile_stock(self.root/'vendor-review', root, web=self.web, packages=self.offline)
+        signature = self.web/'admin/modules/framework/module.sig'
+        self.assertTrue(self.trust.reusable_framework_signature(root, self.web))
+        signature.write_bytes(b'replaced locally')
+        self.assertFalse(self.trust.reusable_framework_signature(root, self.web))
+        signature.write_bytes(b'signature from independent whole vendor package')
+        data,_ = self.trust.load(root, 'framework')
+        data['files']['sls-branding/footer.php'] = {'sha256': self.trust.digest(b'reviewed'),
+            'target': 'admin/modules/framework/sls-branding/footer.php'}
+        self.trust.store_manifest(root, data, json.dumps(data).encode())
+        self.assertFalse(self.trust.reusable_framework_signature(root, self.web))
+
+    def test_explicit_reconciliation_rearms_a_verified_same_version_repair(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        menu = self.web/'admin/views/menu_items.php'
+        menu.write_bytes(self.stock['framework'][self.upgrade.MENU_NAME])
+        relative = 'sls-branding/footer.php'
+        footer = self.web/'admin/modules/framework'/relative
+        body = b'previously approved site footer'
+        data, _ = self.trust.load(root, 'framework')
+        data['files'][relative] = {'target': 'admin/modules/framework/'+relative, 'sha256': self.trust.digest(body)}
+        self.trust.store_manifest(root, data, json.dumps(data).encode())
+        reference = (root/'framework.active.json').read_bytes()
+        def step(action):
+            return self.stock_step(root, action, web=self.web, packages=self.offline, now=1700000000)
+        def review(name, **options):
+            return self.upgrade.reconcile_stock(self.root/name, root, web=self.web, packages=self.offline, **options)
+        step('reserve')
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'review'):
+            step('reconcile')
+        self.assertEqual(step('failed'), 'failed')
+        receipt = root/'stock-maintenance.json'
+        report = root/'stock-maintenance-review.json'
+        failed_state, differences = receipt.read_bytes(), report.read_bytes()
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Unreviewed'):
+            review('operator-review-before-restoration', schedule_signature_check=True)
+        self.assertEqual(receipt.read_bytes(), failed_state)
+        footer.parent.mkdir(); footer.write_bytes(body)
+        self.assertEqual(review('offline-uninstall-preflight')['changed_modules'], [])
+        self.assertEqual(step('probe'), 'waiting')
+        result = review('operator-review-after-restoration', schedule_signature_check=True)
+        self.assertEqual(result['changed_modules'], [])
+        self.assertEqual((root/'framework.active.json').read_bytes(), reference)
+        self.assertEqual(report.read_bytes(), differences)
+        self.assertEqual(step('probe'), 'due')
+        for action in ('reserve', 'reconcile', 'complete'):
+            step(action)
+        self.assertEqual(step('probe'), 'current')
+        self.assertFalse(report.exists())
+
+    def test_stock_maintenance_reclaims_its_interrupted_download_without_discarding_operator_files(self):
+        self.seed_current_stock_cache()
+        root = self.args.trust_root
+        self.next_framework()
+        work = root/'stock-maintenance-work'
+        def step(action):
+            return self.stock_step(root, action, web=self.web, packages=self.offline)
+        step('reserve')
+        def interrupt(workspace,*args,**kwargs):
+            (workspace/'framework-17.0.6.tgz.gpg').write_bytes(b'partial')
+            raise SystemExit(1)
+        # Model process loss after the workspace was recorded and before its
+        # normal cleanup. A second cron tick has to resume from signed sources.
+        with patch.object(self.upgrade,'reconcile_stock',side_effect=interrupt), \
+                patch.object(self.upgrade.shutil,'rmtree'), self.assertRaises(SystemExit):
+            step('reconcile')
+        self.assertTrue(work.is_dir())
+        extra = work/'operator-note'
+        extra.write_bytes(b'preserve me')
+        step('reserve')
+        with self.assertRaisesRegex(self.upgrade.UpgradeError,'workspace'):
+            step('reconcile')
+        self.assertEqual(extra.read_bytes(),b'preserve me')
+        extra.unlink()
+        step('reserve')
+        step('reconcile')
+        step('complete')
+        self.assertFalse(work.exists())
 
     def test_stock_reconciliation_restores_a_pointer_when_enrollment_fails_after_publication(self):
         self.seed_current_stock_cache();self.next_framework()
@@ -579,6 +1060,98 @@ class UpgradeTrustTests(unittest.TestCase):
             finally:os.close(descriptor)
         finally:os.close(lock)
 
+    def test_preserve_previously_reviewed_stock_omission_on_unchanged_vendor_base(self):
+        entry = {'sha256': self.trust.digest(b'upstream body'), 'target': 'admin/modules/framework/vendor.php'}
+        base = {'files': {'vendor.php': entry}}
+        approved = {'files': {}}
+        candidate = {'module': 'framework', 'source': {}, 'files': {'vendor.php': dict(entry)}}
+        self.upgrade.carry_reviewed_overlays(approved, base, candidate)
+        self.assertNotIn('vendor.php', candidate['files'])
+        self.trust.check_reviewed_omissions(candidate, self.web)
+        target = self.web / entry['target']
+        target.write_bytes(b'reappeared')
+        with self.assertRaisesRegex(self.trust.TrustError, 'previously omitted stock file is present'):
+            self.trust.check_reviewed_omissions(candidate, self.web)
+        changed = {'files': {'vendor.php': {**entry, 'sha256': self.trust.digest(b'updated vendor body')}}}
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'changed upstream'):
+            self.upgrade.carry_reviewed_overlays(approved, base, changed)
+
+    def test_framework_migration_keeps_publisher_menu_and_matching_rollback(self):
+        self.prepare()
+        name = self.upgrade.MENU_NAME
+        clean = self.stock['framework'][name]
+        approvals = json.loads((self.workspace / 'approvals.json').read_bytes())
+        self.assertEqual(approvals['approved']['framework']['files'][name]['sha256'], self.trust.digest(clean))
+        self.assertNotIn(name, approvals['approved']['framework']['uninstall']['replace'])
+        rollback = json.loads((self.workspace / 'previous-web-approval.json').read_bytes())
+        self.assertEqual(rollback['framework']['files'][name]['sha256'], self.trust.digest(self.upgrade.menu_overlay(clean)))
+        # Also cover installations with a protected legacy approval at the same version.
+        legacy = approvals['approved']['framework']
+        legacy['uninstall']['replace'][name] = self.trust.digest(clean)
+        legacy['files'][name]['sha256'] = rollback['framework']['files'][name]['sha256']
+        self.trust.store_manifest(self.args.trust_root, legacy, json.dumps(legacy).encode())
+        self.args.workspace = self.root / 'review-enrolled'
+        self.prepare()
+        enrolled = json.loads((self.args.workspace / 'framework.json').read_bytes())
+        self.assertEqual(enrolled['files'][name]['sha256'], self.trust.digest(clean))
+        self.assertNotIn(name, enrolled['uninstall']['replace'])
+        menu = self.web / 'admin/views/menu_items.php'
+        menu.write_bytes(menu.read_bytes() + b'// external edit')
+        self.args.workspace = self.root / 'review-third-party-edit'
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Unreviewed PBX differences'):
+            self.prepare()
+
+    def test_framework_with_new_native_menu_path_never_mutates_the_obsolete_location(self):
+        data = {'files': {}, 'uninstall': {'remove': [], 'replace': {}}}
+        previous = {'files': {}}
+        menu = self.web / 'admin/views/menu_items.php'
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'unreviewed'):
+            self.upgrade.prepare_native_menu(data, previous, self.web)
+        menu.unlink()
+        self.upgrade.prepare_native_menu(data, previous, self.web)
+        self.assertFalse(menu.exists())
+        self.assertEqual(previous['files'], {})
+
+    def test_new_signed_layout_can_retire_obsolete_menu_and_spinner_assets(self):
+        contents = {'module.xml': b'<module/>', 'module.sig': b'signed package inventory'}
+        source = {'kind': 'reviewed-upstream-and-overlays', 'archive_sha256': '0' * 64,
+                  'upstream_signer': self.upgrade.UPSTREAM_SIGNER}
+        data, prior = self.upgrade.upstream_inventory(contents, source, 'framework', '17.0.99', {}, {}, self.web)
+        self.assertEqual(set(data['files']), {'module.xml'})
+        self.assertNotIn(self.upgrade.MENU_NAME, prior['files'])
+        self.assertEqual(data['source']['vendor_signature']['sha256'], self.trust.digest(contents['module.sig']))
+
+    def test_framework_accepts_changed_vendor_menu_without_legacy_sort_function(self):
+        name = self.upgrade.MENU_NAME
+        vendor = b'<?php // new vendor markup with no old sorting conditional'
+        self.next_framework({name: vendor})
+        self.prepare()
+        approved = json.loads((self.workspace / 'framework.json').read_bytes())
+        self.assertEqual(approved['files'][name]['sha256'], self.trust.digest(vendor))
+
+    def test_installer_carries_reviewed_branding_across_framework_update(self):
+        self.seed_current_stock_cache()
+        self.next_framework()
+        old, _ = self.trust.load(self.args.trust_root, 'framework')
+        name = 'sls-branding/footer.php'
+        relative = 'admin/modules/framework/' + name
+        expected = {'target': relative, 'sha256': self.trust.digest(b'reviewed footer')}
+        old['files'][name] = expected
+        self.trust.store_manifest(self.args.trust_root, old, json.dumps(old).encode())
+        self.args.workspace = self.root / 'updated-without-footer'
+        with self.assertRaisesRegex(self.upgrade.UpgradeError, 'Unreviewed PBX differences'):
+            self.prepare()
+        report = json.loads((self.args.workspace / 'review-required.json').read_bytes())
+        self.assertIn(name, {issue['path'] for issue in report['differences']})
+        self.assertEqual(self.trust.load(self.args.trust_root, 'framework')[0], old)
+        footer = self.web / relative
+        footer.parent.mkdir()
+        footer.write_bytes(b'reviewed footer')
+        self.args.workspace = self.root / 'updated-with-reviewed-footer'
+        self.prepare()
+        updated = json.loads((self.args.workspace / 'framework.json').read_bytes())
+        self.assertEqual(updated['files'][name], expected)
+
     def test_absent_trust_signed_previous_overlays_and_mappings_bootstrap_without_mutation(self):
         self.prepare(); self.assert_preserved()
         approved = json.loads((self.workspace / 'approvals.json').read_bytes())
@@ -589,6 +1162,222 @@ class UpgradeTrustTests(unittest.TestCase):
         self.assertNotIn('amp_conf/bin/fwconsole', framework['files'])
         self.assertEqual(framework['files'][self.upgrade.MENU_NAME]['target'], 'admin/views/menu_items.php')
         with patch.object(self.upgrade, 'WEB', self.web): self.upgrade.verify_previous(self.workspace)
+
+    def native_framework_companion(self, version='17.0.33.4', present=True, body=None):
+        """Vendor manual-copy shape; the real GPG package supplies expectations."""
+        name = 'amp_conf/etc/init.d/freepbx.init'
+        vendor = (ROOT / 'tools/fixtures/framework-native-init.txt').read_bytes()
+        self.assertEqual(len(vendor), 1619)
+        self.assertEqual(self.trust.digest(vendor), '8d6af9b7278b78ce4d10faf142a6e62ae0d72e746d0f303cce429f6ca768cbe0')
+        contents = dict(self.stock['framework'])
+        contents['module.xml'] = ('<module><rawname>framework</rawname><version>' + version + '</version></module>').encode()
+        contents[name] = vendor if body is None else body
+        plain = self.root / ('framework-native-' + version + '.tgz')
+        package(plain, 'framework', contents)
+        signed = self.offline / ('framework-' + version + '.tgz.gpg')
+        subprocess.run(self.gpg_command + ['--yes', '--output', str(signed), '--sign', str(plain)],
+                       check=True, capture_output=True, timeout=20)
+        module = self.web / 'admin/modules/framework'
+        (module / 'module.xml').write_bytes(contents['module.xml'])
+        target = module / name
+        if present:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents[name]); target.chmod(0o664)
+        return target
+
+    def test_signed_native_retained_init_is_compared_and_preserved_for_qualified_versions(self):
+        root_init = self.fs / 'etc/init.d/freepbx'
+        root_init.parent.mkdir(parents=True); root_init.write_bytes(b'independent root init must not change')
+        root_init.chmod(0o755)
+        for version in sorted(self.upgrade.NATIVE_FRAMEWORK_VERSIONS):
+            with self.subTest(version=version):
+                target = self.native_framework_companion(version)
+                self.workspace = self.args.workspace = self.root / ('native-review-' + version)
+                before = target.read_bytes(); root_before = root_init.read_bytes()
+                accepted = True
+                try:
+                    self.prepare()
+                except self.upgrade.UpgradeError:
+                    accepted = False
+                    report = json.loads((self.workspace / 'review-required.json').read_bytes())
+                    self.assertEqual(report['differences'], [{'module': 'framework', 'path': 'amp_conf/etc/init.d/freepbx.init', 'reason': 'unexpected file'}])
+                self.assertTrue(accepted, 'Authenticated vendor manual-copy init was refused as an unexpected file')
+                approvals = json.loads((self.workspace / 'approvals.json').read_bytes())
+                for phase in ('prior', 'approved'):
+                    entry = approvals[phase]['framework']['files']['amp_conf/etc/init.d/freepbx.init']
+                    self.assertEqual(entry, {'sha256': self.trust.digest(before), 'target': 'admin/modules/framework/amp_conf/etc/init.d/freepbx.init'})
+                self.assertEqual(target.read_bytes(), before)
+                self.assertEqual(root_init.read_bytes(), root_before)
+                self.assert_preserved()
+
+    def test_absent_native_init_is_not_required_or_copied(self):
+        target = self.native_framework_companion(present=False)
+        root_init = self.fs / 'etc/init.d/freepbx'
+        self.prepare()
+        data = json.loads((self.workspace / 'framework.json').read_bytes())
+        self.assertNotIn('amp_conf/etc/init.d/freepbx.init', data['files'])
+        self.assertNotIn('native_framework_source_files', data['source'])
+        self.assertFalse(target.exists()); self.assertFalse(root_init.exists())
+        self.assert_preserved()
+
+    def test_changed_native_companion_never_becomes_the_expected_hash(self):
+        target = self.native_framework_companion()
+        vendor = target.read_bytes(); changed = b'!' + vendor[1:]; target.write_bytes(changed)
+        with self.assertRaises(self.upgrade.UpgradeError): self.prepare()
+        report = json.loads((self.workspace / 'review-required.json').read_bytes())
+        self.assertIn({'module': 'framework', 'path': 'amp_conf/etc/init.d/freepbx.init',
+                       'reason': 'bytes differ from signed/reviewed source'}, report['differences'])
+        package_path = self.offline / 'framework-17.0.33.4.tgz.gpg'
+        contents, source = self.upgrade.upstream_contents(package_path, 'framework', '17.0.33.4', self.workspace)
+        data, prior = self.upgrade.upstream_inventory(contents, source, 'framework', '17.0.33.4', self.new, self.old, self.web)
+        self.assertEqual(data['files']['amp_conf/etc/init.d/freepbx.init']['sha256'], self.trust.digest(vendor))
+        self.assertNotEqual(data['files']['amp_conf/etc/init.d/freepbx.init']['sha256'], self.trust.digest(changed))
+        self.assertEqual(target.read_bytes(), changed); self.assert_preserved()
+
+    def test_native_companion_unknown_source_version_hash_and_other_paths_stay_unreviewed(self):
+        vendor = (ROOT / 'tools/fixtures/framework-native-init.txt').read_bytes()
+        for fault in ('unknown version', 'different authenticated bytes', 'another retained file'):
+            with self.subTest(fault=fault):
+                target = self.native_framework_companion('17.0.99' if fault == 'unknown version' else '17.0.33.4',
+                                                         body=b'!' + vendor[1:] if fault == 'different authenticated bytes' else vendor)
+                extra = target.parent / 'other.init'
+                if fault == 'another retained file': extra.write_bytes(vendor)
+                self.workspace = self.args.workspace = self.root / ('refusal-' + fault.replace(' ', '-'))
+                with self.assertRaises(self.upgrade.UpgradeError): self.prepare()
+                self.assertEqual(target.read_bytes(), b'!' + vendor[1:] if fault == 'different authenticated bytes' else vendor)
+                if extra.exists(): extra.unlink()
+                self.assert_preserved()
+
+    def test_native_companion_metadata_rejects_execute_links_and_foreign_identity(self):
+        target = self.native_framework_companion(); vendor = target.read_bytes()
+        account = pwd.getpwnam('asterisk')
+        for fault in ('execute', 'other writable', 'symlink', 'hardlink', 'foreign owner', 'foreign group'):
+            with self.subTest(fault=fault):
+                target.unlink(); target.write_bytes(vendor); target.chmod(0o664)
+                alias = target.parent / 'companion-alias'
+                if fault == 'execute': target.chmod(0o755)
+                elif fault == 'other writable': target.chmod(0o666)
+                elif fault == 'symlink':
+                    alias.write_bytes(vendor); target.unlink(); target.symlink_to(alias.name)
+                elif fault == 'hardlink': os.link(target, alias)
+                elif fault == 'foreign owner': os.chown(target, account.pw_uid + 10000, account.pw_gid)
+                elif fault == 'foreign group': os.chown(target, account.pw_uid, account.pw_gid + 10000)
+                self.workspace = self.args.workspace = self.root / ('metadata-' + fault.replace(' ', '-'))
+                with self.assertRaises((self.upgrade.UpgradeError, self.trust.TrustError, OSError)): self.prepare()
+                self.assert_preserved()
+                if alias.exists(): alias.unlink()
+
+    def test_native_companion_accepts_exact_canonical_native_owner_without_chown(self):
+        target = self.native_framework_companion(); account = pwd.getpwnam('asterisk')
+        os.chown(target, account.pw_uid, account.pw_gid); target.chmod(0o664)
+        before = target.stat()
+        self.prepare()
+        after = target.stat()
+        self.assertEqual((before.st_uid, before.st_gid, before.st_mode, before.st_ino),
+                         (after.st_uid, after.st_gid, after.st_mode, after.st_ino))
+        self.assert_preserved()
+
+    def test_native_companion_restrictive_readable_modes_are_preserved(self):
+        target = self.native_framework_companion()
+        for mode in (0o600, 0o640, 0o444, 0o400):
+            with self.subTest(mode=oct(mode)):
+                target.chmod(mode)
+                self.workspace = self.args.workspace = self.root / ('restrictive-' + oct(mode))
+                accepted = True
+                try: self.prepare()
+                except self.upgrade.UpgradeError: accepted = False
+                self.assertTrue(accepted, 'Authenticated owner-readable permission subset was refused')
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), mode)
+                self.assert_preserved()
+
+    def test_native_companion_extended_ACL_cannot_add_a_foreign_writer(self):
+        target = self.native_framework_companion(); account = pwd.getpwnam('asterisk')
+        acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', tag, permissions, identity) for tag, permissions, identity in (
+            (1, 6, 0xffffffff), (2, 6, account.pw_uid + 10000), (4, 6, 0xffffffff),
+            (16, 6, 0xffffffff), (32, 4, 0xffffffff)))
+        try: os.setxattr(target, 'system.posix_acl_access', acl)
+        except OSError as error:
+            if error.errno in (errno.EOPNOTSUPP, errno.ENOTSUP): self.skipTest('Namespace filesystem cannot represent POSIX access ACLs')
+            raise
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o664)
+        with self.assertRaises(self.upgrade.UpgradeError): self.prepare()
+        self.assertEqual(os.getxattr(target, 'system.posix_acl_access'), acl)
+        self.assert_preserved()
+
+    def test_native_companion_uncertain_ACL_inspection_fails_closed(self):
+        self.native_framework_companion()
+        for error_code in (errno.ENOTSUP, errno.EIO, errno.EPERM, errno.ENOSYS):
+            with self.subTest(error_code=error_code):
+                self.workspace = self.args.workspace = self.root / ('ACL-query-' + str(error_code))
+                def unavailable(descriptor, name):
+                    self.assertIsInstance(descriptor, int)
+                    self.assertEqual(name, 'system.posix_acl_access')
+                    raise OSError(error_code, 'controlled ACL inspection failure')
+                with patch.object(self.upgrade.os, 'getxattr', side_effect=unavailable):
+                    with self.assertRaises(self.upgrade.UpgradeError): self.prepare()
+                self.assert_preserved()
+
+    def test_native_companion_schema_and_role_are_rechecked_on_later_comparison(self):
+        target = self.native_framework_companion(); self.prepare()
+        approvals = json.loads((self.workspace / 'approvals.json').read_bytes())
+        data = approvals['approved']['framework']; prior = approvals['prior']['framework']
+        for fault in ('null projection', 'empty projection', 'boolean schema', 'floating byte count', 'unknown projection path', 'wrong digest', 'wrong target', 'unknown version', 'wrong signer'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(data)
+                projection = bad['source']['native_framework_source_files']
+                if fault == 'null projection': bad['source']['native_framework_source_files'] = None
+                elif fault == 'empty projection': bad['source']['native_framework_source_files'] = {}
+                elif fault == 'boolean schema': projection['schema'] = True
+                elif fault == 'floating byte count': projection['files']['amp_conf/etc/init.d/freepbx.init']['bytes'] = 1619.0
+                elif fault == 'unknown projection path': projection['files']['extra.init'] = dict(next(iter(projection['files'].values())))
+                elif fault == 'wrong digest': bad['files']['amp_conf/etc/init.d/freepbx.init']['sha256'] = 'f' * 64
+                elif fault == 'wrong target': bad['files']['amp_conf/etc/init.d/freepbx.init']['target'] = 'etc/init.d/freepbx'
+                elif fault == 'unknown version': bad['version'] = '17.0.99'
+                elif fault == 'wrong signer': bad['source']['upstream_signer'] = 'F' * 40
+                with self.assertRaisesRegex(self.upgrade.UpgradeError, 'companion'):
+                    self.upgrade.compare_stock(bad, prior, self.web, self.new)
+        target.chmod(0o755)
+        differences = self.upgrade.compare_stock(data, prior, self.web, self.new)
+        self.assertIn({'module': 'framework', 'path': 'amp_conf/etc/init.d/freepbx.init',
+                       'reason': 'unsafe, missing or changing file'}, differences)
+        self.assert_preserved()
+
+    def test_existing_framework_enrollment_is_not_extended_with_a_new_native_copy(self):
+        target = self.native_framework_companion(present=False); self.prepare()
+        data = json.loads((self.workspace / 'framework.json').read_bytes())
+        self.trust.store_manifest(self.args.trust_root, data, json.dumps(data).encode())
+        pointer = self.args.trust_root / 'framework.active.json'; before = pointer.read_bytes()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / 'tools/fixtures/framework-native-init.txt').read_bytes()); target.chmod(0o664)
+        self.workspace = self.args.workspace = self.root / 'enrolled-companion-review'
+        with self.assertRaises(self.upgrade.UpgradeError): self.prepare()
+        self.assertEqual(pointer.read_bytes(), before)
+        for name, body in self.preserved.items(): self.assertEqual((self.data / name).read_bytes(), body)
+
+    def test_historical_independent_companion_approval_keeps_authority_without_new_tags(self):
+        target = self.native_framework_companion(); self.prepare()
+        old = json.loads((self.workspace / 'framework.json').read_bytes())
+        del old['source']['native_framework_source_files']
+        vendor = target.read_bytes()
+        for kind, approved in [('vendor', vendor), ('custom', b'independently reviewed historical customization\n')]:
+            with self.subTest(kind=kind):
+                target.write_bytes(approved); target.chmod(0o755 if kind == 'custom' else 0o664)
+                old['files']['amp_conf/etc/init.d/freepbx.init']['sha256'] = self.trust.digest(approved)
+                body = json.dumps(old).encode(); self.trust.parse_manifest(body)
+                self.trust.store_manifest(self.args.trust_root, old, body)
+                before = {str(path.relative_to(self.args.trust_root)): path.read_bytes()
+                          for path in self.args.trust_root.rglob('*') if path.is_file()}
+                self.workspace = self.args.workspace = self.root / ('historical-independent-' + kind)
+                accepted = True
+                try: self.prepare()
+                except self.upgrade.UpgradeError: accepted = False
+                self.assertTrue(accepted, 'An independently reviewed existing entry was refused solely for lacking the new projection tag')
+                after = {str(path.relative_to(self.args.trust_root)): path.read_bytes()
+                         for path in self.args.trust_root.rglob('*') if path.is_file()}
+                self.assertEqual(after, before)
+                self.assertEqual(target.read_bytes(), approved)
+                self.assertNotIn('native_framework_source_files', self.trust.load(self.args.trust_root, 'framework')[0]['source'])
+                for name, value in self.preserved.items(): self.assertEqual((self.data / name).read_bytes(), value)
 
     def test_same_version_exact_release_alias_preserves_historical_uppercase_approval(self):
         version='0.1.9-beta'
@@ -616,6 +1405,15 @@ class UpgradeTrustTests(unittest.TestCase):
         for name in ('dashboard', 'framework'):
             old = approvals['approved'][name]
             old['version'] = '17.0.4'
+            previous_files = dict(self.stock[name])
+            previous_files['module.xml'] = previous_files['module.xml'].replace(b'17.0.5', b'17.0.4')
+            previous_archive = self.root / (name + '-previous.tgz')
+            package(previous_archive, name, previous_files)
+            signed = self.offline / (name + '-17.0.4.tgz.gpg')
+            subprocess.run(self.gpg_command + ['--output', str(signed), '--sign', str(previous_archive)],
+                           check=True, capture_output=True, timeout=20)
+            old['source']['archive_sha256'] = self.trust.digest(previous_archive.read_bytes())
+            old['files']['module.xml']['sha256'] = self.trust.digest(previous_files['module.xml'])
             body = json.dumps(old).encode()
             self.trust.store_manifest(self.args.trust_root, self.trust.parse_manifest(body), body)
         self.args.workspace = self.root/'version-review'
@@ -894,6 +1692,48 @@ class UpgradeTrustTests(unittest.TestCase):
         report = json.loads((self.workspace / 'review-required.json').read_bytes())
         self.assertFalse(report['approved']); self.assertIn('install.php', [row['path'] for row in report['differences']])
         self.assertFalse((self.workspace / 'dashboard.json').exists())
+
+    def check_spinner_topology_change(self, previous_alias):
+        spinner = self.web / 'admin/images/spinner.gif'
+        core = self.web / 'admin/modules/core/images/spinner.gif'
+        core.parent.mkdir(parents=True)
+        stock = self.stock['framework'][self.upgrade.SPINNER]
+        core.write_bytes(stock)
+        if previous_alias:
+            spinner.unlink()
+            spinner.symlink_to(core)
+        self.seed_current_stock_cache()
+        original = self.trust.load(self.args.trust_root, 'framework')[0]
+        self.assertEqual('link_target' in original['files'][self.upgrade.SPINNER], previous_alias)
+        spinner.unlink()
+        self.next_framework()
+        if not previous_alias:
+            spinner.unlink()
+            spinner.symlink_to(core)
+        review = self.root / 'changed-spinner'
+        result = self.upgrade.reconcile_stock(review, self.args.trust_root, web=self.web, packages=self.offline)
+        self.assertEqual(result['changed_modules'], ['framework'])
+        current = self.trust.load(self.args.trust_root, 'framework')[0]
+        self.assertEqual('link_target' in current['files'][self.upgrade.SPINNER], not previous_alias)
+        self.assertEqual(current['files'][self.upgrade.SPINNER]['sha256'], self.trust.digest(stock))
+        self.assertEqual(spinner.is_symlink(), not previous_alias)
+        spinner.write_bytes(b'changed after update')
+        self.assertIn(self.upgrade.SPINNER, {i['path'] for i in self.upgrade.compare_stock(current, current, self.web, self.old)})
+
+    def test_signed_framework_transition_from_core_alias_to_regular_vendor_gif(self):
+        self.check_spinner_topology_change(previous_alias=True)
+
+    def test_signed_framework_transition_from_regular_vendor_gif_to_core_alias(self):
+        self.check_spinner_topology_change(previous_alias=False)
+
+    def test_reviewed_spinner_digest_still_survives_if_vendor_base_is_identical(self):
+        name = self.upgrade.SPINNER
+        target = 'admin/images/spinner.gif'
+        base = {'files': {name: {'target': target, 'sha256': self.trust.digest(b'stock')}}}
+        reviewed = {'module': 'framework', 'files': {name: {'target': target, 'sha256': self.trust.digest(b'branded')}}}
+        candidate = {'files': {name: dict(base['files'][name])}}
+        self.upgrade.carry_reviewed_overlays(reviewed, base, candidate)
+        self.assertEqual(candidate['files'][name], reviewed['files'][name])
 
     def test_spinner_alias_requires_same_signed_target_bytes(self):
         spinner = self.web / 'admin/images/spinner.gif'; spinner.unlink()

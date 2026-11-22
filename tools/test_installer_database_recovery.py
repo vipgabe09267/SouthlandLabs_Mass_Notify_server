@@ -23,7 +23,7 @@ class FakeStatement {
   $s=&$GLOBALS['fixture']; $sql=$this->sql; $this->affected=0;
   if ($sql==='SHOW TABLES LIKE ?') {$this->rows=$args[0]==='manager' && ($s['manager_table']??true)===false?[]:[[$args[0]]]; return true;}
   if ($sql==='SELECT enabled FROM modules WHERE modulename = ?') {$this->rows=[[1]]; return true;}
-  if(preg_match('/^SELECT \* FROM (modules|recordings|manager) WHERE (modulename|filename|name|manager_id) = \?/', $sql,$m)){
+  if(preg_match('/^SELECT \* FROM (modules|recordings|manager) WHERE (modulename|filename|name|manager_id|id) = \?/', $sql,$m)){
    $this->rows=array_values(array_filter($s[$m[1]],static fn($r)=>(string)$r[$m[2]]===(string)$args[0])); return true;
   }
   if(str_starts_with($sql,'DELETE FROM manager WHERE manager_id = ? AND name = ? AND secret = ?')){
@@ -34,6 +34,21 @@ class FakeStatement {
     return false;
    }));
    $this->affected=$previous-count($s['manager']);return true;
+  }
+  if(str_starts_with($sql,'UPDATE recordings SET displayname = ?, description = ? WHERE ')){
+   preg_match_all('/\(`([A-Za-z_][A-Za-z0-9_]*)` = \? OR \(`\1` IS NULL AND \? IS NULL\)\)/',$sql,$matches);
+   $columns=$matches[1];$sorted=$columns;sort($sorted);
+   if($sorted!==['description','displayname','filename','id']||count($args)!==10){throw new RuntimeException('Fixture requires exact all-column recording CAS');}
+   foreach($s['recordings'] as &$row){
+    $same=true;
+    foreach($columns as $i=>$column){
+     $value=$args[2+2*$i];
+     if($value!==$args[3+2*$i]){throw new RuntimeException('Mismatched NULL-aware CAS operands');}
+     if(!array_key_exists($column,$row)||($row[$column]===null||$value===null?$row[$column]!==$value:(string)$row[$column]!== (string)$value)){$same=false;break;}
+    }
+    if($same){$row['displayname']=$args[0];$row['description']=$args[1];$this->affected++;}
+   }
+   unset($row);return true;
   }
   if(preg_match('/^DELETE FROM (modules|recordings|manager) WHERE (modulename|filename|name) = \?$/',$sql,$m)){
    $s[$m[1]]=array_values(array_filter($s[$m[1]],static fn($r)=>$r[$m[2]]!==$args[0])); return true;
@@ -119,7 +134,8 @@ class DatabaseRecoveryTests(unittest.TestCase):
   result=self.run_php(RESTORE,json.dumps(snapshot));self.assertEqual(result.returncode,0,result.stderr)
   restored=json.loads(self.state.read_text())
   self.assertEqual(next(x for x in restored['modules'] if x['modulename']=='slsmassnotifyserver')['version'],'old')
-  self.assertEqual(sorted(restored['recordings'],key=lambda r:r['id']),self.original['recordings'])
+  expected=self.original['recordings']+[row for row in current['recordings'] if row['id']=='10']
+  self.assertEqual(sorted(restored['recordings'],key=lambda r:int(r['id'])),sorted(expected,key=lambda r:int(r['id'])))
   self.assertEqual(restored['backup']['modules_job1'],{'core':True,'new-module':True})
   self.assertEqual(restored['backup']['modules_job2']['slsmassnotifyserver'],'0')
   self.assertTrue(restored['backup']['modules_new-job']['slsmassnotifyserver'])
@@ -136,12 +152,12 @@ class DatabaseRecoveryTests(unittest.TestCase):
   self.state.write_text(json.dumps(current));result=self.run_php(RESTORE,json.dumps(snapshot))
   self.assertEqual(result.returncode,0,result.stderr)
   self.assertEqual(json.loads(self.state.read_text())['recordings'],original['recordings'])
- def test_new_brand_recording_added_during_failed_install_is_removed_by_scoped_restore(self):
+ def test_new_brand_recording_added_during_failed_install_is_retained_for_native_dependencies(self):
   snapshot=self.snapshot();current=json.loads(self.state.read_text())
   current['recordings'].append({'id':'12','filename':'custom/SLS_Mass_Notify_NWS_Alert','displayname':'SLL Mass Notify Server - NWS Alert','description':'Default Southland Labs NWS alert opening tone.'})
   self.state.write_text(json.dumps(current));result=self.run_php(RESTORE,json.dumps(snapshot))
   self.assertEqual(result.returncode,0,result.stderr)
-  self.assertEqual(json.loads(self.state.read_text())['recordings'],self.original['recordings'])
+  self.assertEqual(json.loads(self.state.read_text())['recordings'],current['recordings'])
  def test_removed_job_and_independent_enrollment_edit_are_preserved(self):
   snapshot=self.snapshot();current=json.loads(self.state.read_text());del current['backup']['backupList']['job1'];current['backup']['modules_job2']['slsmassnotifyserver']='administrator-edit';self.state.write_text(json.dumps(current))
   result=self.run_php(RESTORE,json.dumps(snapshot));self.assertEqual(result.returncode,0,result.stderr)

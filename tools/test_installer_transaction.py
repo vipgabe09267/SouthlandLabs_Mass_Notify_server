@@ -113,11 +113,13 @@ install_module_with_autoenable() {
  [ "${SLS_MASS_NOTIFY_DEFER_SIGNING:-}" = 1 ] || return 99
  if [ "$scenario" = install-failed ]; then return 33; fi
 }
+retire_legacy_framework_menu() { trace menu-migration; }
 sync_module_version() { trace module-db; }
 ensure_runtime_installed() { trace runtime-parity; }
 secure_central_config() { :; }
 fwconsole() { trace "asterisk-fwconsole-$*"; [ "$1" != reload ] || [ "${SLS_MASS_NOTIFY_PRESERVE_PENDING:-}" = 1 ]; }
 sls_as_asterisk() { trace "asterisk-fixed-command"; }
+asterisk() { trace "asterisk-fixed-command"; }
 verify_runtime_shell_syntax() { :; }
 verify_announcement_worker_health() { :; }
 verify_piper_voices() { :; }
@@ -137,6 +139,35 @@ main
 
 @unittest.skipUnless(os.geteuid()==0,'requires root for protected staging/worker lock fixtures')
 class TransactionTests(unittest.TestCase):
+ def test_framework_menu_migration_uses_only_protected_before_and_after_hashes(self):
+  script = ROOT / 'tools/install_release.sh'
+  command = r'''source "$1"
+UPGRADE_TRUST_DIR="$2"
+php() { printf '%s\n' "$3" "$4"; }
+retire_legacy_framework_menu
+'''
+  with tempfile.TemporaryDirectory() as directory:
+   review = Path(directory)
+   name = 'amp_conf/htdocs/admin/views/menu_items.php'
+   target = 'admin/views/menu_items.php'
+   def inventory(value):
+    return {'module': 'framework', 'files': {name: {'target': target, 'sha256': value}} if value is not None else {}}
+   def run(before, after):
+    (review / 'previous-web-approval.json').write_text(json.dumps({'framework': inventory(before)}))
+    (review / 'framework.json').write_text(json.dumps(inventory(after)))
+    return subprocess.run(['bash', '-c', command, 'fixture', str(script), str(review)],
+                          capture_output=True, text=True, timeout=4)
+   stock = run('a' * 64, 'a' * 64)
+   self.assertEqual((stock.returncode, stock.stdout), (0, ''))
+   renamed_menu = run(None, None)
+   self.assertEqual((renamed_menu.returncode, renamed_menu.stdout), (0, ''))
+   legacy = run('a' * 64, 'b' * 64)
+   self.assertEqual(legacy.returncode, 0, legacy.stderr)
+   self.assertEqual(legacy.stdout.splitlines(), ['a' * 64, 'b' * 64])
+   invalid = run('malformed', 'b' * 64)
+   self.assertNotEqual(invalid.returncode, 0)
+   self.assertFalse(invalid.stdout)
+
  def make_private_backup(self,root):
   installer=root/'installer.sh';installer.write_text(SOURCE.replace('/var/www/html',str(root/'web')))
   return subprocess.run(['bash','-c','source "$1"; create_module_recovery_directory','fixture',str(installer)],capture_output=True,text=True,timeout=5)
@@ -219,7 +250,7 @@ class TransactionTests(unittest.TestCase):
    self.assertEqual(result.returncode,expected,result.stdout+result.stderr)
    self.assertEqual(config.read_text(),'{"preserve":"exact bytes"}\n')
    self.assertEqual((data/'delivery-ledger').read_text(),'current receipt')
-   self.assertEqual(pending.read_text(),'{"staged":"preserve exact bytes"}\n')
+   self.assertEqual(pending.read_text(),'modified' if scenario=='pending-drift' else '{"staged":"preserve exact bytes"}\n')
    trace=(root/'trace').read_text().splitlines()
    journals=list((root/'journal').glob('transaction-*/transaction.json'))
    if scenario in ('approval-rejected','php-rejected','web-rejected'):
@@ -229,7 +260,7 @@ class TransactionTests(unittest.TestCase):
     journal=json.loads(journals[0].read_text())
     expected_phase={'success':'committed','unknown-prepared-stage':'abandoned','final-failed-rollback-ok':'rolled_back',
                     'chown-failed':'abandoned','legacy-permissions-failed':'abandoned','collector-failed':'abandoned'}.get(scenario,'recovery_failed')
-    self.assertEqual(journal['phase'],expected_phase)
+    self.assertEqual(journal['phase'],expected_phase,result.stderr+'\n'+repr(trace))
     self.assertEqual(journals[0].stat().st_mode & 0o777,0o600)
     expected_stage={'unknown-prepared-stage':'publisher and stock approval','unknown-mutating-stage':'protected runtime preparation','prepare-failed':'protected runtime preparation','install-failed':'module activation',
                     'chown-failed':'FreePBX ownership protection','legacy-permissions-failed':'legacy configuration and runtime permissions','collector-failed':'previous phone collector recovery','startup-collector-failed':'runtime integration'}.get(scenario,'post-install verification')
@@ -247,6 +278,14 @@ class TransactionTests(unittest.TestCase):
     phases=['php-security-floor','stock-dashboard-bootstrap','approval-preflight','chown-protected','legacy-permissions-repaired','approved-prerequisites','previous-collector-healthy','approved-snapshot','protected-prepare --apply']
     self.assertEqual([trace.index(item) for item in phases],sorted(trace.index(item) for item in phases))
     self.assertEqual(list(journals[0].parent.glob('sls-mass-notify-recovery.*')),[])
+   elif scenario=='pending-drift':
+    # An independent staged-settings edit must survive. Recovery refuses
+    # before touching runtime or applying an old settings snapshot.
+    self.assertEqual((module/'module.xml').read_text(),'candidate')
+    self.assertFalse(any(x.startswith('static-') for x in trace))
+    self.assertNotIn('db-restored',trace)
+    self.assertIn('failure-1-install_recovery_config_conflict',trace)
+    self.assertEqual((journals[0].parent/'pending.snapshot').read_text(),'{"staged":"preserve exact bytes"}\n')
    else:
     self.assertEqual((module/'module.xml').read_text(),'original')
     if scenario in ('approval-rejected','php-rejected','web-rejected'):

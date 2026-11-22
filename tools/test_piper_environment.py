@@ -31,16 +31,37 @@ class Replacement(unittest.TestCase):
 
     def test_locked_private_builder_receives_telemetry_opt_out(self):
         process=mock.Mock(returncode=0)
-        def replacement(root,builder,_validator,_paused):
+        def replacement(root,builder,_validator,_paused, *, profile=None):
+            self.assertEqual(profile, 'lite')
             builder(root/'.replacement-fixture',123)
             return {'ok':True}
         with mock.patch.object(module,'replace_environment',side_effect=replacement), \
              mock.patch.object(module.subprocess,'Popen',return_value=process) as launch, \
              mock.patch.dict(os.environ,{'ORT_DISABLE_TELEMETRY':'0'}), \
-             mock.patch.object(sys,'argv',['environment','--workers-paused']),redirect_stdout(io.StringIO()):
+             mock.patch.object(sys,'argv',['environment','--workers-paused','--resource-profile','lite']),redirect_stdout(io.StringIO()):
             self.assertEqual(module.main(),0)
         self.assertEqual(launch.call_args.kwargs['env']['ORT_DISABLE_TELEMETRY'],'1')
         self.assertEqual(launch.call_args.kwargs['pass_fds'],(123,))
+
+    def test_private_pip_isolated_uses_explicit_approved_ca_with_documented_precedence(self):
+        stage=self.root/'private-build';(stage/'venv').mkdir(parents=True)
+        names=('PIP_CERT','REQUESTS_CA_BUNDLE','SSL_CERT_FILE','CURL_CA_BUNDLE')
+        for offset in range(len(names)):
+            selected={name:'/etc/ssl/'+name.lower()+'.pem'for name in names[offset:]}
+            with self.subTest(selected=names[offset]),mock.patch.dict(os.environ,selected,clear=True), \
+                 mock.patch.object(module.os,'readlink',side_effect=lambda path:str(path)), \
+                 mock.patch.object(module.os,'umask'),mock.patch.object(module,'checked')as run, \
+                 mock.patch.object(module,'validate_runtime'),mock.patch.object(module,'validate_tree'):
+                module.build_private(stage,self.root)
+            pip_calls = [call for call in run.call_args_list if 'install' in call.args[0]]
+            self.assertTrue(all(call.kwargs.get('quiet') for call in pip_calls),
+                            'pip writes directly to the PBX maintenance log')
+            installs = [call.args[0] for call in pip_calls]
+            self.assertEqual(len(installs),2)
+            for command in installs:
+                self.assertIn('--isolated',command)
+                self.assertIn('--cert',command,'pip isolated mode must receive the approved CA as an explicit option')
+                self.assertEqual(command[command.index('--cert')+1],selected[names[offset]])
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='sls-piper-environment-')
@@ -50,6 +71,8 @@ class Replacement(unittest.TestCase):
         (self.root / 'venv/working').write_bytes(b'old package')
         self.original = (self.root / 'venv').stat().st_ino
         self.builds = 0; self.validations = 0
+        admission = mock.patch.object(module, 'admit_replacement_capacity', return_value={'schema':1,'replacement_capacity_admitted':True})
+        admission.start(); self.addCleanup(admission.stop)
 
     def build(self, stage, lock):
         self.assertEqual((self.root / 'venv/working').read_bytes(), b'old package')
@@ -84,7 +107,7 @@ class Replacement(unittest.TestCase):
         with self.assertRaisesRegex(module.EnvironmentError, 'Recovery directory'):
             self.replace(builder=failed)
         self.assert_original(); self.assertEqual(self.validations, 0)
-        self.assertEqual(len(list(self.root.glob('.replacement-*'))), 1)
+        self.assertEqual(len([path for path in self.root.glob('.replacement-*') if path.is_dir()]), 1)
 
     def test_failed_postcheck_atomically_restores_original_and_retains_failed_candidate(self):
         def failed(root):
@@ -93,7 +116,7 @@ class Replacement(unittest.TestCase):
         with self.assertRaisesRegex(module.EnvironmentError, 'Recovery directory'):
             self.replace(validator=failed)
         self.assert_original()
-        stage = next(self.root.glob('.replacement-*'))
+        stage = next(path for path in self.root.glob('.replacement-*') if path.is_dir())
         self.assertEqual((stage / 'venv/replacement').read_bytes(), b'new verified package')
 
     def test_unsupported_exchange_preserves_original(self):
@@ -156,6 +179,7 @@ class Replacement(unittest.TestCase):
 
     def test_worker_guard_is_obtained_before_exchange_and_released(self):
         guard = mock.Mock()
+        guard.sls_retained_descriptors = ()
         with mock.patch.object(module, 'guard_workers', return_value=guard) as acquire:
             module.replace_environment(self.root, self.build, self.validate)
             acquire.assert_called_once_with()

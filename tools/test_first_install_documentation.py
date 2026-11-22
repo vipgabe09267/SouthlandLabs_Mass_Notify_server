@@ -22,18 +22,22 @@ ENVIRONMENT = {
 
 
 class FirstInstallDocumentationTests(unittest.TestCase):
-    def test_offline_command_stops_before_sourcing_a_changed_bootstrap(self):
+    def test_documented_download_rejects_a_changed_bootstrap(self):
         document=(ROOT/'docs/FIRST_INSTALL_VERIFICATION.md').read_text()
         blocks=re.findall(r'```bash\n(.*?)\n```',document,re.S)
         self.assertEqual(len(blocks),1)
         with tempfile.TemporaryDirectory(prefix='sls-offline-command-') as temporary:
             root=Path(temporary);marker=root/'unverified-code-executed'
             bad=('touch '+shlex.quote(str(marker))+'\nbootstrap_verify(){ return 0; }\n').encode()
-            (root/'install_bootstrap.sh').write_bytes(bad)
-            (root/'SHA256SUMS').write_text(hashlib.sha256(bad).hexdigest()+'  install_bootstrap.sh\n')
-            (root/'release-signing.pub').write_bytes((ROOT/'slsmassnotifyserver/bin/sls_mass_notify/release-signing.pub').read_bytes())
-            (root/'install_release.sh').write_text('exit 0\n')
-            result=subprocess.run(['bash','-c',blocks[0]],cwd=root,env=ENVIRONMENT,capture_output=True,text=True,timeout=10)
+            (root/'modified-download').write_bytes(bad)
+            curl = root/'curl'
+            curl.write_text('#!/bin/sh\nwhile [ "$1" != "-o" ] && [ "$#" -gt 0 ]; do shift; done\n'
+                            '[ "$1" = "-o" ] && cp -- modified-download "$2"\n')
+            curl.chmod(0o755)
+            env = {**ENVIRONMENT, 'PATH': str(root) + ':' + ENVIRONMENT['PATH']}
+            result=subprocess.run(['bash','-c',blocks[0]],cwd=root,env=env,capture_output=True,text=True,timeout=10)
+            self.assertEqual((root/'sls-bootstrap.sh').read_bytes(), bad)
+            self.assertIn('sls-bootstrap.sh: FAILED', result.stdout)
             self.assertNotEqual(result.returncode,0,'Checksum refusal was ignored')
             self.assertFalse(marker.exists(),'Unverified bootstrap code executed')
 

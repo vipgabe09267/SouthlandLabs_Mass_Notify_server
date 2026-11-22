@@ -96,6 +96,7 @@ class PagingFixtureModule
     private function getActiveSettings() { return $this->settings; }
     private function getPendingSettings() { return null; }
     public function getLivePagingIvrs(): array { return [['id'=>'1','name'=>'Office IVR','entries'=>[]]]; }
+    protected function queryLivePagingIvr(string $id): ?array { foreach($this->getLivePagingIvrs() as $ivr){if($ivr['id']===$id){return $ivr;}}return null; }
     private function isSetupComplete($settings) { return true; }
     private function normalizeSettings($settings) { return $settings; }
     private function persistPendingSettings($settings) { $this->saved = $settings; }

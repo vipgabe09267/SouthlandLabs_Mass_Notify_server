@@ -308,7 +308,7 @@ def checked_collector_cache(raw, name):
         valid = (isinstance(state['generation'], str) and re.fullmatch(r'[a-f0-9]{32}', state['generation'])
                  and finite_nonnegative(state['anchor_tick']))
     else:
-        valid = (state['connected'] is True
+        valid = (type(state['connected']) is bool
                  and all(type(state[key]) is int and state[key] >= 0
                          for key in ('updated_at', 'active_batches', 'reserved_contacts')))
     if not valid:
@@ -604,14 +604,16 @@ def write_atomic(parent, path, body, uid, gid, mode, expected, account):
         with os.fdopen(fd, 'wb', closefd=False) as handle:
             if handle.write(body) != len(body): raise PermissionRecoveryError('SLL chown protection write was incomplete')
             handle.flush(); os.fsync(fd)
+        # The complete intended metadata must precede public/native visibility.
+        # A killed writer may leave only a private temporary, never root0600 at
+        # the live FreePBX pathname when its intended mode permits service reads.
+        os.fchown(fd, uid, gid); os.fchmod(fd, mode); os.fsync(fd)
         current_parent(parent, path.parent, account)
         current_name(parent, name, expected)
         stage = os.fstat(fd)
         current_name(parent, temporary, stage)
         os.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent); os.fsync(parent)
         current_parent(parent, path.parent, account)
-        current_name(parent, name, os.fstat(fd))
-        os.fchown(fd, uid, gid); os.fchmod(fd, mode); os.fsync(fd)
         current_name(parent, name, os.fstat(fd))
     finally:
         os.close(fd)
@@ -697,8 +699,11 @@ def restore_chown(path, snapshot):
         current, info = config_read(parent, path.name, account)
         if current == original and record['existed'] or current is None and not record['existed']:
             return {'ok': True, 'restored': False}
+        intended = current is not None and (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (record['uid'], record['gid'], record['mode'])
+        legacy_publication = (current is not None and record['changed']
+                              and (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0, 0, 0o600))
         if (current is None or hashlib.sha256(current).hexdigest() != record['installed_sha256']
-                or info.st_uid != record['uid'] or info.st_gid != record['gid'] or stat.S_IMODE(info.st_mode) != record['mode']):
+                or not (intended or legacy_publication)):
             raise PermissionRecoveryError('FreePBX chown configuration changed after protection; preserve the snapshot for review')
         if not record['changed']: return {'ok': True, 'restored': False}
         if record['existed']:

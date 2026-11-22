@@ -21,10 +21,16 @@ namespace {
         public $calls = []; public $FreePBX;
         private function configurationPathMetadata($path) { return $GLOBALS["fixture_config_exists"] ? ["mode" => 0100640] : null; }
         private function loadSettingsFile($path) { $this->calls[] = "loadSettingsFile"; return []; }
+        // The real ownership policy has its own actual-UID/path regression.
+        // Keep this fixture focused on integration dispatch and account gates.
+        private function preflightManagedIntegrationTargets() {
+            if (!empty($GLOBALS["fixture_managed_target_refusal"])) { throw new \\RuntimeException("Managed integration target needs an ownership adapter."); }
+            $this->calls[] = "preflightManagedIntegrationTargets";
+        }
         function __call($name, $arguments) {
             $allowed = ["ensurePluginDataDir", "migrateLegacyTestStatus", "getActiveSettings", "persistAppliedSettings",
                 "ensureBundledSystemRecordings", "ensureAmiUser", "ensureDialplan", "ensureSipNotifyTemplates",
-                "ensureMenuPlacement", "ensureDashboardWidget", "ensureFreePbxBackupEnrollment", "removeLegacyNwsCronJob"];
+                "ensureDashboardWidget", "ensureFreePbxBackupEnrollment", "removeLegacyNwsCronJob"];
             if (!in_array($name, $allowed, true)) { throw new \\RuntimeException("Unexpected privileged integration operation: " . $name); }
             $this->calls[] = $name;
             return $name === "ensureFreePbxBackupEnrollment" ? ["success" => true] : [];
@@ -61,7 +67,13 @@ namespace {
         verify_boundary($module->calls === [], 'Rejected identity caused integration mutations.');
     }
     $GLOBALS['fixture_uid'] = 999;
+    $GLOBALS['fixture_managed_target_refusal'] = true;
+    try { $module->install(); throw new LogicException('Rejected managed target allowed integration.'); }
+    catch (RuntimeException $error) { verify_boundary(str_contains($error->getMessage(), 'ownership adapter'), 'Wrong managed-target rejection.'); }
+    verify_boundary($module->calls === [], 'Managed-target rejection caused integration mutations.');
+    $GLOBALS['fixture_managed_target_refusal'] = false;
     verify_boundary($module->install() === true, 'Runtime account could not install its integration.');
+    verify_boundary(($module->calls[0] ?? '') === 'preflightManagedIntegrationTargets', 'Managed targets were not qualified before integration mutations.');
     verify_boundary(!in_array('persistAppliedSettings', $module->calls, true), 'Existing central configuration was rewritten.');
     verify_boundary(in_array('ensureFreePbxBackupEnrollment', $module->calls, true), 'Native backup integration was skipped.');
     $lines = $module->FreePBX->cron->getAll();

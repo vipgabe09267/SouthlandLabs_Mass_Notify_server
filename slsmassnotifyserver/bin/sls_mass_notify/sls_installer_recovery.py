@@ -72,6 +72,11 @@ MAX_FILE = 128 * 1024 * 1024
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
 MAX_MANIFEST = 32 * 1024 * 1024
 MAX_POSIX_ID = (1 << 32) - 2
+SHARED_BLOCKS = {
+ '/etc/asterisk/extensions_custom.conf': b'SLS Mass Notifications Dialplan',
+ '/etc/asterisk/manager_custom.conf': b'SLS Mass Notifications AMI',
+ '/etc/asterisk/sip_notify_custom.conf': b'SLS Mass Notifications SIP NOTIFY Templates',
+}
 NATIVE_CRON_PHP_STARTUP_SECONDS = 15
 CRON_MARKERS = ('/usr/local/bin/sls_mass_notify/', '/usr/local/sbin/sign_sls_mass_notify_local_sig.sh',
                 '/var/www/html/admin/modules/slsmassnotifyserver/', 'SLS_Mass_Notifications_Plugin')
@@ -564,6 +569,86 @@ class Recovery:
 
     def dest(self,path): return self.prefix.joinpath(*Path(path).parts[1:])
 
+    @staticmethod
+    def shared_unmanaged(body, name):
+        """Compare administrator bytes outside one complete owned integration."""
+        for start, end in ((b'; BEGIN ' + name, b'; END ' + name),
+                           (b';-- BEGIN ' + name + b' --', b';-- END ' + name + b' --')):
+            if body.count(start) != body.count(end) or body.count(start) > 1:
+                raise RecoveryError('Shared Asterisk configuration has ambiguous managed markers')
+            if start in body:
+                pattern = rb'(?m)^' + re.escape(start) + rb'\r?\n.*?^' + re.escape(end) + rb'(?:\r?\n|$)'
+                body, count = re.subn(pattern, b'', body, flags=re.S)
+                if count != 1 or start in body or end in body:
+                    raise RecoveryError('Shared Asterisk configuration has malformed managed markers')
+        # The native module writer deliberately normalizes trailing whitespace
+        # when appending its block. Internal administrator bytes stay exact.
+        return body.rstrip()
+
+    def preflight_shared_restore(self, records, current, blobs):
+        observations = {}
+        for path, name in SHARED_BLOCKS.items():
+            before, after = records[path], current[path]
+            if before['kind'] not in ('absent', 'file') or after['kind'] not in ('absent', 'file'):
+                raise RecoveryError('Shared Asterisk configuration changed type; preserve it: ' + path)
+            observed, live = self.observe_native_file(path, after)
+            observations[path] = observed
+            if before == after: continue
+            original = b''
+            if before['kind'] == 'file':
+                original, _ = self.read_at(blobs, before['sha256'], MAX_FILE, True)
+                if hashlib.sha256(original).hexdigest() != before['sha256']:
+                    raise RecoveryError('Shared Asterisk recovery blob changed')
+            if self.shared_unmanaged(original, name) != self.shared_unmanaged(live, name):
+                raise RecoveryError('Shared Asterisk configuration has independent administrator changes; preserve the live file and snapshot: ' + path)
+        return observations
+
+    @staticmethod
+    def observed_identity(info):
+        return fingerprint(info) + (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+
+    def observe_native_file(self, path, record):
+        target = self.dest(path)
+        if record['kind'] == 'absent':
+            try: target.lstat()
+            except FileNotFoundError: return {'kind': 'absent'}, b''
+            raise RecoveryError('Native recovery destination appeared during preflight: ' + path)
+        parent = self.directory(target.parent)
+        try: body, info = self.read_at(parent, target.name, MAX_FILE)
+        finally: os.close(parent)
+        if (hashlib.sha256(body).hexdigest() != record['sha256']
+                or (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (record['uid'], record['gid'], record['mode'])):
+            raise RecoveryError('Native recovery destination changed during preflight: ' + path)
+        return {'kind': 'file', 'sha256': record['sha256'], 'identity': self.observed_identity(info)}, body
+
+    @staticmethod
+    def require_observation(parent, name, expected):
+        if expected is None: return
+        if expected['kind'] == 'absent':
+            try: os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError: return
+            raise RecoveryError('Native recovery destination appeared after preflight; it was preserved: ' + name)
+        try: body, info = Recovery.read_at(parent, name, MAX_FILE)
+        except FileNotFoundError:
+            raise RecoveryError('Native recovery destination disappeared after preflight; preserve evidence: ' + name) from None
+        if (Recovery.observed_identity(info) != expected['identity']
+                or hashlib.sha256(body).hexdigest() != expected['sha256']):
+            raise RecoveryError('Native recovery destination changed after preflight; it was preserved: ' + name)
+
+    def preflight_recording_audio(self, records, current):
+        retained = set(); observations = {}
+        for path in (*CUSTOM_RECORDINGS, *FACTORY_TONES):
+            before, after = records[path], current[path]
+            if before['kind'] not in ('absent', 'file') or after['kind'] not in ('absent', 'file'):
+                raise RecoveryError('Native recording audio changed type; preserve it: ' + path)
+            observed, _ = self.observe_native_file(path, after)
+            if before['kind'] == 'absent' and after['kind'] == 'file':
+                retained.add(path)
+            elif before['kind'] == 'file' and after['kind'] == 'file' and before['sha256'] != after['sha256']:
+                raise RecoveryError('Required native recording audio changed independently; preserve live audio and snapshot: ' + path)
+            else: observations[path] = observed
+        return retained, observations
+
     def static_mode_allowed(self,path,uid,gid,mode):
         if mode & 0o002:
             return False
@@ -595,7 +680,7 @@ class Recovery:
         finally: os.close(fd)
 
     @staticmethod
-    def write_at(parent,name,body,mode=0o600,uid=0,gid=0):
+    def write_at(parent,name,body,mode=0o600,uid=0,gid=0,*,expected=None):
         temp='.sls-recovery-'+uuid.uuid4().hex
         try:
             fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=parent)
@@ -607,6 +692,7 @@ class Recovery:
                     view=view[n:]
                 os.fchown(fd,uid,gid); os.fchmod(fd,mode); os.fsync(fd)
             finally: os.close(fd)
+            Recovery.require_observation(parent, name, expected)
             os.replace(temp,name,src_dir_fd=parent,dst_dir_fd=parent); os.fsync(parent)
         finally:
             try: os.unlink(temp,dir_fd=parent)
@@ -883,7 +969,7 @@ class Recovery:
             return manifest
         finally: os.close(fd)
 
-    def remove(self,path):
+    def remove(self,path,*,expected=None):
         self.removed+=1
         if self.removed>MAX_FILES: raise RecoveryError('Static removal exceeds entry bound')
         target=self.dest(path)
@@ -902,6 +988,7 @@ class Recovery:
                 os.rmdir(target.name,dir_fd=parent)
             else:
                 if not (stat.S_ISREG(s.st_mode) and s.st_nlink==1) and not stat.S_ISLNK(s.st_mode): raise RecoveryError('Unsafe replacement encountered during recovery')
+                self.require_observation(parent, target.name, expected)
                 os.unlink(target.name,dir_fd=parent)
             os.fsync(parent)
         finally: os.close(parent)
@@ -996,6 +1083,11 @@ class Recovery:
         try:
             blobs=os.open('blobs',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=snapfd)
             try:
+                # Refuse independent native edits before any static or cron
+                # mutation. A safe owner/mode is not restoration authority.
+                observations = self.preflight_shared_restore(records, current, blobs)
+                retained_audio, audio_observations = self.preflight_recording_audio(records, current)
+                observations.update(audio_observations)
                 # Do not revive legacy root PHP/module bootstrap jobs. Preserve current
                 # unrelated jobs, including administrator changes made during upgrade.
                 safe=b'\n'.join(safe_lines)
@@ -1008,7 +1100,10 @@ class Recovery:
                 self.write_at(snapfd,'restore-started.json',b'{"automatic_activation_safe":false,"state":"restoring"}')
                 self.removed=0
                 for path in sorted(current,key=lambda p:(p.count('/'),p),reverse=True):
-                    if current[path]['kind']!='absent' and (path not in records or records[path]['kind']=='absent' or records[path]['kind']!=current[path]['kind']): self.remove(path)
+                    if path in retained_audio: continue
+                    if current[path]['kind']!='absent' and (path not in records or records[path]['kind']=='absent' or records[path]['kind']!=current[path]['kind']):
+                        if path in observations: self.remove(path, expected=observations[path])
+                        else: self.remove(path)
                 for path,entry in sorted(records.items(),key=lambda item:(item[0].count('/'),item[0])):
                     kind=entry['kind']
                     if kind=='absent': continue
@@ -1023,7 +1118,9 @@ class Recovery:
                         elif kind=='file':
                             body,_=self.read_at(blobs,entry['sha256'],MAX_FILE,True)
                             if hashlib.sha256(body).hexdigest()!=entry['sha256']: raise RecoveryError('Recovery blob changed')
-                            self.write_at(parent,target.name,body,entry['mode'],entry['uid'],entry['gid'])
+                            if path in observations:
+                                self.write_at(parent,target.name,body,entry['mode'],entry['uid'],entry['gid'],expected=observations[path])
+                            else: self.write_at(parent,target.name,body,entry['mode'],entry['uid'],entry['gid'])
                         else:
                             try: old=os.stat(target.name,dir_fd=parent,follow_symlinks=False)
                             except FileNotFoundError: old=None
@@ -1041,6 +1138,7 @@ class Recovery:
                 self.restore_user_jobs()
                 self.verify()
                 report={'ok':True,'automatic_activation_safe':False,'sls_root_jobs_disabled':True,
+                        'retained_additional_recording_audio': len(retained_audio),
                         'message':'Static files restored. Admit an authenticated prior release before enabling SLL root jobs or activating its services.'}
                 self.write_at(snapfd,'restore-result.json',json.dumps(report,sort_keys=True).encode())
                 return report
@@ -1051,13 +1149,17 @@ class Recovery:
         manifest=self.load() if manifest is None else manifest
         current={}; self.total=0
         for path in (*TREES,*FIXED,*LINKS): self.inspect(path,records=current)
+        retained_audio, _ = self.preflight_recording_audio(manifest['records'], current)
+        # These exact fixed media paths are data retained for possible native
+        # consumers, never newly approved executable source or rollback inputs.
+        for path in retained_audio: current[path] = manifest['records'][path]
         if current!=manifest['records']: raise RecoveryError('Restored static inventory differs from original snapshot')
-        return {'ok':True,'restored_static_verified':True}
+        return {'ok':True,'restored_static_verified':True,'retained_additional_recording_audio':len(retained_audio)}
 
     @_serialized_cron
     def verify(self):
         manifest=self.load()
-        self.verify_static(manifest)
+        static = self.verify_static(manifest)
         if [line for line in self.user_cron().splitlines() if sls_user_job(line)]!=self.original_user_jobs():
             raise RecoveryError('Restored SLL user jobs differ from their original schedule')
         jobs=[line.decode('ascii') for line in self.cron().splitlines() if sls_cron_job(line)]
@@ -1070,7 +1172,8 @@ class Recovery:
             if jobs: raise RecoveryError('SLL root jobs must remain disabled until authenticated activation')
         elif marker!=b'{"schema":1,"previous_release_approved":true}' or manifest.get('previous_activation_approval',{}).get('root_jobs')!=jobs:
             raise RecoveryError('Restored maintenance differs from the approved previous schedule')
-        return {'ok':True,'snapshot_verified':True,'restored_static_verified':True,'automatic_activation_safe':False}
+        return {'ok':True,'snapshot_verified':True,'restored_static_verified':True,'automatic_activation_safe':False,
+                'retained_additional_recording_audio':static['retained_additional_recording_audio']}
 
 def verify_installed_cron(tables):
     """Require the exact silent five-job set while preserving unrelated data."""

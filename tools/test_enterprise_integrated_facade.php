@@ -8,13 +8,13 @@ function verify(bool $value,string $why):void{if(!$value)throw new RuntimeExcept
 function refused(callable $call,string $part=''):void{try{$call();}catch(Throwable $error){verify($part===''||str_contains($error->getMessage(),$part),'Wrong refusal: '.$error->getMessage());return;}throw new RuntimeException('Expected refusal '.$part);}
 $dashboardModule=(new ReflectionClass(\FreePBX\modules\Slsmassnotifyserver::class))->newInstanceWithoutConstructor();
 $registeredPages=$dashboardModule->myConfigPageInits();
-$expectedPages=['index'];
+$expectedPages=['index','modules','updates'];
 $moduleXml=simplexml_load_file(dirname(__DIR__).'/slsmassnotifyserver/module.xml');
 foreach($moduleXml->menuitems->children() as $menuPage){
  if((string)$menuPage['href']===''){$expectedPages[]=$menuPage->getName();}
 }
 sort($registeredPages,SORT_STRING);sort($expectedPages,SORT_STRING);
-verify($registeredPages===$expectedPages,'Beta warning hooks must cover the Dashboard and every local SLS admin page, without unrelated FreePBX or external portal pages');
+verify($registeredPages===$expectedPages,'Register the Dashboard, local SLS pages and the two native Module Admin displays');
 ob_start();$dashboardModule->doConfigPageInit('index');$dashboardScript=ob_get_clean();
 verify(preg_match('~^<script src="modules/slsmassnotifyserver/views/dashboard_assets\.js\?v=[a-f0-9]{16}"></script>$~D',$dashboardScript)===1,'Dashboard hook must emit its small versioned local script before widget requests');
 ob_start();$dashboardModule->doConfigPageInit('unrelated');verify(ob_get_clean()==='','Unrelated FreePBX pages must remain unchanged');
@@ -30,13 +30,30 @@ $betaHook=(new ReflectionClass(IntegratedBetaHookFixture::class))->newInstanceWi
 ob_start();$betaHook->doConfigPageInit('index');$betaDashboard=ob_get_clean();
 verify($betaHook->hookCalls===['notice']&&str_starts_with($betaDashboard,$dashboardScript)
  &&str_ends_with($betaDashboard,'<template id="fixture-beta-notice"></template>'),'Dashboard must preserve its early asset hook and render exactly one beta notice');
-foreach(array_diff($expectedPages,['index']) as $page){
+foreach(array_diff($expectedPages,['index','modules','updates']) as $page){
  $betaHook->hookCalls=[];ob_start();$betaHook->doConfigPageInit($page);$rendered=ob_get_clean();
  verify($betaHook->hookCalls===['authorize:'.$page,'notice'],'Local SLS page authorization must precede beta rendering');
  verify($rendered==='<template id="fixture-beta-notice"></template>','SLS page must render one warning without loading Dashboard chart assets');
 }
 $betaHook->hookCalls=[];ob_start();$betaHook->doConfigPageInit('unrelated');$unrelated=ob_get_clean();
 verify($unrelated===''&&$betaHook->hookCalls===[],'Unrelated PBX pages must perform no SLS authorization or beta rendering work');
+$originalRequest = $_REQUEST;
+foreach (['modules', 'updates'] as $page) {
+ foreach (['upgrade', 'force_upgrade', 'upgradeignoreconflicts', 'install', 'installignoreconflicts', 'downloadinstall', 'reinstall', 'rollback'] as $action) {
+  $_REQUEST = ['action' => 'confirm', 'moduleaction' => ['core' => 'upgrade', 'framework' => $action], 'version' => '<unsafe>'];
+  ob_start(); $betaHook->doConfigPageInit($page); $notice = ob_get_clean();
+  verify(str_contains($notice, 'role="alert"') && str_contains($notice, '17.0.33') && str_contains($notice, '17.0.34')
+   && !str_contains($notice, '<unsafe>'), 'Show the SLL compatibility advisory before a Framework version change');
+ }
+ foreach ([[], ['action'=>'confirm','moduleaction'=>['core'=>'upgrade']], ['action'=>'confirm','moduleaction'=>['framework'=>'noaction']],
+  ['action'=>'confirm','moduleaction'=>['framework'=>['upgrade']]], ['action'=>'confirm','moduleaction'=>'framework'],
+  ['action'=>'process','modules'=>['framework'=>['action'=>'upgrade']]]] as $request) {
+  $_REQUEST = $request; ob_start(); $betaHook->doConfigPageInit($page);
+  verify(ob_get_clean()==='', 'Show the advisory only at confirmation of a Framework change');
+ }
+}
+$_REQUEST = $originalRequest;
+verify($betaHook->hookCalls===[], 'Module Admin controls its own permissions and update confirmation');
 $directory=sys_get_temp_dir().'/sls-integrated-labs-'.bin2hex(random_bytes(8));mkdir($directory,0700);define('INTEGRATED_LABS_FIXTURE',$directory);
 ini_set('session.save_path',$directory);ini_set('session.use_cookies','0');session_id('isolated-labs-'.bin2hex(random_bytes(8)));session_start();
 register_shutdown_function(static function()use($directory){if(session_status()===PHP_SESSION_ACTIVE)session_write_close();foreach(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($directory,FilesystemIterator::SKIP_DOTS),RecursiveIteratorIterator::CHILD_FIRST)as$file){$file->isDir()&&!$file->isLink()?rmdir($file->getPathname()):unlink($file->getPathname());}rmdir($directory);});

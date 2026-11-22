@@ -1,6 +1,6 @@
 # Installer diagnostics, recovery and qualification
 
-The software remains **0.1.9-beta**, now the available published prerelease, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused. Preserve every failed transaction and authenticated original artifact; generic protocol examples below never authorize withdrawn assets.
+The working candidate is **0.2.0-beta**. Its installer changes are under private qualification. The available published prerelease remains **0.1.9-beta**, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused. Preserve every failed transaction and authenticated original artifact; generic protocol examples below never authorize withdrawn assets.
 
 The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. The naming correction retains existing MFA/history behavior. Do not overwrite settings, reset MFA or replace the ledger; preserve the recorded administrator decision with the transaction evidence. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. See [qualification boundaries](QUALIFICATION_MATRIX.md).
 
@@ -9,6 +9,15 @@ refreshes their separate opcode caches without changing PHP settings or restarti
 Asterisk. Rollback refreshes FPM after restoring the approved files. The local,
 read-only API probe reports its compiled SLL version; installation fails clearly
 if the serving handler still runs a previous release or its reload fails.
+
+FreePBX Apply Config may need to generate SLL audio after paging or panic
+settings change. The renderer runs as `asterisk` for both web and root CLI
+reloads. It checks storage on the actual paging destination and speech
+workspace. If speech is busy or storage is exhausted, the pending settings
+stay staged and FreePBX can apply unrelated extension changes. Check the
+FreePBX reload output and PHP error log for the SLL warning, correct the
+reported condition and retry Apply Config. A shortcut whose required audio
+is unavailable stays out of the dialplan until its prompts are ready.
 
 The supported profile is FreePBX 17 on Debian 12, amd64, CPython 3.11 and
 Apache, using the standard FreePBX paths and the `asterisk` service account.
@@ -21,6 +30,37 @@ architectures, relocated layouts and restricted containers require explicit
 adapters and qualification; the installer does not guess replacement paths or
 disable its trust checks to accommodate them.
 
+Installer and uninstaller native-account commands, including Module Admin and
+FreePBX PHP bootstrap/hooks, have a fixed 20-minute budget followed by a
+five-second TERM-to-KILL grace. Existing shorter probe budgets and their kill
+graces remain separate. The execution clock includes the account transition;
+blocked command output cannot disable it. An independent root waiter and
+supervisor retain worker and maintenance leases while mutable native children
+receive none. Their own child inventories and admission handshake contain loss
+of either root stage or the outer caller's process group. Failed or cancelled
+commands retire only their owned descendants, including detached hooks, before
+semantic completion permits recovery or release of the root worker leases.
+Successful native hooks may start intentional services; those services are not
+explicitly killed by successful command cleanup.
+
+If semantic completion cannot be verified, a CRITICAL message identifies the
+root waiter PID and private `/run/sls-native-command-*` evidence. The surviving
+root holder keeps coordination fenced and does not begin rollback or re-enable
+jobs while owned work remains unverified. Administrator review is required
+before terminating that holder and resuming authenticated recovery; deleting
+lock files or manufacturing a completion record does not prove retirement.
+The `/run` evidence is volatile and should be preserved before reboot. The
+protected installation/removal transaction and logs remain the durable recovery
+evidence. This contains the tested loss of a stage while another trusted holder
+survives; destruction of every root holder is outside that contract.
+
+Preserve the printed transaction and logs after a timeout; use the authenticated
+recovery or removal retry described below. Identity/NSS
+lookups and operating-system storage I/O are outside this command deadline.
+Manual Weather pickup also caps each native CLI request to the remaining pickup
+budget, with a fixed two-second termination grace, before reporting an unaccepted
+job and removing only that test's queued call file.
+
 Required native module floors are Framework `17.0.33`, Dashboard `17.0.5`, Backup `17.0.13` and Recordings `17.0.6`. Existing older or unqualified registrations stop before an SLL transaction starts; update them through native Module Admin and retry. SLL does not run an automatic `upgradeall`. These reviewed floors cover the vendor advisories cited below and do not certify the entire host as vulnerability-free:
 
 - [Framework reviewed security fixes](https://github.com/FreePBX/framework/blob/release/17.0/module.xml)
@@ -29,6 +69,84 @@ Required native module floors are Framework `17.0.33`, Dashboard `17.0.5`, Backu
 - [Recordings fixed version](https://github.com/FreePBX/security-reporting/security/advisories/GHSA-9cjf-xw9x-55hh)
 
 The exact locked NumPy wheel requires x86-64-v2; AVX is optional. CPU count and RAM alone do not establish this capability. Admission checks every CPU allowed by process affinity and accounts for cgroup limits using the actual mount root and membership path. An unresolvable hierarchy stops admission instead of assuming host resources are available.
+
+The disabled Weather scheduler verification uses a small private data fixture in
+the root-owned sticky `/tmp` runtime workspace. The installer validates that
+parent, finishes the fixture configuration before handing ownership to the PBX
+account, and removes it after the bounded check. Protected installer scratch
+keeps its search-only PBX group permission; configuration reader checks and
+storage reservations are unchanged.
+
+Storage admission normally reserves previous-release source and download space.
+The signed installer can prove that these copies are absent through a successful
+native registration read, candidate-bound previous-source approvals and protected
+absence of the active module, runtime and SLL source pointer. A missing module
+directory alone does not qualify. Retained configuration, keys, history and inactive
+authenticated generations after a completed fresh-install rollback are preserved;
+they do not themselves authorize a previous source release or a configuration restore.
+The existing strict fresh-install proof remains supported.
+
+The final check runs after the current transaction's inputs have been retained.
+A separate capacity-only proof verifies the exact private prepared journal,
+candidate archive, installer, signed-manifest bytes, twelve bootstrap files and
+complete approval source against the authenticated candidate. Only those completed
+current allocations have no further creation cost. An early capsule alone cannot
+remove these reservations. Unknown, changing or partial evidence keeps the
+conservative budget, and no resource proof grants execution, rollback or
+configuration-restoration authority.
+
+Established upgrades use a separate prepared-transaction proof. The exact current
+archive, bootstrap and candidate approval source must already be complete. The
+previous protected active generation must contain its approved full source and
+signed release inputs, with no previous-package acquisition fallback. These facts
+remove future creation costs for resident copies; they do not describe a fresh
+installation or authorize an operational restore.
+
+The installer checks the exact Dashboard and Framework versions and the signed
+archive digest in each approved inventory. A matching protected package already
+in the cache requires no further publication space. When FreePBX updates either
+module, the installer reserves the measured new signed package and directory
+growth on the cache filesystem. Unknown cache contents retain the full cache
+budget. The prior and candidate source copies have independent evidence.
+The writer verifies the signatures and checks the bound hashes and native
+versions again before publication. It checks free bytes and inodes for any
+interrupted recovery copies on the trust filesystem before removing an old file.
+GPG keeps its verification space on the selected installer filesystem.
+
+Local signing checks the filesystem that holds the signing lock, temporary
+files, each keyring and the module signature. The signer queries FreePBX for the
+keyring location and verifies its metadata during an ownership repair.
+
+Operational state headroom, configuration and prior-static snapshots, journal
+metadata, voice replacement space, new live trust-generation and manifest
+allowances remain reserved. Inode admission includes the full environment
+directory/alias count and temporary construction trees. Initial preparation keeps its existing reservations, and the
+late check still measures available space on each actual target filesystem.
+
+An authenticated upgrade can reuse the unchanged pinned Piper environment only
+after exact prior/candidate data contracts, protected structure, ABI and bounded
+native-user health checks pass. The dependency phase uses the same validator.
+Validation runs with a clean environment and stays out of periodic Doctor checks.
+A failed later check re-admits full replacement bytes and inodes before creating
+a stage or building packages. Remaining operational and recovery-metadata floors
+stay reserved, including the separate runtime audio filesystem. File, directory
+and standard-alias nodes are counted; snapshots use the recovery filesystem's
+allocation units. Missing voices keep their growth space plus a separate atomic
+repair peak, including optional packs, up to the complete size of the selected
+catalog. Sparse or multiply linked models retain a full replacement allowance.
+A fresh Lite installation carries its selected profile into dependency preparation
+before the module creates its first configuration file.
+
+Online speech dependency downloads accept the root operator’s HTTP(S) proxy and
+bypass settings and protected absolute CA bundle paths. Pip uses the first
+configured value in the following order, `PIP_CERT`, `REQUESTS_CA_BUNDLE`,
+`SSL_CERT_FILE`, `CURL_CA_BUNDLE`. Set these in the root environment that
+starts the installer. Offline package preparation, permission repair and runtime
+health checks use the clean environment.
+
+Automatic scratch selection skips volatile `/tmp` and `/var/tmp` installation
+workspaces before trying qualified persistent spool storage. Explicitly selected
+late paths remain bound and cannot silently move to a different filesystem.
 
 The phone collector continues to update its ledger and heartbeat while install
 workers are guarded. Permission repair takes each file's permanent writer mutex
@@ -49,6 +167,12 @@ Native legacy cron cleanup requires a complete successful read. A timeout,
 permission error or partial read leaves existing entries untouched and stops
 installation with a specific message. Only the exact current-user “no crontab”
 result is treated as an empty initial configuration.
+
+## FreePBX Framework updates
+
+Before approving a Framework change in **Admin → Module Admin**, compare the proposed version with the SLL advisory on the confirmation page. The v0.2.0-beta installer supports FreePBX 17 with Framework 17.0.33 or later. Stock package checks cover 17.0.33, 17.0.33.1 through 17.0.33.5, and 17.0.34. A new package or a customized installation can need independent review. Keep a verified backup of site branding and other Framework changes.
+
+For a scheduled update or `fwconsole ma` upgrade, check the target version and backup first. These paths run without the Module Admin confirmation page. After updating, SLL maintenance checks the installed files against authenticated packages and the site’s approved changes before refreshing local signatures. If a previously approved custom file disappears or changes, examine the affected paths and restore the approved bytes from backup or review the new site inventory. An administrator can retry signed-package reconciliation with `sudo slsconsole reconcile-stock --online`, or provide independently signed offline packages with `--upstream-packages DIRECTORY`. A successful explicit review schedules signature verification for the next maintenance run, including after restoring approved files on the same Framework version.
 
 ## Read-only diagnostics
 
@@ -93,7 +217,24 @@ sudo /usr/bin/python3 -I \
   --json --desktop-limit 50 --phone-limit 100
 ```
 
+Doctor checks the operating headroom for the selected workload, including CPU,
+RAM, ongoing state and log writes, configuration backups and runtime audio
+space. The authenticated installer separately checks its full download,
+replacement and recovery workspace before mutation.
+
 Probes have fixed arguments, output limits and deadlines and run concurrently.
+Root CLI diagnosis allows up to 15 seconds for signed inventory verification
+and the collector probe, and 18 seconds for the resource helper, including its
+bounded runtime storage scan. Web and unprivileged reports retain five-second
+helper limits and a two-second collector probe within the web caller's existing
+ten-second deadline. Collector freshness charges the complete probe time and
+any wait for other probes or report assembly before publication. If an initially
+healthy sample expires during that work, one final bounded collector observation
+uses the same two-second quick or 15-second root CLI limit. Initial failures are
+not retried, and a failed or stale refresh cannot reuse the earlier PASS. A
+delayed response or parallel check cannot make an old heartbeat appear current.
+A timeout remains an incomplete, failing
+observation; it does not approve files or declare the PBX healthy.
 HTTP probes connect only to loopback, use the local virtual-host name and never
 follow redirects or resolve a public address. The local HTTPS prerequisite probe
 does not validate the public certificate chain; it only identifies the served
@@ -102,14 +243,28 @@ services, run FreePBX hooks, open a new AMI session or contact notification
 providers. A web-process diagnostic cannot inspect root-only trust or recovery
 snapshots; those checks explicitly direct the administrator to the CLI.
 
-Authenticated local probes on custom ports require the configured public PBX
-hostname to match the site's native `ServerName` or `ServerAlias`. Literal and
-wildcard aliases are supported. Apache omits aliases from its compact single-site
-inventory, so SLL may perform a second bounded configuration-test command with a
-temporary command-line virtual host to obtain Apache's expanded alias inventory.
-This changes no files, listeners or running services. The synthetic site grants
-no credential authority; failed discovery never sends credentials to an unrelated
-custom-port site.
+Candidate authenticated local probes require the configured public PBX hostname
+to match the effective native `ServerName` or `ServerAlias`. Literal and wildcard
+aliases are supported. A sole unnamed virtual host can also qualify when native
+Apache and effective configuration independently identify the same unique
+route, with no explicit local or inherited server name. This supports manual
+installations where Apache infers a different name from the machine hostname.
+Competing or unclassified bindings still prevent this exception. Named virtual
+hosts retain strict hostname matching. Discovery uses Apache's parsed vhost and effective
+configuration dumps, accounting for address specificity, first matching names,
+the canonical PBX document root and relevant handler scopes before sending
+credentials to loopback. The root installer passes only bounded, sanitized route
+authority to the runtime account when included configuration is root-private;
+remote destinations and credentials are excluded. Unavailable or ambiguous
+authority stops the probe. The installer checks the actual desktop, control API,
+served PHP or generated-media path. It uses the same PHP transport as the
+module, under the Asterisk service account, and pins the socket to the
+selected IPv4 or IPv6 loopback address and port. During rollback the signed
+installer supplies this transport from its protected transaction package or
+corrected recovery carrier, including when the restored module has an older
+helper. A missing or damaged carrier or an unqualified route yields HTTP 000
+in the installer verification log. Review that transaction and the native
+Apache route for the reported path before retrying.
 
 On a fresh host, use the publisher-authenticated installer's `--inspect` mode
 for signed package and stock inventory checks. Inspection may download evidence
@@ -174,6 +329,13 @@ blocked target. The published reserved-tag `0.1.9-beta` installer retains correc
 and can provide its own independently authenticated carrier. Carrier installer and package are authenticated separately and
 retained in a private `recovery-carrier.*` directory. The original signed
 artifacts, approvals and operational baseline remain the restoration authority.
+Before creating a corrected carrier in the original transaction, the installer
+checks the actual authenticated archive, installer, manifest/signature and exact
+bootstrap files against available bytes and inodes on that filesystem. A private
+snapshot binds the running installer to its signed manifest. Unsafe or changing
+inputs, read-only targets and insufficient capacity stop before creating a carrier;
+the original transaction is preserved. The prepared-install allocation proof does
+not claim to reserve space for an arbitrary future corrected release.
 The journal does not approve live file hashes. It does not restore operational
 delivery history over newer records. Failed restoration or newer activity that
 prevents safe verification requires administrator review.
@@ -434,6 +596,16 @@ artifact hashes, pinned voices, complete compatible wheel resolution and officia
 stock package signatures. `--print-environment` prints shell-quoted installer
 paths for the reviewed bundle. The installer repeats its own verification.
 
+The unpublished 0.2.0-beta preparation tool requires both Framework and Dashboard
+stock packages. Pass `--framework-version VERSION --dashboard-version VERSION`
+to check the bundle against the exact versions needed by a target PBX. Without
+both requirements, successful verification describes the supplied packages; it
+does not establish completeness for an unspecified installation. For each
+selected optional voice, pass `--optional-voice-pack PACK_ID` (at most two).
+Both the model and its configuration must match the authenticated catalogue.
+These options do not read or change a target PBX's configuration, and the
+installer still enforces its own protected publisher policy.
+
 The Piper dependency phase uses `--no-index` with the supplied wheelhouse and
 copies voices only after the existing size and SHA-256 checks. It does not fall
 back to internet downloads when an explicitly selected offline asset is absent.
@@ -486,6 +658,8 @@ A managed entry in `/etc/asterisk/freepbx_chown.conf` excludes only `/var/lib/as
 
 After recovery, the installer verifies the approved collector service and a fresh authenticated heartbeat before acquiring notification-worker guards. It can start an approved, enabled inactive collector; disabled, masked or custom service states require review. Do not delete a ledger, loosen runtime checks or repeatedly restart FreePBX to bypass a failed readiness check. Preserve the specific diagnostic and installer recovery locations instead.
 
+On a normal service stop, the phone collector clears its live heartbeat, records a disconnected dashboard status and preserves closed batches. New phone audio admissions require a fresh authenticated heartbeat after restart. If the process is killed before it can record a stop, its last heartbeat expires after 15 seconds.
+
 An older collector may have a voicemail fallback pending in a closed phone batch. Upgrade preflight refuses that still-eligible, unexpired fallback before activation; let it finish or expire, then retry. It does not claim or erase the fallback. Current collectors coordinate voicemail submission and recording cleanup with the same worker guards.
 
 ## Legacy Python-cache quarantine
@@ -509,6 +683,10 @@ Run `sudo slsconsole uninstall` or the included `/usr/local/bin/sls_mass_notify/
 Both crontabs are read and checked before SLL entries are removed. Unexpected read/write failures retain private originals and require review; unrelated jobs are preserved. Retry accepts only exact approved installed or uninstall stock variants. An absent SLL directory must also have an independently checked absent module registry entry. Unknown partial file changes remain a review boundary.
 
 If a late failure removed the command itself, the signed uninstaller remains under the active retained generation, at `/var/lib/sls-mass-notify-trust/<generation>/module/bin/sls_mass_notify_uninstall.sh`. Run that retained script with Bash after reviewing the reported recovery location. Do not substitute an arbitrary live inventory. A stopped PBX is not started. Software removal and a failed final PBX reload are reported separately.
+
+Before deleting Manager records, removal saves a root-private immutable plan of only accounts whose secret hash, loopback ACL and permissions prove SLL ownership. Native read-only account-absence checks then report `verified_absent`, `daemon_absent` or `pending_unverified`. These inspect configured Manager users only. [Asterisk preserves previously authenticated sessions across reloads](https://github.com/asterisk/asterisk/blob/22.11.0/main/manager.c#L2186); account absence does not prove those sessions ended, and this read-only check does not inspect or disconnect them. A failed or unknown CLI response never proves absence. Software removal may still finish after a reload warning, but its output and retained `ami-revocation.json` explicitly state that a loaded SLL Manager account may remain. `daemon_absent` describes the current stopped state; it does not certify a later startup. No unrelated Manager account is removed or disconnected by these checks.
+
+Pending plans survive retries and purge. An empty plan from a later attempt cannot erase an earlier unresolved account. After the desired native `fwconsole reload`, run the exact retained command printed in the log with `--verify-runtime` and its protected uninstall transaction path. This follow-up reads retained ownership evidence and the native CLI only: it does not bootstrap FreePBX, reload services, infer ownership from live names, alter settings or replace the original removal evidence. Its JSON reports the current observation. Keep the original transaction privately even after a successful follow-up.
 
 ## Mail and cron safeguards
 

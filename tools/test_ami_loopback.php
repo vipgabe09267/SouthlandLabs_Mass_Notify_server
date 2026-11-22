@@ -12,22 +12,52 @@ namespace FreePBX\modules {
 namespace {
     if (!interface_exists('BMO')) { interface BMO {} }
     if (!function_exists('_')) { function _($message) { return $message; } }
+    final class AmiFixtureDatabase {
+        public PDO $pdo;
+        public bool $refuseRead = false;
+        public int $lockingNameReads = 0;
+        public function __construct() {
+            $this->pdo = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+            $this->pdo->exec('CREATE TABLE manager (manager_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT COLLATE NOCASE, secret TEXT, deny TEXT, permit TEXT, read TEXT, write TEXT, writetimeout INTEGER, site_annotation TEXT DEFAULT NULL)');
+        }
+        public function prepare($sql) {
+            if ($this->refuseRead) { throw new RuntimeException('Synthetic unreadable Manager database'); }
+            if ($sql === 'SELECT * FROM manager WHERE name = ? FOR UPDATE') { $this->lockingNameReads++; }
+            if ($sql === 'SHOW TABLES LIKE ?') { $sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"; }
+            return $this->pdo->prepare(str_replace([' FOR UPDATE', ' LOCK IN SHARE MODE', 'BINARY '], '', $sql));
+        }
+        public function __call($name, $arguments) { return $this->pdo->$name(...$arguments); }
+    }
     final class AmiManagerFixture {
         public $added = [];
         public $fail = false;
-        public $existing = [];
         public $deleted = [];
-        public function isExist_manager($name, ...$arguments) { return isset($this->existing[$name]); }
-        public function get_manager($name, ...$arguments) { return $this->existing[$name]; }
-        public function del_manager($name, ...$arguments) { $this->deleted[] = $name; unset($this->existing[$name]); }
+        public AmiFixtureDatabase $db;
+        public function __construct() { FreePBX::$db = $this->db = new AmiFixtureDatabase(); }
+        public function rows($name) {
+            $q = $this->db->prepare('SELECT * FROM manager WHERE name=? ORDER BY manager_id');
+            $q->execute([$name]); return $q->fetchAll(PDO::FETCH_ASSOC);
+        }
+        public function seed(array $row) {
+            $q = $this->db->prepare('INSERT INTO manager (name,secret,deny,permit,read,write,writetimeout) VALUES (?,?,?,?,?,?,?)');
+            $q->execute(array_map(static fn($key) => $row[$key], ['name','secret','deny','permit','read','write','writetimeout']));
+        }
+        public function isExist_manager($name, ...$arguments) { return $this->rows($name) !== []; }
+        public function get_manager($name, ...$arguments) { return $this->rows($name)[0]; }
+        public function del_manager($name, ...$arguments) {
+            $this->deleted[] = $name; $this->db->prepare('DELETE FROM manager WHERE name=?')->execute([$name]);
+        }
         public function add_manager(...$arguments) {
-            if ($this->fail) { throw new RuntimeException('Synthetic Manager database failure.'); }
+            if ($this->fail) { throw new RuntimeException('Synthetic Manager insertion failure.'); }
             $this->added[] = $arguments;
+            $this->seed(array_combine(['name','secret','deny','permit','read','write','writetimeout'], $arguments));
         }
     }
     final class FreePBX {
         public static $values = ['ASTMANAGERHOST' => '::1', 'ASTMANAGERPORT' => '5041'];
         public static $manager;
+        public static $db;
+        public static function Database() { return self::$db; }
         public static function Config() { return new class { public function get($key) { return FreePBX::$values[$key] ?? ''; } }; }
         public static function Manager() {
             if (self::$manager === null) { throw new RuntimeException('Synthetic missing Manager module.'); }
@@ -119,13 +149,15 @@ namespace {
     // Only the dependency boundaries are fake: no actual Manager, file or CLI.
     $source = file_get_contents(dirname(__DIR__) . '/slsmassnotifyserver/Slsmassnotifyserver.class.php');
     $methods = '';
-    foreach (['ensureAmiUser', 'normalizeAmiHost', 'detectAmiHost', 'getFreePbxConfigValue', 'normalizeEndpointUsername', 'normalizeEndpointPassword'] as $name) {
+    foreach (['ensureAmiUser', 'verifyManagedAmiFile', 'normalizeAmiHost', 'detectAmiHost', 'getFreePbxConfigValue', 'normalizeEndpointUsername', 'normalizeEndpointPassword'] as $name) {
         $start = strpos($source, "\tprivate function {$name}(");
         $end = strpos($source, "\n\tprivate function ", $start + 1);
         $methods .= str_replace(['private function', '__DIR__'], ['public function', var_export(dirname(__DIR__).'/slsmassnotifyserver', true)], substr($source, $start, $end - $start)) . "\n";
     }
     eval('class AmiIntegrationFixture {' . $methods . '
         public $settings = []; public $blocks = []; public $commands = []; public $removed = [];
+        public $amiFile = "";
+        public function readManagedTextFile(...$args) { return $this->amiFile; }
         public function getActiveSettings() { return $this->settings; }
         public function writeManagedBlock($path, $name, $block) { $this->blocks[] = [$path, $name, $block]; }
         public function removeManagedBlock($path, $name) { $this->removed[] = [$path, $name]; }
@@ -133,6 +165,13 @@ namespace {
     }');
     $fixture = new AmiIntegrationFixture(); $fixture->settings = ['ami' => $settings['ami']];
     $original = serialize($fixture->settings);
+    FreePBX::$manager = new AmiManagerFixture();
+    $fixture->amiFile = '['.$settings['ami']['username']."]\nread = system\n";
+    $refused = false;
+    try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $refused = true; }
+    $assert($refused && !FreePBX::$manager->added && !$fixture->blocks, 'An unmanaged Manager file collision was shadowed.');
+    $fixture->amiFile = '';
+
     FreePBX::$manager = new AmiManagerFixture();
     $fixture->ensureAmiUser();
     $row = FreePBX::$manager->added[0];
@@ -142,6 +181,7 @@ namespace {
     $assert(serialize($fixture->settings) === $original, 'Account installation rewrote protected endpoint settings.');
     $assert($fixture->blocks === [], 'Working Manager integration also emitted a competing configuration block.');
     foreach (['database-failure', 'missing-manager'] as $mode) {
+        FreePBX::$manager = new AmiManagerFixture();
         if ($mode === 'database-failure') { FreePBX::$manager->fail = true; } else { FreePBX::$manager = null; }
         $fixture->blocks = []; $fixture->ensureAmiUser();
         $block = $fixture->blocks[0][2];
@@ -158,20 +198,75 @@ namespace {
         'deny'=>'0.0.0.0/0.0.0.0&::/0', 'permit'=>'127.0.0.1/255.255.255.255&::1/128',
         'read'=>'system,call,originate,reporting', 'write'=>'system,call,originate,reporting', 'writetimeout'=>1000];
     FreePBX::$manager = new AmiManagerFixture();
-    FreePBX::$manager->existing[$unrelated['name']] = $unrelated;
+    FreePBX::$manager->seed($unrelated);
     $rejected = false;
     try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }
     $assert($rejected && FreePBX::$manager->deleted === [] && FreePBX::$manager->added === [], 'Repair overwrote an unrelated AMI account.');
     FreePBX::$manager = new AmiManagerFixture();
     $legacy = $unrelated; $legacy['name'] = 'sls_mass_notify';
-    FreePBX::$manager->existing['sls_mass_notify'] = $legacy;
+    FreePBX::$manager->seed($legacy);
     $fixture->ensureAmiUser();
     $assert(FreePBX::$manager->deleted === [], 'Repair removed an unrelated historical username.');
     FreePBX::$manager = new AmiManagerFixture();
     $owned = $unrelated; $owned['secret'] = $settings['ami']['password'];
-    FreePBX::$manager->existing[$owned['name']] = $owned;
+    $manager = FreePBX::$manager;
+    $manager->seed($owned);
+    $manager->db->exec("UPDATE manager SET site_annotation='operator metadata'");
+    $prior = $manager->rows($owned['name']);
+    $manager->db->beginTransaction();
     $fixture->ensureAmiUser();
-    $assert(FreePBX::$manager->deleted === [$owned['name']], 'Recognized dedicated SLS credential could not be refreshed.');
+    $manager->db->commit();
+    $fixture->ensureAmiUser();
+    $assert($manager->db->lockingNameReads === 0, 'An exact repair held a table-scanning Manager lock.');
+    $assert($manager->rows($owned['name']) === $prior && $manager->deleted === [] && $manager->added === [],
+        'An exact owned Manager row changed stable ID, metadata, or account on repeated installation.');
+    $manager->db->exec("UPDATE manager SET permit='127.0.0.1/255.255.255.255',deny='0.0.0.0/0.0.0.0',read='system,call,originate',write='system,call,originate'");
+    $manager->db->beginTransaction();
+    $fixture->ensureAmiUser();
+    $assert($manager->db->inTransaction() && $manager->rows($owned['name']) === $prior, 'Historical policy must upgrade in place within an outer transaction.');
+    $manager->db->rollBack();
+    $assert($manager->rows($owned['name'])[0]['read']==='system,call,originate', 'Repair committed the caller transaction.');
+    $fixture->ensureAmiUser();
+    $assert($manager->rows($owned['name']) === $prior, 'Guarded policy reconciliation lost ID, credential, or operator metadata.');
+    $manager->seed($unrelated);
+    $duplicates = $manager->rows($owned['name']);
+    $fixture->blocks = []; $rejected = false;
+    try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }
+    $assert($rejected && $manager->rows($owned['name']) === $duplicates && $fixture->blocks === [],
+        'An ambiguous target Manager identity was removed or shadowed through a fallback.');
+    FreePBX::$manager = $manager = new AmiManagerFixture();
+    $alias = array_replace($owned, ['name' => 'sls_mass_notify']);
+    $manager->seed($alias); $manager->fail = true; $fixture->blocks = [];
+    $fixture->ensureAmiUser();
+    $assert(count($manager->rows($alias['name'])) === 1 && count($fixture->blocks) === 1,
+        'Failed fresh Manager insertion prematurely deleted the prior owned alias.');
+    $manager->fail = false;
+    $manager->db->exec("CREATE TRIGGER refuse_alias_delete BEFORE DELETE ON manager WHEN OLD.name='sls_mass_notify' BEGIN SELECT RAISE(ABORT, 'synthetic interrupted cleanup'); END");
+    $rejected = false; $fixture->blocks = [];
+    try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }
+    $assert($rejected && !$manager->rows($owned['name']) && count($manager->rows($alias['name'])) === 1 && $fixture->blocks === [],
+        'Failed alias cleanup did not roll back account creation or wrote a competing fallback.');
+    $manager->db->exec('DROP TRIGGER refuse_alias_delete');
+    $fixture->ensureAmiUser();
+    $assert($manager->rows($alias['name']) === [] && count($manager->rows($owned['name'])) === 1,
+        'An authenticated legacy alias should be retired after confirmed target creation.');
+    $operatorPolicy = array_replace($owned, ['deny' => $owned['deny'] . '&127.0.0.1/32']);
+    FreePBX::$manager = $manager = new AmiManagerFixture();
+    $manager->seed($operatorPolicy);
+    $operatorRows = $manager->rows($owned['name']);
+    $fixture->blocks = []; $rejected = false;
+    try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }
+    $assert($rejected && $manager->rows($owned['name']) === $operatorRows && $fixture->blocks === [],
+        'An extra operator deny restriction was erased or shadowed on repair.');
+    FreePBX::$manager = null;
+    $rejected = false; $fixture->blocks = [];
+    try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }
+    $assert($rejected && $fixture->blocks === [], 'Unavailable Manager shadowed a known native row.');
+    FreePBX::$manager = $manager;
+    $manager->db->refuseRead = true; $fixture->blocks = []; $rejected = false;
+    try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }
+    $assert($rejected && $fixture->blocks === [], 'An uninspectable native account was shadowed by a fallback.');
+    $manager->db->refuseRead = false;
     FreePBX::$values['AMPMGRUSER'] = $settings['ami']['username'];
     $before = count($fixture->commands); $rejected = false;
     try { $fixture->ensureAmiUser(); } catch (RuntimeException $error) { $rejected = true; }

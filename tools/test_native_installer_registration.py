@@ -149,6 +149,45 @@ esac
         self.assertIn('HAD=0 ENABLED=0', proc.stdout)
         self.assertEqual(calls, '')
 
+    def test_resource_freshness_requires_a_successful_normal_registry_observation(self):
+        with tempfile.TemporaryDirectory(prefix='sls-resource-native-state-') as folder:
+            root = Path(folder)
+            harness = r'''source "$1"
+fixture="$2"; scenario="$3"; CONFIG_FILE="$fixture/config"
+INSTALL_TEMP_ROOT="$fixture"; TGZ="$fixture/archive"
+printf '{}' >"$CONFIG_FILE"
+module_registry_state() {
+ case "$scenario" in
+  failed) return 17 ;;
+  absent) printf 'absent\n' ;;
+  enabled) printf 'enabled\t0.2.0-beta\n' ;;
+  disabled) printf 'disabled\t0.2.0-beta\n' ;;
+  source-only) printf 'forbidden native query\n' >"$fixture/queried"; return 19 ;;
+ esac
+}
+tar() { mkdir "$STAGING_DIR/slsmassnotifyserver"; printf '<module/>' >"$STAGING_DIR/slsmassnotifyserver/module.xml"; }
+lint_staged_module_php() { :; }
+if [ "$scenario" = default ]; then
+ printf '%s\n' "$INITIAL_NATIVE_MODULE_REGISTRY_STATE"; exit
+fi
+if [ "$scenario" = source-only ]; then
+ INITIAL_NATIVE_MODULE_REGISTRY_STATE=known_absent
+ stage_module_directory --source-only
+else
+ stage_module_directory || { printf '%s\n' "$INITIAL_NATIVE_MODULE_REGISTRY_STATE"; exit; }
+fi
+printf '%s\n' "$INITIAL_NATIVE_MODULE_REGISTRY_STATE"
+'''
+            for scenario, expected in [('default', 'unknown'), ('absent', 'known_absent'),
+                                       ('enabled', 'established'), ('disabled', 'established'),
+                                       ('failed', 'unknown'), ('source-only', 'unknown')]:
+                with self.subTest(scenario=scenario):
+                    proc = subprocess.run(['/bin/bash', '-c', harness, 'fixture', str(INSTALLER),
+                        str(root), scenario], capture_output=True, text=True, timeout=10)
+                    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                    self.assertEqual(proc.stdout.strip().splitlines()[-1], expected)
+            self.assertFalse((root/'queried').exists())
+
 
 class NativePrerequisites(unittest.TestCase):
     def exercise(self, mode):

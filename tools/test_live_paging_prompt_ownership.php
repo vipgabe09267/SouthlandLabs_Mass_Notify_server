@@ -41,12 +41,12 @@ class PagingPromptOwnershipFixture
     const SETTINGS_JSON = PAGING_OWNERSHIP_FIXTURE_ROOT . '/active.config';
     const PENDING_SETTINGS_JSON = PAGING_OWNERSHIP_FIXTURE_ROOT . '/pending.config';
     public $generated = 0;
+    public bool $storageReadFailure = false;
     private $module;
     public function __construct()
     {
         $this->module = (new ReflectionClass(\FreePBX\modules\Slsmassnotifyserver::class))->newInstanceWithoutConstructor();
         $this->ensureOwnedDirectory(self::SOUNDS_DIR, 0750);
-        $this->ensureOwnedDirectory(self::TTS_DIR, 0750);
     }
     private function realOwnershipHelper(string $name, array $arguments): void
     {
@@ -62,36 +62,36 @@ class PagingPromptOwnershipFixture
     {
         $this->realOwnershipHelper('setPrivateOwnership', [$file]);
     }
-    private function readNativeBackupFile($path, $maxBytes, $failureMessage)
-    {
-        $method = new ReflectionMethod($this->module, 'readNativeBackupFile');
-        return $method->invoke($this->module, $path, $maxBytes, $failureMessage);
-    }
-    private function writeNativeSnapshotFile($path, $contents, $mode): void
-    {
-        $this->realOwnershipHelper('writeNativeSnapshotFile', [$path, $contents, $mode]);
-    }
-    private function unlinkNamedFileIfIdentity($path, $identity): void
-    {
-        $this->realOwnershipHelper('unlinkNamedFileIfIdentity', [$path, $identity]);
-    }
     private function isValidAnnouncementAudioCache($path): bool
     {
+        if ($this->storageReadFailure) { throw new RuntimeException('fixture-protected-read-failed'); }
         $method=new ReflectionMethod($this->module,'isValidAnnouncementAudioCache');
         return $method->invoke($this->module,$path);
     }
-    private function generateAnnouncementTtsFile($text, $settings): string
+    private function renderPagingPrompt(string $text, array $settings, string $destination, $previous): void
     {
-        paging_ownership_check(($settings['_tts_prompt_only'] ?? false) === true, 'Paging prompt retained the announcement prefix');
-        $basename = 'fixture_' . (++$this->generated);
-        // Silent fixture WAV, produced without a speech engine or PBX services.
+        $this->generated++;
+        // Only the speech worker is replaced. Exercise the real PHP cache,
+        // ownership, validation and pruning paths with a valid phone WAV.
+        paging_ownership_check($text !== '' && dirname($destination) === self::SOUNDS_DIR . '/paging',
+            'Paging renderer received an empty prompt or another storage directory.');
+        clearstatcache(true, $destination);
+        $current = @lstat($destination);
+        paging_ownership_check($previous === false ? $current === false :
+            is_array($current) && $current['dev'] === $previous['dev'] && $current['ino'] === $previous['ino'],
+            'Prompt destination identity was lost before handing it to the renderer.');
         $wav = 'RIFF' . pack('V', 52) . 'WAVEfmt ' . pack('VvvVVvv', 16, 1, 1, 8000, 16000, 2, 16)
             . 'data' . pack('V', 16) . str_repeat("\0", 16);
-        file_put_contents(self::TTS_DIR . '/' . $basename . '.wav', $wav);
-        chmod(self::TTS_DIR . '/' . $basename . '.wav', 0600);
-        return $basename;
+        $temporary = tempnam(dirname($destination), '.prompt-');
+        try {
+            paging_ownership_check(file_put_contents($temporary, $wav) === strlen($wav), 'Could not write fixture audio.');
+            $this->setPrivateOwnership($temporary);
+            paging_ownership_check(rename($temporary, $destination), 'Could not publish fixture audio.');
+        } finally {
+            if (is_file($temporary)) { unlink($temporary); }
+        }
     }
-    public function prepare(array $settings): void { $this->ensureLivePagingPrompts($settings); }
+    public function prepare(array $settings, bool $cachedOnly = false): void { $this->ensureLivePagingPrompts($settings, $cachedOnly); }
     public function assertReady(array $settings): void { $this->assertLivePagingPromptsReady($settings); }
 }
 
@@ -106,7 +106,7 @@ $disabled = $settings; $disabled['live_paging']['enabled'] = '0';
 $fixture->assertReady($disabled);
 $fixture->prepare($settings);
 $fixture->assertReady($settings);
-paging_ownership_check(glob(PagingPromptOwnershipFixture::TTS_DIR . '/fixture_*.wav') === [], 'Generated source prompts were not removed after activation');
+paging_ownership_check(!file_exists(PagingPromptOwnershipFixture::TTS_DIR), 'Paging prompt preparation allocated an unrelated announcement spool.');
 paging_ownership_check(glob(PagingPromptOwnershipFixture::SOUNDS_DIR . '/paging/.prompt-*') === [], 'Paging prompt staging files were not removed');
 $changedVoice = $settings; $changedVoice['announcement_piper_voice'] = 'changed-voice';
 paging_readiness_rejects(static function () use ($fixture, $changedVoice): void { $fixture->assertReady($changedVoice); }, 'Changed speech voice bypassed paging preparation');
@@ -211,4 +211,40 @@ unlink(PagingPromptOwnershipFixture::PENDING_SETTINGS_JSON);
 $fixture->prepare($settings);
 clearstatcache();
 paging_ownership_check(!file_exists($skipped), 'Absent pending config prevented safe cleanup');
+$fixture->storageReadFailure = true;
+try {
+    $fixture->prepare($settings, true);
+    throw new LogicException('A protected cache-read failure passed prompt preparation.');
+} catch (RuntimeException $expected) {
+    paging_ownership_check($expected->getMessage() === 'fixture-protected-read-failed',
+        'A protected cache-read failure was downgraded to unavailable audio.');
+} finally { $fixture->storageReadFailure = false; }
+$panic = ['live_paging' => ['enabled' => '0'], 'announcement_piper_voice' => 'panic-role-only-fixture',
+    'automations' => ['rules' => [['kind' => 'panic', 'enabled' => true, 'id' => 'trg_' . str_repeat('b', 24),
+        'dial_extension' => '8998', 'confirmation_prompt' => 'Confirm the fixture shortcut.']]]];
+$panicRoleNames = ['panic_' . $panic['automations']['rules'][0]['id'], 'panic_queued', 'panic_failed'];
+$panicPaths = array_intersect_key(\SLS\MassNotify\LivePagingConfig::promptFiles($panic), array_flip($panicRoleNames));
+paging_ownership_check(array_keys($panicPaths) === $panicRoleNames, 'The three phone panic prompt roles are missing.');
+$beforeFiles = glob($directory . '/*.wav'); $beforeRender = $fixture->generated;
+try {
+    $fixture->prepare($panic, true);
+    throw new LogicException('A shortcut without cached audio passed cache-only admission.');
+} catch (\FreePBX\modules\SlsPagingPromptUnavailableException $expected) {}
+paging_ownership_check($fixture->generated === $beforeRender, 'Cache-only admission launched a speech render.');
+$fixture->prepare($panic);
+$published = array_values(array_diff(glob($directory . '/*.wav'), $beforeFiles));
+$wanted = array_map(static fn($relative) => $directory . '/' . basename($relative) . '.wav', array_values($panicPaths));
+sort($wanted); sort($published);
+paging_ownership_check($fixture->generated === $beforeRender + 3 && $published === $wanted,
+    'A panic-only configuration rendered prompts for an unrelated paging menu.');
+$fixture->assertReady($panic); $fixture->prepare($panic, true);
+paging_ownership_check($fixture->generated === $beforeRender + 3, 'Playable shortcut was rendered again during cache-only validation.');
+$link = PAGING_OWNERSHIP_FIXTURE_ROOT . '/linked-panic-prompt'; link($wanted[0], $link);
+try {
+    $fixture->prepare($panic, true);
+    throw new LogicException('Cache-only admission trusted a multiply-linked shortcut prompt.');
+} catch (RuntimeException $expected) {
+    paging_ownership_check(!$expected instanceof \FreePBX\modules\SlsPagingPromptUnavailableException,
+        'Cache-only admission downgraded an unsafe prompt path to a temporary media condition.');
+} finally { unlink($link); }
 echo "Temporary paging prompts passed asterisk ownership/read access and age/reference/link-safe cache cleanup checks; no speech engine or PBX services were used.\n";
