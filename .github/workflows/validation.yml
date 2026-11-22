@@ -3,20 +3,33 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Optional full commit SHA to validate in this workflow's test environment
+        type: string
+        required: false
 permissions:
   contents: read
 concurrency:
-  group: validation-${{ github.workflow }}-${{ github.ref }}
+  group: validation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.source_sha || 'default' }}
   cancel-in-progress: true
 jobs:
   isolated-regressions:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    env:
+      SLS_CI_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+      GIT_NO_REPLACE_OBJECTS: '1'
     container:
       image: debian:12-slim
       # Required only for disposable test mount/network/PID namespaces.
       options: --privileged
     steps:
+      - name: Check requested source identity
+        run: |
+          set -eu
+          case "$SLS_CI_SOURCE_SHA" in ''|*[!0-9a-f]*) exit 1 ;; esac
+          test "${#SLS_CI_SOURCE_SHA}" -eq 40
       - name: Install test tools in the disposable runner
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -33,9 +46,22 @@ jobs:
           asterisk -V
           mkdir -p /var/lib/asterisk /var/spool/asterisk /etc/asterisk /etc/sls-mass-notify /usr/local/bin/sls_mass_notify /var/www/html/admin/modules/slsmassnotifyserver /var/www/html/sls_mass_notify
           touch /etc/freepbx.conf
+          # Deadline tests bind their own inert program below the isolated
+          # /var/lib/asterisk mount through the native FreePBX entry point.
+          if [ ! -e /usr/sbin/fwconsole ] && [ ! -L /usr/sbin/fwconsole ]; then
+            ln -s /var/lib/asterisk/bin/fwconsole /usr/sbin/fwconsole
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, pinned
         with:
+          ref: ${{ env.SLS_CI_SOURCE_SHA }}
           persist-credentials: false
+      - name: Verify checked-out source
+        run: |
+          set -eu
+          source_sha=$(git -c safe.directory="$GITHUB_WORKSPACE" -C "$GITHUB_WORKSPACE" rev-parse --verify 'HEAD^{commit}')
+          test "$source_sha" = "$SLS_CI_SOURCE_SHA"
+          printf 'Validating exact commit %s\n' "$source_sha"
+          printf 'Validated source checkout `%s`\n' "$source_sha" >> "$GITHUB_STEP_SUMMARY"
       - name: Validate source and documentation
         run: bash tools/lint_source.sh
       - name: Install pinned browser qualification tools
