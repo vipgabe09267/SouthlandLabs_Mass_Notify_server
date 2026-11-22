@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Execute the documented stock verifier against a private ephemeral publisher."""
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -13,6 +14,9 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("release_docs", ROOT / "tools/check_release_docs.py")
+release_docs = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release_docs)
 ENVIRONMENT = {
     'PATH': '/usr/bin:/bin',
     'LANG': 'C',
@@ -59,8 +63,7 @@ class FirstInstallDocumentationTests(unittest.TestCase):
                             f'Repository documentation source is unsafe: {relative}')
             self.assertTrue(stat.S_ISREG(packaged_info.st_mode) and packaged_info.st_nlink == 1,
                             f'Packaged documentation source is unsafe: {relative}')
-            self.assertEqual(packaged.read_bytes(), source.read_bytes(),
-                             f'Packaged documentation diverged from {relative}.')
+            release_docs.check_mirrors(ROOT, [relative])
 
     def test_release_security_evidence_is_portable_and_build_required(self):
         audit = (ROOT / 'docs/SECURITY_AUDIT_0.1.9.md').read_text(encoding='utf-8')
@@ -88,8 +91,7 @@ class FirstInstallDocumentationTests(unittest.TestCase):
                         and document_info.st_size <= 64 * 1024, 'Documentation source is unsafe.')
         document_bytes = document_path.read_bytes()
         self.assertEqual(len(document_bytes), document_info.st_size)
-        self.assertEqual((ROOT / 'slsmassnotifyserver/docs/FIRST_INSTALL_VERIFICATION.md').read_bytes(),
-                         document_bytes, 'Packaged first-install guide diverged from the repository guide.')
+        release_docs.check_mirrors(ROOT, ['docs/FIRST_INSTALL_VERIFICATION.md'])
         document = document_bytes.decode('utf-8')
         bootstrap = (ROOT / "tools/install_bootstrap.sh").read_text()
         verifier = bootstrap.split("bootstrap_verify() {", 1)[1].split("\nbootstrap_main()", 1)[0]

@@ -53,12 +53,7 @@ PACKAGE="${DIST_DIR}/${MODULE}-${VERSION}.tgz"
 mkdir -p "${DIST_DIR}"
 rm -f "${PACKAGE}"
 
-for document in README.md INSTALL.md CHANGELOG.md SECURITY.md PHONE_FORMATS.md LICENSE; do
-  cmp -s "${ROOT_DIR}/${document}" "${ROOT_DIR}/${MODULE}/${document}" || {
-    printf 'Root and module copies differ: %s\n' "$document" >&2
-    exit 1
-  }
-done
+command python3 -B "${ROOT_DIR}/tools/check_release_docs.py" --top-level-mirrors
 
 command python3 "${ROOT_DIR}/tools/verify_passkey_vendor.py"
 PHP_LINT_VERSION_ID="$(php -n -r 'echo PHP_VERSION_ID;')"

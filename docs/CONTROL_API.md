@@ -1,8 +1,7 @@
 # SLL Mass Notify Server Control API
 
-This document describes the unpublished `0.2.0-beta` development candidate.
-The available published release remains `0.1.9-beta` at immutable tag
-`release-0.1.9-beta`.
+This document describes the published `0.2.0-beta` release. [Release notes](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.2.0-beta).
+
 The API contract remains additive: notification
 payload schema **1** and desktop SSE protocol **2** are unchanged. Labs features
 require acceptance with actual devices, providers and clients before operational use.

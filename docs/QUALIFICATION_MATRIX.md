@@ -1,21 +1,21 @@
 # Qualification boundaries
 
 
-## Unpublished 0.2.0-beta candidate
+## Published 0.2.0-beta
 
-The `0.2.0-beta` candidate is unpublished and under private development qualification. Installer fixtures run in disposable mount, network and PID namespaces. Release qualification requires recording the full suite and native installation results against the exact installer and package hashes. Physical handset delivery requires a separate device test. Earlier 424-suite and VM results below belong to their identified historical artifacts.
+The published `0.2.0-beta` release is tagged `v0.2.0-beta` at source commit `7a3e57c91ef8fc1be409311f64d58aa7c4dff56f`. All 482 registered regression suites passed. The isolated build reproduced the exact signed package installed on the test PBX. [Release assets](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.2.0-beta).
 
-The candidate also includes concurrent delivery-inventory inspection and fault
-email confirmation, retained leases for maintenance and standalone Piper,
-publisher-policy continuity and explicit expired-retained review, exact partial
-uninstall retry, total local HTTP deadlines, Weather form decoding and phone
-visual evidence, and Dashboard card-width styling. Browser fixtures exercise the
-actual Weather form POST and narrow/wide Dashboard cards. Image fixtures render
-real private PNG/XML payloads with inert notification sinks; they do not prove
-physical handset display. AMI integration retains loopback-only client/account
-policy and does not change the shared listener bind or firewall.
+| Artifact | SHA-256 |
+| --- | --- |
+| Bootstrap | `4cb772cb82f3c2c7ce7754efcc25d3cf265ce50b388b3f00b5dd042a05b20aa1` |
+| Installer | `a8a5b30df5859a08c4ac3e36f7896abf9a585f929acba6c9e77926a889811d23` |
+| Package | `0def77274d45beae009e09aeea45271baa50bd64637019b6a5fa2da34114b693` |
+| Manifest | `a143eabade7fa40c3de6a225330a5f7bb2e8b546e69cd7ceaa72233dc8637157` |
+| Manifest signature | `ae51e45da060b09c3d6e681440f2b4c1ca63a4b666637781ad3a92a4410cc481` |
 
-`0.1.9-beta` is the published correction L, immutable reserved tag `release-0.1.9-beta`. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. Historical uppercase V0.1.9-beta and v0.1.10-beta releases remain withdrawn. No entry certifies every FreePBX layout, crash window, sustained load or delivery provider.
+The native upgrade from 0.1.9-beta completed on FreePBX 17 with Framework 17.0.34, Dashboard 17.0.5 and Apache serving both mod_php and PHP-FPM. Recovery preserved all 12 baseline phone-history records before the final upgrade. The installed release passed all 16 health checks. The Framework, Dashboard and SLL module signatures verified. Both the Framework menu warning and previous installation-failure notice cleared. The configuration and encryption key matched the preinstall copies, all five scheduled jobs were present once, and AMI listened on loopback.
+
+Chromium loaded all 13 local stylesheets and 13 local scripts on the administrator login page. Browser fixtures exercised the Weather form and Dashboard layout. Phone image fixtures rendered PNG and XML. Physical handset audio and image delivery require a device test. Other FreePBX layouts, remote providers and long-running workloads require their own validation.
 
 ## Published reserved-tag 0.1.9-beta correction — 2026-11-04
 

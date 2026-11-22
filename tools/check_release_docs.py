@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import sys
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,33 @@ def release_state(record, version):
     raise ValueError("Published documentation must match the release; unpublished candidates must follow it.")
 
 
+def check_mirrors(root, names):
+    """A published source tree keeps the packaged manuals from its signed install."""
+    different = []
+    for name in names:
+        source = (root / name).read_bytes()
+        packaged = (root / "slsmassnotifyserver" / name).read_bytes()
+        if source != packaged:
+            different.append((name, hashlib.sha256(packaged).hexdigest()))
+    if not different:
+        return
+
+    version = ET.parse(root / "slsmassnotifyserver/module.xml").findtext("version")
+    state = json.loads((root / "docs/release-status.json").read_bytes())
+    if release_state(state, version) == "published":
+        # This receipt records manual hashes read from the authenticated release
+        # archive. Bind it to the installer, which pins that exact archive.
+        receipt = root / "tools/published-doc-snapshots" / (version + ".json")
+        if receipt.is_file():
+            pins = json.loads(receipt.read_bytes())
+            installer = hashlib.sha256((root / "tools/install_release.sh").read_bytes()).hexdigest()
+            if installer == pins["installer_sha256"]:
+                different = [(name, digest) for name, digest in different
+                             if pins["files"].get(name) != digest]
+    if different:
+        raise ValueError("Packaged documentation differs: " + different[0][0])
+
+
 def check(root=ROOT):
     record = json.loads((root / "docs/release-status.json").read_text())
     version = ET.parse(root / "slsmassnotifyserver/module.xml").findtext("version")
@@ -52,16 +80,10 @@ def check(root=ROOT):
         if (version not in intro or re.search(r"\b" + status + r"\b", intro) is None
                 or (status == "published" and re.search(r"\bunpublished\b", intro))):
             raise ValueError("Current release state is missing from " + name)
-    for name in [
-        "release-status.json",
-        "QUALIFICATION_MATRIX.md",
-        "openapi.json",
-        "schemas/notification.schema.json",
-    ]:
-        if (root / "docs" / name).read_bytes() != (
-            root / "slsmassnotifyserver/docs" / name
-        ).read_bytes():
-            raise ValueError("Packaged documentation differs: " + name)
+    check_mirrors(root, [
+        "docs/release-status.json", "docs/QUALIFICATION_MATRIX.md",
+        "docs/openapi.json", "docs/schemas/notification.schema.json",
+    ])
     readme = (root / "README.md").read_text()
     digest = hashlib.sha256(
         (root / "tools/install_bootstrap.sh").read_bytes()
@@ -88,6 +110,12 @@ def check(root=ROOT):
 
 if __name__ == "__main__":
     try:
-        check()
+        if sys.argv[1:] == ["--top-level-mirrors"]:
+            check_mirrors(ROOT, ["README.md", "INSTALL.md", "CHANGELOG.md", "SECURITY.md",
+                                 "PHONE_FORMATS.md", "LICENSE"])
+        elif len(sys.argv) == 1:
+            check()
+        else:
+            raise ValueError("Usage: check_release_docs.py [--top-level-mirrors]")
     except (OSError, ValueError, ET.ParseError) as error:
         raise SystemExit(str(error))

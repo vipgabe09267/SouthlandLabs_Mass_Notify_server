@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.2.0-beta — unpublished development
+## 0.2.0-beta
 
-This candidate includes installer, delivery-health and Weather fixes. It is undergoing private qualification. The published prerelease remains 0.1.9-beta.
+This release fixes FreePBX 17 installation, recovery and Apply Config issues, repeated delivery-inventory fault emails, and Weather zone saves. [Qualification results](docs/QUALIFICATION_MATRIX.md).
 
 - Stopping the phone collector records the disconnect immediately and preserves closed phone history. The dashboard shows when the collector has disconnected.
 - Framework updates selected in Module Admin show the minimum and tested Framework versions before confirmation. Mass Notify uses FreePBX’s native menu registration.

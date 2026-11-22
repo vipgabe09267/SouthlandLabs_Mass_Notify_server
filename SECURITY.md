@@ -1,4 +1,4 @@
-> **Development candidate.** `0.2.0-beta` is undergoing private qualification. The published prerelease remains `0.1.9-beta`. Historical results below apply to the release indicated.
+> The current published prerelease is **0.2.0-beta**. Historical test results apply to the release named in each section.
 
 # Security policy
 
@@ -14,7 +14,7 @@ Do not publish configuration, API keys, passwords, authenticator seeds, AMI cred
 
 ## Supported releases
 
-The latest available published prerelease is currently `0.1.9-beta`, immutable reserved tag `release-0.1.9-beta`. Its signed assets, public readback and exact-tag provenance were verified. Uppercase V0.1.9-beta and v0.1.10-beta releases remain withdrawn historical evidence. A signature authenticates bytes; it does not certify security, performance or delivery reliability.
+The supported prerelease is currently `0.2.0-beta`, published under tag `v0.2.0-beta`. Verify the signed manifest and the installer and package hashes before use. [Signed release assets](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.2.0-beta).
 
 The earlier uppercase V0.1.9-beta release/downloads and the version-out-of-scope v0.1.10-beta release/downloads were withdrawn on 2026-11-03 and 2026-11-04 respectively. The MFA/history recovery fixes are retained. Only proved monotonic TOTP-counter and associated operator-access revision progress can enter separate durable targets; every other setting remains exact. Original snapshots, write intentions, ciphertext evidence and authenticated carrier records remain protected. Unknown missing history still requires matching evidence or a valid explicit administrator decision. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. J/H/G qualification below remains historical, separate from L. The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
 

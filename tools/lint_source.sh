@@ -2,12 +2,7 @@
 # Read-only checks shared by CI and release preparation. Never bootstrap FreePBX.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for document in README.md INSTALL.md CHANGELOG.md SECURITY.md PHONE_FORMATS.md LICENSE; do
-  cmp -s "$ROOT_DIR/$document" "$ROOT_DIR/slsmassnotifyserver/$document" || {
-    printf 'Documentation copies differ: %s\n' "$document" >&2
-    exit 1
-  }
-done
+python3 -B "$ROOT_DIR/tools/check_release_docs.py" --top-level-mirrors
 python3 -B "$ROOT_DIR/tools/verify_passkey_vendor.py"
 PHP_LINT_VERSION_ID="$(php -n -r 'echo PHP_VERSION_ID;')"
 while IFS= read -r -d '' file; do

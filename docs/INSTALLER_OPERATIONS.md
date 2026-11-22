@@ -1,6 +1,6 @@
 # Installer diagnostics, recovery and qualification
 
-The working candidate is **0.2.0-beta**. Its installer changes are under private qualification. The available published prerelease remains **0.1.9-beta**, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused. Preserve every failed transaction and authenticated original artifact; generic protocol examples below never authorize withdrawn assets.
+The published release is **0.2.0-beta**. Use the signed installer for tag `v0.2.0-beta`. For recovery, retain the failed transaction and the original authenticated assets. [Release downloads](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.2.0-beta).
 
 The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. The naming correction retains existing MFA/history behavior. Do not overwrite settings, reset MFA or replace the ledger; preserve the recorded administrator decision with the transaction evidence. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. See [qualification boundaries](QUALIFICATION_MATRIX.md).
 
@@ -325,7 +325,7 @@ Recovery authenticates the saved installer, package and executable helpers
 against publisher evidence. The withdrawn H `0.1.9-beta` installer historically supplied recovery
 helpers for earlier unfinished transactions, including an earlier withdrawn package
 with the same version. That history does not authorize its use for the currently
-blocked target. The published reserved-tag `0.1.9-beta` installer retains corrected recovery logic
+blocked target. The published `0.2.0-beta` installer retains corrected recovery logic
 and can provide its own independently authenticated carrier. Carrier installer and package are authenticated separately and
 retained in a private `recovery-carrier.*` directory. The original signed
 artifacts, approvals and operational baseline remain the restoration authority.
@@ -596,7 +596,7 @@ artifact hashes, pinned voices, complete compatible wheel resolution and officia
 stock package signatures. `--print-environment` prints shell-quoted installer
 paths for the reviewed bundle. The installer repeats its own verification.
 
-The unpublished 0.2.0-beta preparation tool requires both Framework and Dashboard
+The 0.2.0-beta preparation tool requires both Framework and Dashboard
 stock packages. Pass `--framework-version VERSION --dashboard-version VERSION`
 to check the bundle against the exact versions needed by a target PBX. Without
 both requirements, successful verification describes the supplied packages; it
@@ -668,7 +668,7 @@ Earlier installers can stop with `Previous runtime changed after preflight; no a
 
 Current installers recognize completed or partially completed quarantine only when the protected `runtime-cache-recovery/inventory.json` matches the original approval and the saved cache bytes match their recorded hashes. Each check still verifies authenticated source files and rejects unknown runtime files, unsafe recovery entries and changed caches. Quarantined bytecode never receives execution or rollback approval. Completed quarantine evidence is left intact.
 
-Keep the publisher-authenticated installer and package recorded in the retained transaction. The published reserved-tag `0.1.9-beta` repair installer can supply its own authenticated recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace older signed evidence or approve arbitrary live files. Do not substitute retired uppercase V0.1.9-beta or withdrawn v0.1.10-beta downloads. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
+Keep the publisher-authenticated installer and package recorded in the retained transaction. The `0.2.0-beta` repair installer can supply its own authenticated recovery carrier as described in [Interrupted installations](#interrupted-installations); it does not replace older signed evidence or approve arbitrary live files. Do not substitute retired uppercase V0.1.9-beta or withdrawn v0.1.10-beta downloads. After recovery, run the intended target release as a new installation. Missing or changed quarantine evidence requires review rather than manual cache deletion or new live-file approvals.
 
 ## Included offline removal
 

@@ -6,7 +6,7 @@
 
 Send phone pages, desktop alerts, email, SMS and webhooks from FreePBX. Schedule announcements, publish weather alerts, and see results for each destination.
 
-Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. This branch develops **0.2.0-beta**, an **unpublished** candidate. Private development checks cover the installer on selected PBX configurations. The available published prerelease remains **0.1.9-beta**, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused.
+Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 12 (amd64)**. The current beta release is **0.2.0-beta**. [Release notes and signed downloads](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.2.0-beta).
 
 > Beta software. Do not rely on it for critical or urgent notifications. Test your phones, network and delivery providers before use.
 
@@ -14,35 +14,27 @@ Built by [Southland Labs](https://southlandlabs.dev) for **FreePBX 17 on Debian 
 
 ## Install or update
 
-**0.1.9-beta is published with signed assets and verified public downloads/provenance.** The checksum-pinned commands below use its immutable lowercase `release-0.1.9-beta` tag. Never substitute retired uppercase `V0.1.9-beta` or withdrawn `v0.1.10-beta` downloads.
+Use the checksum-pinned bootstrap below. For an existing installation, use `--upgrade` so the bootstrap verifies the release against your installed publisher policy. Preserve any failed transaction directory for recovery.
 
-Use `--upgrade` for an existing installation so its publisher policy, keys and revocations remain authoritative. Preserve settings and every failed transaction directory. The software version remains 0.1.9-beta; the updater does not automatically replace an equal version. The new reserved tag and signed artifact hashes distinguish this correction from the retired uppercase release.
-
-Fresh installation:
+**Fresh installation**
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/release-0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6  sls-bootstrap.sh' | sha256sum --check &&
-sudo bash ./sls-bootstrap.sh 0.1.9-beta
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.2.0-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '4cb772cb82f3c2c7ce7754efcc25d3cf265ce50b388b3f00b5dd042a05b20aa1  sls-bootstrap.sh' | sha256sum --check &&
+sudo bash ./sls-bootstrap.sh 0.2.0-beta
 ```
 
-Existing-installation upgrade or repair:
+**Upgrade an existing installation**
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/release-0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6  sls-bootstrap.sh' | sha256sum --check &&
-sudo bash ./sls-bootstrap.sh 0.1.9-beta --upgrade
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.2.0-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '4cb772cb82f3c2c7ce7754efcc25d3cf265ce50b388b3f00b5dd042a05b20aa1  sls-bootstrap.sh' | sha256sum --check &&
+sudo bash ./sls-bootstrap.sh 0.2.0-beta --upgrade
 ```
 
-The corrected bootstrap selects only the reserved `release-0.1.9-beta` alias for this version by default while retained historical evidence remains verifiable. `--upgrade` authenticates existing publisher policy and preserves keys and revocations; fresh bootstrap refuses established installations. Eligible unattended Lite installation requires explicit `--lite` after `--upgrade` when upgrading.
-
-The MFA/history recovery fixes are retained. Only proved monotonic TOTP-counter and associated operator-access revision progress can enter separate durable targets; every other setting remains exact. Original snapshots, write intentions, ciphertext evidence and authenticated carrier records remain protected. Unknown missing history still requires matching evidence or a valid explicit administrator decision. L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. J/H/G qualification below remains historical, separate from L. See the [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
-
-The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts. See [qualification boundaries](docs/QUALIFICATION_MATRIX.md).
-
-Historical H passed 423 isolated suites, four native install/rollback cases and three installed journal profiles before withdrawal. Earlier G 423/18/360 and withdrawn J 424/nine-native results remain separate historical evidence; they do not qualify the new reserved-tag 0.1.9-beta correction or establish recovery of the reported target.
+For eligible unattended Lite installations, explicitly add `--lite` after the version and any `--upgrade` option. For interrupted installations, preserve the transaction path printed by the installer and follow the [recovery guide](docs/INSTALLER_OPERATIONS.md#interrupted-installations).
 
 ## Requirements
 
@@ -91,7 +83,7 @@ These commands manage SLL; they do not reboot the PBX or restart Asterisk. Add `
 
 ## Repair and recovery
 
-Use the published reserved-tag `release-0.1.9-beta` assets for authenticated repair or upgrade, preserving publisher policy and failed transactions. Follow the [installer recovery guide](docs/INSTALLER_OPERATIONS.md). Never reset MFA, delete evidence or alter history to bypass a check. The immutable tag and signed package retain their prepublication documentation snapshot. This published-status update belongs to a separate main documentation commit; it changes no runtime or release bytes and does not move the tag.
+For authenticated repair, keep the signed assets, publisher policy and failed transaction directory. The installer checks configuration changes and retained history before restoring service. [Recovery procedure](docs/INSTALLER_OPERATIONS.md#interrupted-installations).
 
 Export configuration under **General Settings > Config Backup**. Keep the export passphrase separately. Native FreePBX backups also include module recovery data; protect the whole backup archive. See [backup and restore](docs/RECOVERY.md).
 

@@ -24,7 +24,7 @@ def release_note(record, version):
     return f"Published {version} release. "
 
 
-def description():
+def description(documentation=ROOT / "docs"):
     code = 'require $argv[1]; $p=\\SLS\\MassNotify\\ApiSecurity::issue(["name"=>"Schema discovery","scopes"=>\\SLS\\MassNotify\\ApiSecurity::SCOPES,"audience"=>["unrestricted"=>true]])["credential"]; echo json_encode(\\SLS\\MassNotify\\ControlContract::capabilities($p),JSON_THROW_ON_ERROR);'
     capabilities = json.loads(
         subprocess.check_output(
@@ -38,7 +38,7 @@ def description():
         )
     )
     version = ET.parse(ROOT / "slsmassnotifyserver/module.xml").findtext("version")
-    release = json.loads((ROOT / "docs/release-status.json").read_text())
+    release = json.loads((documentation / "release-status.json").read_text())
     release_status = release_note(release, version)
     error = {
         "description": "Request refused or outcome could not be confirmed. Check the error code before retrying.",
@@ -492,13 +492,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    api, notification = description()
-    for name, value in [
-        ("openapi.json", api),
-        ("schemas/notification.schema.json", notification),
-    ]:
-        body = json.dumps(value, indent=2, sort_keys=True) + "\n"
-        for base in [ROOT / "docs", ROOT / "slsmassnotifyserver/docs"]:
+    for base in [ROOT / "docs", ROOT / "slsmassnotifyserver/docs"]:
+        api, notification = description(base)
+        for name, value in [
+            ("openapi.json", api),
+            ("schemas/notification.schema.json", notification),
+        ]:
+            body = json.dumps(value, indent=2, sort_keys=True) + "\n"
             path = base / name
             if args.check:
                 if not path.is_file() or path.read_text() != body:

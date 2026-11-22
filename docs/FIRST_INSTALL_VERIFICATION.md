@@ -1,6 +1,6 @@
-# Verify the published reserved-tag 0.1.9-beta correction
+# Verify 0.2.0-beta before installation
 
-The software remains **0.1.9-beta**, now the available published prerelease, immutable reserved tag `release-0.1.9-beta`. Retired uppercase `V0.1.9-beta` and withdrawn `v0.1.10-beta` releases remain historical evidence; their downloads must not be reused. Do not execute retained installers or bundles from the withdrawn tags.
+Use tag `v0.2.0-beta`. The signed release includes the versioned module archive, installer, manifest and signature. [GitHub release](https://github.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/releases/tag/v0.2.0-beta).
 
 ## Publisher identity and retained evidence
 
@@ -14,25 +14,19 @@ MCowBQYDK2VwAyEAFMDOgOaBGcaI8d+v0w/NX4RbwGlBsoktNc2V2F8UkUQ=
 
 DER SHA-256 fingerprint: `f2101cc51ecd5fdda7104d7e63ec166928c8985a0b3870f866849f5df6819bbd`.
 
-The corrected bootstrap SHA-256 is `0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6`. Verify its exact published reserved-tag file before considering the separate [installation or upgrade command](../README.md#install-or-update):
+The bootstrap SHA-256 is `4cb772cb82f3c2c7ce7754efcc25d3cf265ce50b388b3f00b5dd042a05b20aa1`. Verify it before running the appropriate command for a fresh installation or upgrade. [Installation commands](../README.md#install-or-update).
 
 ```bash
-# Verify the published immutable reserved tag before running the bootstrap.
+# Verify the tagged bootstrap.
 curl --fail --location --proto '=https' --tlsv1.2 -o sls-bootstrap.sh \
-  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/release-0.1.9-beta/tools/install_bootstrap.sh &&
-printf '%s\n' '0ef425a966647e8db8ebbd9c6a3bc0ae4586c96db8fd0ce50f3089b42217edb6  sls-bootstrap.sh' | sha256sum --check
+  https://raw.githubusercontent.com/vipgabe09267/SouthlandLabs_Mass_Notify_server/v0.2.0-beta/tools/install_bootstrap.sh &&
+printf '%s\n' '4cb772cb82f3c2c7ce7754efcc25d3cf265ce50b388b3f00b5dd042a05b20aa1  sls-bootstrap.sh' | sha256sum --check
 ```
 
-A matching bootstrap checksum does not establish release availability or package qualification. The new installer, `slsmassnotifyserver-0.1.9-beta.tgz`, manifest and signature must bind lowercase `release-0.1.9-beta` and the new exact hashes; historical uppercase packages share the filename but have different signed bytes. Existing installations use `--upgrade` to preserve publisher policy, keys and revocations.
-
-L passed 424/424 independent isolated suites with required browser/schema checks and both bounded native cases: fresh 0.1.9 installation and explicit authenticated 0.1.10-to-0.1.9 PHP-FPM/HTTPS correction. Public assets and exact-tag provenance were verified. J/H/G qualification below remains historical, separate from L. See [qualification boundaries](QUALIFICATION_MATRIX.md).
+The bootstrap verifies the signed manifest and installer. The installer verifies `slsmassnotifyserver-0.2.0-beta.tgz` against that manifest. Existing installations use `--upgrade` to verify against their protected publisher policy. The exact release hashes are recorded in the [qualification matrix](QUALIFICATION_MATRIX.md).
 
 ## Interrupted installation
 
 Preserve the exact failed transaction directory, logs, signed assets, protected snapshots, live settings, keyring and publisher trust. A `transaction-sequence` counter is not a recovery directory. Do not delete evidence, rewrite a baseline or replace the operational ledger to make recovery pass.
 
-The user reports that 0.1.10-beta installed successfully, passed 16 doctor checks and preserved MFA/settings/keys after the administrator explicitly accepted 21 missing history records. This is user-reported, not independent target qualification of the new 0.1.9-beta artifacts.
-
-The replacement implements narrow preservation of increasing TOTP counters and their associated operator-access revision through separate durable recovery targets. Every other setting remains exact, original snapshots and intentions stay unchanged, and unproved changes remain conflicts. Crash retries and later valid MFA advancement preserve the highest validated counters; never reset them or remove an unfinished settings journal to force recovery.
-
-The [installer recovery protocol](INSTALLER_OPERATIONS.md#interrupted-installations) explains evidence and review. The published reserved-tag installer can provide its own independently authenticated carrier. J native recovery used that fixture's full matching backup. The separate user-reported target success and administrator acceptance above do not qualify the new naming correction on that target.
+The recovery installer preserves increasing MFA replay counters and checks all other settings and retained phone history. If it requests backup evidence or an administrator decision, preserve the original transaction and follow the [recovery procedure](INSTALLER_OPERATIONS.md#interrupted-installations).

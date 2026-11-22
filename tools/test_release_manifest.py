@@ -92,6 +92,34 @@ class ReleaseDocumentationTests(unittest.TestCase):
         (self.root / 'slsmassnotifyserver/docs/release-status.json').write_text('{}')
         with self.assertRaisesRegex(ValueError, 'Packaged documentation'): self.check()
 
+    def test_published_docs_can_identify_a_frozen_installer_and_packaged_guide(self):
+        guide = 'docs/QUALIFICATION_MATRIX.md'
+        frozen = b'This is the original guide.'
+        packaged = self.root / 'slsmassnotifyserver' / guide
+        packaged.write_bytes(frozen)
+        installer = self.root / 'tools/install_release.sh'
+        installer.write_bytes(b'authentic installer fixture')
+        snapshots = self.root / 'tools/published-doc-snapshots'
+        snapshots.mkdir()
+        receipt = {'installer_sha256': hashlib.sha256(installer.read_bytes()).hexdigest(),
+                   'files': {guide: hashlib.sha256(frozen).hexdigest()}}
+        (snapshots / (self.version + '.json')).write_text(json.dumps(receipt))
+        with self.subTest('published main keeps authenticated package docs'):
+            self.check()
+        with self.subTest('changed package bytes fail'):
+            packaged.write_bytes(b'other file')
+            with self.assertRaisesRegex(ValueError, 'Packaged documentation'): self.check()
+        with self.subTest('different installer cannot reuse old receipt'):
+            packaged.write_bytes(frozen)
+            installer.write_bytes(b'different installer')
+            with self.assertRaisesRegex(ValueError, 'Packaged documentation'): self.check()
+        with self.subTest('unpublished checkout requires matching copies'):
+            installer.write_bytes(b'authentic installer fixture')
+            self.record.update(published_version='0.1.8-beta', candidate_status='unpublished')
+            self.write_state()
+            packaged.write_bytes(frozen)
+            with self.assertRaisesRegex(ValueError, 'Packaged documentation'): self.check()
+
     def test_rejects_stale_bootstrap_and_security_version(self):
         (self.root / 'tools/install_bootstrap.sh').write_bytes(b'changed')
         with self.assertRaisesRegex(ValueError, 'bootstrap checksum'): self.check()
